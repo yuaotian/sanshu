@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
   pull_request:
-    branches: [ "main" ]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -56,4 +56,3 @@ jobs:
 
       - name: Clippy (Linting)
         run: cargo clippy -- -D warnings
-

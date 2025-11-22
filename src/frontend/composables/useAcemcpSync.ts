@@ -1,6 +1,6 @@
+import type { ProjectIndexStatus, ProjectsIndexStatus } from '../types/tauri'
 import { invoke } from '@tauri-apps/api/core'
-import { ref, computed, onUnmounted } from 'vue'
-import type { IndexStatus, ProjectIndexStatus, ProjectsIndexStatus } from '../types/tauri'
+import { computed, onUnmounted, ref } from 'vue'
 
 // 全局状态
 const allProjectsStatus = ref<ProjectsIndexStatus>({ projects: {} })
@@ -244,4 +244,3 @@ export function useAcemcpSync() {
     setCurrentProject,
   }
 }
-

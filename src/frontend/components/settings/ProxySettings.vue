@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
 import { useMessage } from 'naive-ui'
+import { onMounted, ref, watch } from 'vue'
 import { useProxyConfig } from '../../composables/useProxyConfig'
 
 const message = useMessage()
@@ -320,4 +320,3 @@ function applyPresetPort(port: number) {
   background-color: rgba(255, 255, 255, 0.05);
 }
 </style>
-

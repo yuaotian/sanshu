@@ -59,6 +59,9 @@ const treeData = computed<IndexTreeNode[]>(() => {
     insertPath(result, file.path, file.status)
   }
 
+  // 构建完成后，为目录节点计算聚合状态并更新标签文案
+  aggregateDirectoryStats(result)
+
   return result
 })
 
@@ -98,6 +101,49 @@ function insertPath(nodes: IndexTreeNode[], path: string, status: FileIndexStatu
       current = node.children
     }
   })
+}
+
+// 计算目录节点的聚合状态，并更新目录标签（显示已索引/总文件数）
+function aggregateDirectoryStats(nodes: IndexTreeNode[]) {
+  nodes.forEach((node) => {
+    aggregateNode(node)
+  })
+}
+
+function aggregateNode(node: IndexTreeNode): { total: number, indexed: number } {
+  if (!node.children || node.children.length === 0) {
+    const total = node.status ? 1 : 0
+    const indexed = node.status === 'indexed' ? 1 : 0
+    return { total, indexed }
+  }
+
+  let total = 0
+  let indexed = 0
+
+  for (const child of node.children) {
+    const childAgg = aggregateNode(child)
+    total += childAgg.total
+    indexed += childAgg.indexed
+  }
+
+  if (total > 0) {
+    const baseLabel = node.label.split(' · ')[0]
+    let suffix: string
+
+    if (indexed === 0) {
+      suffix = '未索引'
+    }
+    else if (indexed === total) {
+      suffix = `全部已索引 (${indexed})`
+    }
+    else {
+      suffix = `${indexed}/${total} 已索引`
+    }
+
+    node.label = `${baseLabel} · ${suffix}`
+  }
+
+  return { total, indexed }
 }
 
 // 加载指定项目的文件索引状态
@@ -236,10 +282,16 @@ function handleResyncClick() {
 
         <!-- 手动重新同步控制 -->
         <div class="pt-2 border-t border-gray-200 flex items-center justify-between gap-3">
-          <div class="text-[11px] text-gray-500 leading-snug">
+          <div class="text-[11px] text-gray-500 leading-snug space-y-0.5">
             <div>重新同步会在后台执行，不会阻塞当前对话。</div>
             <div v-if="projectStatus?.last_success_time">
               上次成功：{{ projectStatus.last_success_time }}
+            </div>
+            <div v-if="projectStatus?.failed_files">
+              失败文件数：<span class="text-red-500">{{ projectStatus.failed_files }}</span>
+            </div>
+            <div v-if="projectStatus?.last_error" class="text-red-500">
+              最近错误：{{ projectStatus.last_error }}
             </div>
           </div>
           <n-button
@@ -260,5 +312,3 @@ function handleResyncClick() {
     </n-drawer-content>
   </n-drawer>
 </template>
-
-

@@ -157,7 +157,7 @@
    ```bash
    # 安装前端依赖
    pnpm install
-   
+
    # 构建项目
    pnpm build
    cargo build --release
@@ -167,7 +167,7 @@
    ```bash
    # 运行安装脚本 (Linux/macOS)
    ./install.sh
-   
+
    # Windows
    ./install-windows.ps1
    ```

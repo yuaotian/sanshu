@@ -1,16 +1,16 @@
 <script setup lang="ts">
 import { useMessage } from 'naive-ui'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useAcemcpSync } from '../composables/useAcemcpSync'
 import { setupExitWarningListener } from '../composables/useExitWarning'
 import { useKeyboard } from '../composables/useKeyboard'
-import { useVersionCheck } from '../composables/useVersionCheck'
-import { useAcemcpSync } from '../composables/useAcemcpSync'
 import { useMcpToolsReactive } from '../composables/useMcpTools'
+import { useVersionCheck } from '../composables/useVersionCheck'
 import UpdateModal from './common/UpdateModal.vue'
 import LayoutWrapper from './layout/LayoutWrapper.vue'
+import McpIndexStatusDrawer from './popup/McpIndexStatusDrawer.vue'
 import McpPopup from './popup/McpPopup.vue'
 import PopupHeader from './popup/PopupHeader.vue'
-import McpIndexStatusDrawer from './popup/McpIndexStatusDrawer.vue'
 
 interface AppConfig {
   theme: string
