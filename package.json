@@ -1,4 +1,14 @@
 {
+  "author": "煎饼果子(86)",
+  "license": "MIT",
+  "homepage": "https://github.com/yuaotian/sansu",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yuaotian/sansu.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yuaotian/sansu/issues"
+  },
   "name": "sansu",
   "type": "module",
   "version": "0.0.1",
