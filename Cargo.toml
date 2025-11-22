@@ -60,6 +60,9 @@ hex = "0.4"
 ignore = "0.4"
 encoding_rs = "0.8"
 globset = "0.4"
+notify = "6.0"
+notify-debouncer-full = "0.3"
+once_cell = "1.19"
 
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }

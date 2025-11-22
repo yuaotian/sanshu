@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use encoding_rs::{GBK, WINDOWS_1252, UTF_8};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
-use super::types::{AcemcpRequest, AcemcpConfig};
+use super::types::{AcemcpRequest, AcemcpConfig, ProjectIndexStatus, ProjectsIndexStatus, IndexStatus};
 use crate::log_debug;
 use crate::log_important;
 
@@ -24,10 +24,10 @@ use crate::log_important;
 pub struct AcemcpTool;
 
 impl AcemcpTool {
-    /// 执行代码库搜索
+    /// 执行代码库搜索（仅搜索，不触发索引）
     pub async fn search_context(request: AcemcpRequest) -> Result<CallToolResult, McpError> {
         log_important!(info,
-            "Acemcp搜索请求: project_root_path={}, query={}",
+            "Acemcp搜索请求（仅搜索模式）: project_root_path={}, query={}",
             request.project_root_path, request.query
         );
 
@@ -42,11 +42,80 @@ impl AcemcpTool {
             acemcp_config.base_url = Some(normalized);
         }
 
-        // 执行：增量索引（含批量上传）+ 检索
-        match index_and_search(&acemcp_config, &request.project_root_path, &request.query).await {
-            Ok(text) => Ok(CallToolResult { content: vec![Content::text(text)], is_error: None }),
-            Err(e) => Ok(CallToolResult { content: vec![Content::text(format!("Acemcp执行失败: {}", e))], is_error: Some(true) })
+        // 首次搜索时自动启动文件监听（如果尚未启动）
+        let watcher_manager = super::watcher::get_watcher_manager();
+        if !watcher_manager.is_watching(&request.project_root_path) {
+            log_debug!("首次搜索，尝试启动文件监听");
+            if let Err(e) = watcher_manager.start_watching(
+                request.project_root_path.clone(),
+                acemcp_config.clone()
+            ).await {
+                log_debug!("启动文件监听失败（不影响搜索）: {}", e);
+            }
         }
+
+        // 执行：仅搜索（不触发索引）
+        match search_only(&acemcp_config, &request.project_root_path, &request.query).await {
+            Ok(text) => Ok(CallToolResult { content: vec![Content::text(text)], is_error: None }),
+            Err(e) => Ok(CallToolResult { content: vec![Content::text(format!("Acemcp搜索失败: {}", e))], is_error: Some(true) })
+        }
+    }
+
+    /// 执行索引更新（向后兼容的索引+搜索一体化接口）
+    pub async fn index_and_search_legacy(request: AcemcpRequest) -> Result<CallToolResult, McpError> {
+        log_important!(info,
+            "Acemcp索引+搜索请求（兼容模式）: project_root_path={}, query={}",
+            request.project_root_path, request.query
+        );
+
+        // 读取配置
+        let mut acemcp_config = Self::get_acemcp_config()
+            .await
+            .map_err(|e| McpError::internal_error(format!("获取acemcp配置失败: {}", e), None))?;
+
+        // 规范化 base_url（缺协议时补 http://），并去除末尾斜杠
+        if let Some(base) = &acemcp_config.base_url {
+            let normalized = normalize_base_url(base);
+            acemcp_config.base_url = Some(normalized);
+        }
+
+        // 先执行索引更新
+        match update_index(&acemcp_config, &request.project_root_path).await {
+            Ok(_blob_names) => {
+                // 索引成功后执行搜索
+                match search_only(&acemcp_config, &request.project_root_path, &request.query).await {
+                    Ok(text) => Ok(CallToolResult { content: vec![Content::text(text)], is_error: None }),
+                    Err(e) => Ok(CallToolResult { content: vec![Content::text(format!("搜索失败: {}", e))], is_error: Some(true) })
+                }
+            }
+            Err(e) => Ok(CallToolResult { content: vec![Content::text(format!("索引更新失败: {}", e))], is_error: Some(true) })
+        }
+    }
+
+    /// 手动触发索引更新（供 Tauri 命令调用）
+    pub async fn trigger_index_update(project_root_path: String) -> Result<String> {
+        log_important!(info, "手动触发索引更新: project_root_path={}", project_root_path);
+
+        let acemcp_config = Self::get_acemcp_config().await?;
+
+        match update_index(&acemcp_config, &project_root_path).await {
+            Ok(blob_names) => {
+                Ok(format!("索引更新成功，共 {} 个 blobs", blob_names.len()))
+            }
+            Err(e) => {
+                Err(anyhow::anyhow!("索引更新失败: {}", e))
+            }
+        }
+    }
+
+    /// 获取项目索引状态（供 Tauri 命令调用）
+    pub fn get_index_status(project_root_path: String) -> ProjectIndexStatus {
+        get_project_status(&project_root_path)
+    }
+
+    /// 获取所有项目的索引状态（供 Tauri 命令调用）
+    pub fn get_all_index_status() -> ProjectsIndexStatus {
+        load_projects_status()
     }
 
     /// 获取acemcp配置
@@ -54,7 +123,7 @@ impl AcemcpTool {
         // 从配置文件中读取acemcp配置
         let config = crate::config::load_standalone_config()
             .map_err(|e| anyhow::anyhow!("读取配置文件失败: {}", e))?;
-        
+
         Ok(AcemcpConfig {
             base_url: config.mcp_config.acemcp_base_url,
             token: config.mcp_config.acemcp_token,
@@ -167,6 +236,74 @@ fn home_projects_file() -> PathBuf {
     let data_dir = home.join(".acemcp").join("data");
     let _ = fs::create_dir_all(&data_dir);
     data_dir.join("projects.json")
+}
+
+/// 获取项目索引状态文件路径
+fn home_projects_status_file() -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let data_dir = home.join(".acemcp").join("data");
+    let _ = fs::create_dir_all(&data_dir);
+    data_dir.join("projects_status.json")
+}
+
+/// 读取所有项目的索引状态
+fn load_projects_status() -> ProjectsIndexStatus {
+    let status_path = home_projects_status_file();
+    if status_path.exists() {
+        let data = fs::read_to_string(&status_path).unwrap_or_default();
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        ProjectsIndexStatus::default()
+    }
+}
+
+/// 保存所有项目的索引状态
+fn save_projects_status(status: &ProjectsIndexStatus) -> Result<()> {
+    let status_path = home_projects_status_file();
+    let data = serde_json::to_string_pretty(status)?;
+    fs::write(status_path, data)?;
+    Ok(())
+}
+
+/// 更新指定项目的索引状态
+fn update_project_status<F>(project_root: &str, updater: F) -> Result<()>
+where
+    F: FnOnce(&mut ProjectIndexStatus),
+{
+    let mut all_status = load_projects_status();
+    let normalized_root = PathBuf::from(project_root)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(project_root))
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    let project_status = all_status.projects
+        .entry(normalized_root.clone())
+        .or_insert_with(|| {
+            let mut status = ProjectIndexStatus::default();
+            status.project_root = normalized_root;
+            status
+        });
+
+    updater(project_status);
+    save_projects_status(&all_status)?;
+    Ok(())
+}
+
+/// 获取指定项目的索引状态
+fn get_project_status(project_root: &str) -> ProjectIndexStatus {
+    let all_status = load_projects_status();
+    let normalized_root = PathBuf::from(project_root)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(project_root))
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    all_status.projects.get(&normalized_root).cloned().unwrap_or_else(|| {
+        let mut status = ProjectIndexStatus::default();
+        status.project_root = normalized_root;
+        status
+    })
 }
 
 /// 读取文件内容，支持多种编码检测
@@ -385,7 +522,9 @@ fn collect_blobs(root: &str, text_exts: &[String], exclude_patterns: &[String], 
     Ok(out)
 }
 
-async fn index_and_search(config: &AcemcpConfig, project_root_path: &str, query: &str) -> anyhow::Result<String> {
+/// 只执行索引更新，不进行搜索
+/// 返回值：成功上传的 blob 名称列表
+pub(crate) async fn update_index(config: &AcemcpConfig, project_root_path: &str) -> anyhow::Result<Vec<String>> {
     let base_url = config.base_url.clone().ok_or_else(|| anyhow::anyhow!("未配置 base_url"))?;
     // 严格校验 base_url
     let has_scheme = base_url.starts_with("http://") || base_url.starts_with("https://");
@@ -396,6 +535,12 @@ async fn index_and_search(config: &AcemcpConfig, project_root_path: &str, query:
     let max_lines = config.max_lines_per_blob.unwrap_or(800) as usize;
     let text_exts = config.text_extensions.clone().unwrap_or_default();
     let exclude_patterns = config.exclude_patterns.clone().unwrap_or_default();
+
+    // 更新状态：开始索引
+    let _ = update_project_status(project_root_path, |status| {
+        status.status = IndexStatus::Indexing;
+        status.progress = 0;
+    });
 
     // 日志：基础配置
     log_important!(info,
@@ -416,7 +561,21 @@ async fn index_and_search(config: &AcemcpConfig, project_root_path: &str, query:
     // 收集 blob（根据扩展名与排除规则，简化版 .gitignore 支持）
     log_important!(info, "开始收集代码文件...");
     let blobs = collect_blobs(project_root_path, &text_exts, &exclude_patterns, max_lines)?;
-    if blobs.is_empty() { anyhow::bail!("未在项目中找到可索引的文本文件"); }
+    if blobs.is_empty() {
+        // 更新状态：失败
+        let _ = update_project_status(project_root_path, |status| {
+            status.status = IndexStatus::Failed;
+            status.last_error = Some("未在项目中找到可索引的文本文件".to_string());
+            status.last_failure_time = Some(chrono::Utc::now());
+        });
+        anyhow::bail!("未在项目中找到可索引的文本文件");
+    }
+
+    // 更新状态：文件收集完成
+    let _ = update_project_status(project_root_path, |status| {
+        status.total_files = blobs.len();
+        status.progress = 20;
+    });
 
     // 加载 projects.json
     let projects_path = home_projects_file();
@@ -576,18 +735,112 @@ async fn index_and_search(config: &AcemcpConfig, project_root_path: &str, query:
 
     // 使用合并后的 blob_names（与 Python 版本保持一致）
     let blob_names = all_blob_names;
-    if blob_names.is_empty() { 
+    if blob_names.is_empty() {
         log_important!(info, "索引后未找到 blobs，项目路径: {}", normalized_root);
-        anyhow::bail!("索引后未找到 blobs"); 
+        // 更新状态：失败
+        let _ = update_project_status(project_root_path, |status| {
+            status.status = IndexStatus::Failed;
+            status.last_error = Some("索引后未找到 blobs".to_string());
+            status.last_failure_time = Some(chrono::Utc::now());
+        });
+        anyhow::bail!("索引后未找到 blobs");
+    }
+
+    // 检查是否是首次成功索引（用于 ji 集成）
+    let is_first_success = {
+        let status = get_project_status(project_root_path);
+        status.last_success_time.is_none()
+    };
+
+    // 更新状态：索引成功完成
+    let _ = update_project_status(project_root_path, |status| {
+        status.status = IndexStatus::Synced;
+        status.progress = 100;
+        status.indexed_files = blobs.len();
+        status.pending_files = 0;
+        status.last_success_time = Some(chrono::Utc::now());
+        status.last_error = None;
+    });
+
+    // 首次成功索引时，写入 ji 记忆
+    if is_first_success {
+        let _ = write_index_memory_to_ji(project_root_path, config);
+    }
+
+    log_important!(info, "索引更新完成，共 {} 个 blobs", blob_names.len());
+    Ok(blob_names)
+}
+
+/// 将索引配置信息写入 ji（记忆）工具
+fn write_index_memory_to_ji(project_root_path: &str, config: &AcemcpConfig) {
+    use super::super::memory::MemoryManager;
+    use super::super::memory::MemoryCategory;
+
+    // 创建记忆管理器
+    let manager = match MemoryManager::new(project_root_path) {
+        Ok(m) => m,
+        Err(e) => {
+            log_debug!("创建记忆管理器失败（不影响索引）: {}", e);
+            return;
+        }
+    };
+
+    // 构建记忆内容
+    let text_exts = config.text_extensions.clone().unwrap_or_default();
+    let exclude_patterns = config.exclude_patterns.clone().unwrap_or_default();
+    let batch_size = config.batch_size.unwrap_or(10);
+    let max_lines = config.max_lines_per_blob.unwrap_or(800);
+
+    let memory_content = format!(
+        "acemcp 代码索引已启用 - 配置摘要: 文件扩展名={:?}, 排除模式={:?}, 批次大小={}, 最大行数/块={}",
+        text_exts, exclude_patterns, batch_size, max_lines
+    );
+
+    // 写入记忆
+    match manager.add_memory(&memory_content, MemoryCategory::Context) {
+        Ok(id) => {
+            log_important!(info, "已将索引配置写入 ji 记忆: id={}", id);
+        }
+        Err(e) => {
+            log_debug!("写入 ji 记忆失败（不影响索引）: {}", e);
+        }
+    }
+}
+
+/// 只执行搜索，不触发索引
+/// 使用已有的索引数据进行搜索
+async fn search_only(config: &AcemcpConfig, project_root_path: &str, query: &str) -> anyhow::Result<String> {
+    let base_url = config.base_url.clone().ok_or_else(|| anyhow::anyhow!("未配置 base_url"))?;
+    let token = config.token.clone().ok_or_else(|| anyhow::anyhow!("未配置 token"))?;
+
+    // 从 projects.json 读取已有的 blob 名称
+    let projects_path = home_projects_file();
+    let projects: ProjectsFile = if projects_path.exists() {
+        let data = fs::read_to_string(&projects_path).unwrap_or_default();
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        ProjectsFile::default()
+    };
+
+    let normalized_root = PathBuf::from(project_root_path)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(project_root_path))
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    let blob_names = projects.0.get(&normalized_root).cloned().unwrap_or_default();
+
+    if blob_names.is_empty() {
+        anyhow::bail!("项目尚未索引或索引为空，请先执行索引操作");
     }
 
     // 发起检索
     log_important!(info,
-        "=== 开始代码检索 ==="
+        "=== 开始代码检索（仅搜索模式） ==="
     );
     let search_url = format!("{}/agents/codebase-retrieval", base_url);
     log_important!(info, "检索请求: url={}, 使用blobs数量={}, 查询内容={}", search_url, blob_names.len(), query);
-    
+
     let payload = serde_json::json!({
         "information_request": query,
         "blobs": {"checkpoint_id": serde_json::Value::Null, "added_blobs": blob_names, "deleted_blobs": []},
@@ -596,9 +849,10 @@ async fn index_and_search(config: &AcemcpConfig, project_root_path: &str, query:
         "disable_codebase_retrieval": false,
         "enable_commit_retrieval": false,
     });
-    
+
     log_important!(info, "检索载荷大小: {} 字节", payload.to_string().len());
-    
+
+    let client = Client::new();
     let value: serde_json::Value = retry_request(|| async {
         let r = client
             .post(&search_url)
@@ -607,31 +861,31 @@ async fn index_and_search(config: &AcemcpConfig, project_root_path: &str, query:
             .json(&payload)
             .send()
             .await?;
-        
+
         let status = r.status();
         log_important!(info, "检索请求HTTP响应状态: {}", status);
-        
+
         if !status.is_success() {
             let body = r.text().await.unwrap_or_default();
             anyhow::bail!("HTTP {} {}", status, body);
         }
-        
+
         let v: serde_json::Value = r.json().await?;
         log_important!(info, "检索响应数据: {}", serde_json::to_string_pretty(&v).unwrap_or_default());
         Ok(v)
     }, 3, 2.0).await?;
-    
+
     let text = value
         .get("formatted_retrieval")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-        
-    if text.is_empty() { 
+
+    if text.is_empty() {
         log_important!(info, "搜索返回空结果");
-        Ok("No relevant code context found for your query.".to_string()) 
-    } else { 
+        Ok("No relevant code context found for your query.".to_string())
+    } else {
         log_important!(info, "搜索成功，返回文本长度: {}", text.len());
-        Ok(text) 
+        Ok(text)
     }
 }

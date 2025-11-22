@@ -80,6 +80,15 @@ pub fn build_tauri_app() -> Builder<tauri::Wry> {
             crate::mcp::tools::acemcp::commands::clear_acemcp_cache,
             crate::mcp::tools::acemcp::commands::debug_acemcp_search,
             crate::mcp::tools::acemcp::commands::execute_acemcp_tool,
+            crate::mcp::tools::acemcp::commands::get_acemcp_index_status,
+            crate::mcp::tools::acemcp::commands::get_all_acemcp_index_status,
+            crate::mcp::tools::acemcp::commands::trigger_acemcp_index_update,
+            crate::mcp::tools::acemcp::commands::get_auto_index_enabled,
+            crate::mcp::tools::acemcp::commands::set_auto_index_enabled,
+            crate::mcp::tools::acemcp::commands::get_watching_projects,
+            crate::mcp::tools::acemcp::commands::is_project_watching,
+            crate::mcp::tools::acemcp::commands::stop_project_watching,
+            crate::mcp::tools::acemcp::commands::stop_all_watching,
 
             // 自定义prompt命令
             get_custom_prompt_config,

@@ -2,7 +2,7 @@ use tauri::{AppHandle, State};
 
 use crate::config::{AppState, save_config};
 use super::{AcemcpTool};
-use super::types::AcemcpRequest;
+use super::types::{AcemcpRequest, ProjectIndexStatus, ProjectsIndexStatus};
 use reqwest;
 
 #[derive(Debug, serde::Deserialize)]
@@ -358,4 +358,67 @@ pub async fn execute_acemcp_tool(
     }
 }
 
+/// 获取指定项目的索引状态
+#[tauri::command]
+pub fn get_acemcp_index_status(project_root_path: String) -> Result<ProjectIndexStatus, String> {
+    Ok(AcemcpTool::get_index_status(project_root_path))
+}
 
+/// 获取所有项目的索引状态
+#[tauri::command]
+pub fn get_all_acemcp_index_status() -> Result<ProjectsIndexStatus, String> {
+    Ok(AcemcpTool::get_all_index_status())
+}
+
+/// 手动触发索引更新
+#[tauri::command]
+pub async fn trigger_acemcp_index_update(project_root_path: String) -> Result<String, String> {
+    AcemcpTool::trigger_index_update(project_root_path)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 获取全局自动索引开关状态
+#[tauri::command]
+pub fn get_auto_index_enabled() -> Result<bool, String> {
+    let watcher_manager = super::watcher::get_watcher_manager();
+    Ok(watcher_manager.is_auto_index_enabled())
+}
+
+/// 设置全局自动索引开关
+#[tauri::command]
+pub fn set_auto_index_enabled(enabled: bool) -> Result<(), String> {
+    let watcher_manager = super::watcher::get_watcher_manager();
+    watcher_manager.set_auto_index_enabled(enabled);
+    Ok(())
+}
+
+/// 获取当前正在监听的项目列表
+#[tauri::command]
+pub fn get_watching_projects() -> Result<Vec<String>, String> {
+    let watcher_manager = super::watcher::get_watcher_manager();
+    Ok(watcher_manager.get_watching_projects())
+}
+
+/// 检查指定项目是否正在监听
+#[tauri::command]
+pub fn is_project_watching(project_root_path: String) -> Result<bool, String> {
+    let watcher_manager = super::watcher::get_watcher_manager();
+    Ok(watcher_manager.is_watching(&project_root_path))
+}
+
+/// 停止监听指定项目
+#[tauri::command]
+pub fn stop_project_watching(project_root_path: String) -> Result<(), String> {
+    let watcher_manager = super::watcher::get_watcher_manager();
+    watcher_manager.stop_watching(&project_root_path)
+        .map_err(|e| e.to_string())
+}
+
+/// 停止所有项目监听
+#[tauri::command]
+pub fn stop_all_watching() -> Result<(), String> {
+    let watcher_manager = super::watcher::get_watcher_manager();
+    watcher_manager.stop_all();
+    Ok(())
+}

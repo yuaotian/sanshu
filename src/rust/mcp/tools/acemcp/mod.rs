@@ -4,6 +4,8 @@
 pub mod mcp;
 pub mod types;
 pub mod commands;
+pub mod watcher;
 
 // 重新导出工具以便访问
 pub use mcp::AcemcpTool;
+pub use watcher::get_watcher_manager;
