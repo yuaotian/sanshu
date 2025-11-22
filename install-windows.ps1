@@ -1,4 +1,4 @@
-# 寸止 Windows 安装脚本
+# 三术 Windows 安装脚本
 
 param(
     [switch]$BuildOnly = $false

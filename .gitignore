@@ -78,3 +78,5 @@ scripts/
 *.exe
 *.md
 !ACEMCP.md
+!README.md
+!INSTALL.md
