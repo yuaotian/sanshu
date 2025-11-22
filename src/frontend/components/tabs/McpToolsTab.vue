@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { invoke } from '@tauri-apps/api/core'
 import { useMessage } from 'naive-ui'
-import { onMounted, ref, watch } from 'vue'
+import { onMounted, ref, watch, computed } from 'vue'
 import { useMcpToolsReactive } from '../../composables/useMcpTools'
+import { useAcemcpSync } from '../../composables/useAcemcpSync'
 
 // 使用全局MCP工具状态
 const {
@@ -12,6 +13,23 @@ const {
   toggleTool: globalToggleTool,
   toolStats,
 } = useMcpToolsReactive()
+
+// 使用 Acemcp 同步状态管理
+const {
+  currentProjectStatus,
+  autoIndexEnabled,
+  watchingProjects,
+  statusSummary,
+  statusIcon,
+  isIndexing,
+  fetchAllStatus,
+  fetchProjectStatus,
+  triggerIndexUpdate,
+  fetchAutoIndexEnabled,
+  setAutoIndexEnabled,
+  fetchWatchingProjects,
+  setCurrentProject,
+} = useAcemcpSync()
 
 const needsReconnect = ref(false)
 // 工具配置弹窗状态
@@ -119,6 +137,46 @@ const debugProjectRoot = ref('')
 const debugQuery = ref('')
 const debugResult = ref('')
 const debugLoading = ref(false)
+
+// 索引管理相关状态
+const indexManagementProjectRoot = ref('')
+const indexingInProgress = ref(false)
+
+// 格式化时间
+function formatTime(timeStr: string | null): string {
+  if (!timeStr)
+    return '从未'
+  try {
+    const date = new Date(timeStr)
+    return date.toLocaleString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    })
+  }
+  catch {
+    return '无效时间'
+  }
+}
+
+// 计算目录统计摘要
+const directorySummary = computed(() => {
+  if (!currentProjectStatus.value?.directory_stats)
+    return []
+
+  return Object.entries(currentProjectStatus.value.directory_stats)
+    .map(([dir, [total, indexed]]) => ({
+      directory: dir,
+      total,
+      indexed,
+      percentage: total > 0 ? Math.round((indexed / total) * 100) : 0,
+    }))
+    .sort((a, b) => b.total - a.total) // 按文件数降序
+    .slice(0, 10) // 只显示前 10 个目录
+})
 
 async function runToolDebug() {
   try {
@@ -362,9 +420,63 @@ async function clearCache() {
   }
 }
 
+// 手动触发索引
+async function manualTriggerIndex() {
+  if (!indexManagementProjectRoot.value) {
+    message.error('请输入项目根路径')
+    return
+  }
+
+  indexingInProgress.value = true
+  try {
+    const result = await triggerIndexUpdate(indexManagementProjectRoot.value)
+    message.success(result)
+    // 刷新状态
+    await fetchProjectStatus(indexManagementProjectRoot.value)
+    setCurrentProject(indexManagementProjectRoot.value)
+  }
+  catch (err) {
+    message.error(String(err))
+  }
+  finally {
+    indexingInProgress.value = false
+  }
+}
+
+// 切换自动索引开关
+async function toggleAutoIndex() {
+  try {
+    await setAutoIndexEnabled(!autoIndexEnabled.value)
+    message.success(`自动索引已${autoIndexEnabled.value ? '启用' : '禁用'}`)
+  }
+  catch (err) {
+    message.error(String(err))
+  }
+}
+
+// 刷新索引状态
+async function refreshIndexStatus() {
+  try {
+    await fetchAllStatus()
+    await fetchAutoIndexEnabled()
+    await fetchWatchingProjects()
+    if (indexManagementProjectRoot.value) {
+      await fetchProjectStatus(indexManagementProjectRoot.value)
+      setCurrentProject(indexManagementProjectRoot.value)
+    }
+    message.success('状态已刷新')
+  }
+  catch (err) {
+    message.error(`刷新状态失败: ${err}`)
+  }
+}
+
 onMounted(async () => {
   try {
     await loadMcpTools()
+    // 初始化索引状态
+    await fetchAutoIndexEnabled()
+    await fetchWatchingProjects()
   }
   catch (err) {
     if (message) {
@@ -651,6 +763,217 @@ watch(() => acemcpConfig.value.text_extensions, (list) => {
                   <li>• 运行调试：执行完整的代码索引和搜索流程，查看详细日志</li>
                   <li>• 索引过程是增量式的，只处理新增或修改的文件</li>
                   <li>• 大文件会自动分割成多个块进行处理</li>
+                </ul>
+              </n-alert>
+            </n-space>
+          </n-tab-pane>
+
+          <!-- 索引管理标签页 -->
+          <n-tab-pane name="index-management" tab="索引管理">
+            <n-space vertical size="large">
+              <!-- 全局设置卡片 -->
+              <n-card size="small" title="全局设置">
+                <template #header-extra>
+                  <n-button size="small" @click="refreshIndexStatus">
+                    <template #icon>
+                      <div class="i-carbon-renew w-4 h-4" />
+                    </template>
+                    刷新状态
+                  </n-button>
+                </template>
+
+                <n-space vertical size="medium">
+                  <!-- 自动索引开关 -->
+                  <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                      <div class="i-carbon-automatic w-5 h-5 text-blue-500" />
+                      <div>
+                        <div class="font-medium">
+                          自动索引
+                        </div>
+                        <div class="text-sm opacity-60">
+                          文件变更时自动更新索引（1.5秒防抖）
+                        </div>
+                      </div>
+                    </div>
+                    <n-switch :value="autoIndexEnabled" @update:value="toggleAutoIndex" />
+                  </div>
+
+                  <!-- 监听中的项目 -->
+                  <n-divider />
+                  <div>
+                    <div class="font-medium mb-2">
+                      监听中的项目 ({{ watchingProjects.length }})
+                    </div>
+                    <div v-if="watchingProjects.length === 0" class="text-sm opacity-60">
+                      暂无监听中的项目
+                    </div>
+                    <n-space v-else vertical size="small">
+                      <n-tag
+                        v-for="project in watchingProjects" :key="project" type="success" size="small"
+                        :bordered="false"
+                      >
+                        <template #icon>
+                          <div class="i-carbon-view w-4 h-4" />
+                        </template>
+                        {{ project }}
+                      </n-tag>
+                    </n-space>
+                  </div>
+                </n-space>
+              </n-card>
+
+              <!-- 项目索引状态卡片 -->
+              <n-card size="small" title="项目索引状态">
+                <n-space vertical size="medium">
+                  <!-- 项目路径输入 -->
+                  <n-form-item label="项目根路径" :show-feedback="false">
+                    <n-input
+                      v-model:value="indexManagementProjectRoot"
+                      placeholder="/abs/path/to/your/project (使用正斜杠)"
+                      clearable
+                      @blur="() => {
+                        if (indexManagementProjectRoot) {
+                          fetchProjectStatus(indexManagementProjectRoot)
+                          setCurrentProject(indexManagementProjectRoot)
+                        }
+                      }"
+                    />
+                  </n-form-item>
+
+                  <!-- 操作按钮 -->
+                  <n-space>
+                    <n-button
+                      type="primary"
+                      :loading="indexingInProgress"
+                      :disabled="!indexManagementProjectRoot"
+                      @click="manualTriggerIndex"
+                    >
+                      <template #icon>
+                        <div class="i-carbon-play w-4 h-4" />
+                      </template>
+                      立即索引
+                    </n-button>
+                    <n-button
+                      :disabled="!indexManagementProjectRoot"
+                      @click="clearCache"
+                    >
+                      <template #icon>
+                        <div class="i-carbon-trash-can w-4 h-4" />
+                      </template>
+                      清除缓存
+                    </n-button>
+                  </n-space>
+
+                  <!-- 状态展示 -->
+                  <n-divider v-if="currentProjectStatus" />
+                  <div v-if="currentProjectStatus">
+                    <!-- 状态摘要 -->
+                    <div class="flex items-center gap-3 mb-4">
+                      <div :class="statusIcon" class="w-6 h-6" />
+                      <div>
+                        <div class="font-medium text-lg">
+                          {{ statusSummary }}
+                        </div>
+                        <div class="text-sm opacity-60">
+                          进度: {{ currentProjectStatus.progress }}%
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- 文件统计 -->
+                    <n-grid :cols="2" :x-gap="12" :y-gap="12">
+                      <n-gi>
+                        <n-statistic label="总文件数" :value="currentProjectStatus.total_files">
+                          <template #prefix>
+                            <div class="i-carbon-document w-4 h-4" />
+                          </template>
+                        </n-statistic>
+                      </n-gi>
+                      <n-gi>
+                        <n-statistic label="已索引" :value="currentProjectStatus.indexed_files">
+                          <template #prefix>
+                            <div class="i-carbon-checkmark-filled w-4 h-4 text-green-500" />
+                          </template>
+                        </n-statistic>
+                      </n-gi>
+                      <n-gi>
+                        <n-statistic label="待处理" :value="currentProjectStatus.pending_files">
+                          <template #prefix>
+                            <div class="i-carbon-time w-4 h-4 text-blue-500" />
+                          </template>
+                        </n-statistic>
+                      </n-gi>
+                      <n-gi>
+                        <n-statistic label="失败" :value="currentProjectStatus.failed_files">
+                          <template #prefix>
+                            <div class="i-carbon-warning-filled w-4 h-4 text-red-500" />
+                          </template>
+                        </n-statistic>
+                      </n-gi>
+                    </n-grid>
+
+                    <!-- 时间信息 -->
+                    <n-divider />
+                    <n-space vertical size="small">
+                      <div class="text-sm">
+                        <span class="opacity-60">最后成功时间:</span>
+                        <span class="ml-2">{{ formatTime(currentProjectStatus.last_success_time) }}</span>
+                      </div>
+                      <div v-if="currentProjectStatus.last_failure_time" class="text-sm">
+                        <span class="opacity-60">最后失败时间:</span>
+                        <span class="ml-2">{{ formatTime(currentProjectStatus.last_failure_time) }}</span>
+                      </div>
+                      <div v-if="currentProjectStatus.last_error" class="text-sm text-red-500">
+                        <span class="opacity-60">错误信息:</span>
+                        <span class="ml-2">{{ currentProjectStatus.last_error }}</span>
+                      </div>
+                    </n-space>
+
+                    <!-- 目录统计 -->
+                    <n-divider v-if="directorySummary.length > 0" />
+                    <div v-if="directorySummary.length > 0">
+                      <div class="font-medium mb-2">
+                        目录统计 (前10)
+                      </div>
+                      <n-space vertical size="small">
+                        <div
+                          v-for="dir in directorySummary" :key="dir.directory"
+                          class="flex items-center justify-between text-sm"
+                        >
+                          <div class="flex-1 truncate opacity-80">
+                            {{ dir.directory }}
+                          </div>
+                          <div class="flex items-center gap-2 ml-2">
+                            <span class="opacity-60">{{ dir.indexed }}/{{ dir.total }}</span>
+                            <n-progress
+                              type="line"
+                              :percentage="dir.percentage"
+                              :show-indicator="false"
+                              :height="4"
+                              style="width: 60px"
+                            />
+                          </div>
+                        </div>
+                      </n-space>
+                    </div>
+                  </div>
+
+                  <!-- 未选择项目提示 -->
+                  <n-empty v-else description="请输入项目根路径以查看索引状态" />
+                </n-space>
+              </n-card>
+
+              <!-- 使用提示 -->
+              <n-alert type="info" title="索引管理说明">
+                <template #icon>
+                  <div class="i-carbon-information" />
+                </template>
+                <ul class="text-sm space-y-1">
+                  <li>• 首次搜索时会自动启动文件监听（如果全局开关已启用）</li>
+                  <li>• 文件变更后会自动触发索引更新（1.5秒防抖）</li>
+                  <li>• 索引是增量式的，只处理新增或修改的文件</li>
+                  <li>• 可以手动触发索引更新或清除缓存重建</li>
                 </ul>
               </n-alert>
             </n-space>
