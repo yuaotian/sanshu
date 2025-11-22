@@ -40,7 +40,7 @@ onMounted(async () => {
     localConfig.value = { ...proxyConfig.value }
   }
   catch (error) {
-    message.error('加载代理配置失败')
+    message.error(`加载代理配置失败: ${error}`)
   }
 })
 
@@ -56,7 +56,7 @@ async function handleSaveConfig() {
     message.success('代理配置已保存')
   }
   catch (error) {
-    message.error('保存代理配置失败')
+    message.error(`保存代理配置失败: ${error}`)
   }
 }
 
@@ -72,7 +72,7 @@ async function handleTestProxy() {
     }
   }
   catch (error) {
-    message.error('测试代理连接时出错')
+    message.error(`测试代理连接时出错: ${error}`)
   }
 }
 
@@ -91,7 +91,7 @@ async function handleAutoDetect() {
     }
   }
   catch (error) {
-    message.error('自动检测代理失败')
+    message.error(`自动检测代理失败: ${error}`)
   }
 }
 
