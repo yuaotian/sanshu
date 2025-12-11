@@ -2,11 +2,11 @@
 
 # 三术 / sanshu
 
-[![CI](https://github.com/imhuso/sanshu/workflows/CI/badge.svg)](https://github.com/imhuso/sanshu/actions)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)]()
-[![MCP](https://img.shields.io/badge/protocol-MCP-green.svg)](https://modelcontextprotocol.io/)
+[![CI](https://img.shields.io/github/actions/workflow/status/imhuso/sanshu/CI.yml?branch=main&style=flat-square&logo=github)](https://github.com/imhuso/sanshu/actions)
+[![License](https://img.shields.io/github/license/imhuso/sanshu?style=flat-square)](LICENSE)
+[![Rust Version](https://img.shields.io/badge/rust-1.70%2B-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square)](https://github.com/imhuso/sanshu)
+[![MCP Protocol](https://img.shields.io/badge/protocol-MCP-green.svg?style=flat-square&logo=openai)](https://modelcontextprotocol.io/)
 
 > **道生一，一生二，二生三，三生万物**
 
@@ -30,16 +30,17 @@
 
 ## 📑 目录
 
-- [核心功能](#-核心功能)
-- [核心特性与流程](#-核心特性与流程)
-- [与 Augment Ace 的协同](#-与-augment-ace-的协同)
-- [版本发布流程](#-版本发布流程)
-- [技术架构](#️-技术架构)
-- [安装与使用](#-安装与使用)
-- [哲学理念](#️-哲学理念)
-- [贡献指南](#-贡献指南)
-- [许可证](#-许可证)
-- [致谢](#-致谢)
+- [🌟 核心功能](#-核心功能)
+- [🚀 核心特性与流程](#-核心特性与流程)
+- [🤖 与 Augment Ace 的协同](#-与-augment-ace-的协同)
+- [🚀 版本发布流程](#-版本发布流程)
+- [🛠️ 技术架构](#️-技术架构)
+- [📦 安装与使用](#-安装与使用)
+- [☯️ 哲学理念](#️-哲学理念)
+- [❓ 常见问题 (FAQ)](#-常见问题-faq)
+- [🤝 贡献指南](#-贡献指南)
+- [📄 许可证](#-许可证)
+- [🙏 致谢](#-致谢)
 
 ---
 
@@ -61,6 +62,10 @@
 - **多模态输入**：支持文本、图片、预定义选项等多种交互方式
 - **状态可视化**：实时展示后端任务状态（如索引进度），让协作更加透明
 
+<div align="center">
+  <img src="screenshots/popup.png" alt="Zhi Popup Interaction" width="600" />
+</div>
+
 ### 📚 ji (记) - 记忆管理系统
 
 > **"博闻强记，温故知新"**
@@ -76,6 +81,78 @@
 - **语义搜索**：基于 acemcp 引擎，支持自然语言查询代码库
 - **增量索引**：实时监听文件变更，自动维护最新索引
 - **智能等待**：在索引更新时自动平衡速度与完整性
+
+---
+
+## 📦 安装与使用
+
+### 环境要求
+
+| 依赖 | 版本要求 | 说明 |
+|------|----------|------|
+| Rust | 1.70+ | 后端编译 |
+| Node.js | 18+ | 前端构建 |
+| pnpm | 8+ | 包管理器 |
+
+### 🚀 快速开始
+
+#### 方式一：从源码构建
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/imhuso/sanshu.git
+cd sanshu
+
+# 2. 安装前端依赖
+pnpm install
+
+# 3. 构建项目
+pnpm build
+cargo build --release
+
+# 4. 安装 CLI 工具
+# Linux/macOS
+./install.sh
+
+# Windows
+./install-windows.ps1
+```
+
+#### 方式二：通过 Homebrew 安装 (macOS)
+
+```bash
+# 添加 Tap
+brew tap imhuso/tap
+
+# 安装
+brew install sanshu
+```
+
+### ⚙️ 配置 MCP 客户端
+
+在您的 MCP 客户端配置文件中添加：
+
+```json
+{
+  "mcpServers": {
+    "sanshu": {
+      "command": "三术"
+    }
+  }
+}
+```
+PS：某些插件或者CLI工具可能无法正确识别`三术`中文，请自行用拼音`sanshu`作为命名，否则可能会导致无法正确识别。
+
+### 📝 在 AI 编辑器中启用提示词（可选）
+
+> 💡 **提示**：如果你在使用 Augment Ace 或其他支持 MCP 的 AI 编辑器，推荐启用本仓库提供的提示词协议以获得最佳体验。
+
+**配置步骤**：
+
+1. 打开编辑器的 **系统提示词 / 项目级默认提示词** 配置入口
+2. 将仓库根目录下 `sanshu_prompt_word.md` 的完整内容复制到该配置中
+3. 确保已按上文「配置 MCP 客户端」部分，将「三术」注册为 MCP 服务并能正常连接
+4. 之后，在编辑器中调用 AI 时，它将自动遵循 AURA-X-KYS 协议
 
 ---
 
@@ -652,76 +729,6 @@ git push origin v0.2.4
 | **配置管理** | 精细化配置支持 | `smart_wait_range` (默认 1-5s) |
 
 ---
-
-## 📦 安装与使用
-
-### 环境要求
-
-| 依赖 | 版本要求 | 说明 |
-|------|----------|------|
-| Rust | 1.70+ | 后端编译 |
-| Node.js | 18+ | 前端构建 |
-| pnpm | 8+ | 包管理器 |
-
-### 🚀 快速开始
-
-#### 方式一：从源码构建
-
-```bash
-# 1. 克隆仓库
-git clone https://github.com/imhuso/sanshu.git
-cd sanshu
-
-# 2. 安装前端依赖
-pnpm install
-
-# 3. 构建项目
-pnpm build
-cargo build --release
-
-# 4. 安装 CLI 工具
-# Linux/macOS
-./install.sh
-
-# Windows
-./install-windows.ps1
-```
-
-#### 方式二：通过 Homebrew 安装 (macOS)
-
-```bash
-# 添加 Tap
-brew tap imhuso/tap
-
-# 安装
-brew install sanshu
-```
-
-### ⚙️ 配置 MCP 客户端
-
-在您的 MCP 客户端配置文件中添加：
-
-```json
-{
-  "mcpServers": {
-    "sanshu": {
-      "command": "三术"
-    }
-  }
-}
-```
-PS：某些插件或者CLI工具可能无法正确识别`三术`中文，请自行用拼音`sanshu`作为命名，否则可能会导致无法正确识别。
-
-### 📝 在 AI 编辑器中启用提示词（可选）
-
-> 💡 **提示**：如果你在使用 Augment Ace 或其他支持 MCP 的 AI 编辑器，推荐启用本仓库提供的提示词协议以获得最佳体验。
-
-**配置步骤**：
-
-1. 打开编辑器的 **系统提示词 / 项目级默认提示词** 配置入口
-2. 将仓库根目录下 `sanshu_prompt_word.md` 的完整内容复制到该配置中
-3. 确保已按上文「配置 MCP 客户端」部分，将「三术」注册为 MCP 服务并能正常连接
-4. 之后，在编辑器中调用 AI 时，它将自动遵循 AURA-X-KYS 协议
 
 ---
 
