@@ -118,6 +118,122 @@ cargo build --release
 ./install-windows.ps1
 ```
 
+#### 常用开发命令
+
+##### 📦 开发模式
+
+```bash
+# 启动前端开发服务器（热重载）
+pnpm dev
+
+# 启动 Tauri 开发模式（同时启动前后端，支持热重载）
+pnpm tauri:dev
+
+# 或使用 Cargo 直接启动 Tauri 开发模式
+cargo tauri dev
+```
+
+##### 🔨 构建打包
+
+```bash
+# 构建前端（生成 dist 目录）
+pnpm build
+
+# Cargo 构建后端（Debug 模式，快速编译用于开发调试）
+cargo build
+
+# Cargo 构建后端（Release 模式，优化体积和性能）
+cargo build --release
+
+# Tauri 完整打包（生成安装包，包含前后端）
+pnpm tauri:build
+# 或
+cargo tauri build
+
+# 打包产物位置：
+# - Windows: src-tauri/target/release/bundle/
+# - macOS: src-tauri/target/release/bundle/dmg/ 或 .app
+# - Linux: src-tauri/target/release/bundle/deb/ 或 .AppImage
+```
+
+##### 🧪 测试
+
+```bash
+# 运行所有 Rust 测试
+cargo test
+
+# 运行特定测试（支持模糊匹配）
+cargo test <测试名称关键词>
+
+# 显示测试输出（包括 println! 等）
+cargo test -- --nocapture
+
+# 运行前端测试 UI（如果有）
+pnpm test:ui
+```
+
+##### 🛠️ 代码质量检查
+
+```bash
+# 快速检查代码（不生成二进制文件，比 build 快）
+cargo check
+
+# 代码格式化（自动修复格式问题）
+cargo fmt
+
+# 代码质量检查（Clippy 静态分析，发现潜在问题）
+cargo clippy
+
+# Clippy 严格模式（将警告视为错误）
+cargo clippy -- -D warnings
+
+# 前端代码检查和自动修复
+pnpm lint
+```
+
+##### 🧹 清理构建产物
+
+```bash
+# 清理 Cargo 构建产物（target 目录）
+cargo clean
+
+# 清理前端构建产物（dist 目录和 node_modules）
+rm -rf dist node_modules
+# Windows PowerShell:
+# Remove-Item -Recurse -Force dist, node_modules
+
+# 完全清理后重新安装依赖
+cargo clean
+rm -rf node_modules
+pnpm install
+```
+
+##### 🚀 其他常用命令
+
+```bash
+# 查看项目依赖树
+cargo tree
+
+# 更新 Rust 依赖到最新兼容版本
+cargo update
+
+# 查看过时的 npm 依赖
+pnpm outdated
+
+# 更新 npm 依赖
+pnpm update
+
+# 运行前端预览服务器（预览构建后的产物）
+pnpm preview
+```
+
+**💡 提示**：
+- 开发时推荐使用 `pnpm tauri:dev`，可同时启动前后端并支持热重载
+- 首次构建 Release 版本可能需要较长时间（5-10 分钟），后续增量构建会快很多
+- 如遇到奇怪的编译错误，尝试 `cargo clean` 后重新构建
+- Windows 用户如遇到权限问题，请以管理员身份运行 PowerShell
+
+
 #### 方式二：通过 Homebrew 安装 (macOS)
 
 ```bash
@@ -883,6 +999,6 @@ copies or substantial portions of the Software.
 
 **如果这个项目对你有帮助，请给我们一个 ⭐ Star！**
 
-Made with ❤️ by the 煎饼果子(86) 
+Made with ❤️ by the 煎饼果子(86)
 
 </div>
