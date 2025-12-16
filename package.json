@@ -1,7 +1,7 @@
 {
   "name": "sanshu",
   "type": "module",
-  "version": "0.0.4",
+  "version": "0.1.0",
   "packageManager": "pnpm@10.25.0",
   "author": "煎饼果子(86)",
   "license": "MIT",
