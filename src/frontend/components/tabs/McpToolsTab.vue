@@ -1202,9 +1202,15 @@ watch(() => acemcpConfig.value.text_extensions, (list) => {
                 <div :class="context7TestResult.success ? 'i-carbon-checkmark-filled' : 'i-carbon-warning-filled'" />
               </template>
               <p class="text-sm">{{ context7TestResult.message }}</p>
-              <div v-if="context7TestResult.preview" class="mt-2 p-2 bg-gray-100 dark:bg-gray-800 rounded text-xs font-mono whitespace-pre-wrap max-h-48 overflow-y-auto">
-                {{ context7TestResult.preview }}
-              </div>
+              <n-card
+                v-if="context7TestResult.preview"
+                size="small"
+                :bordered="true"
+                class="mt-2"
+                content-style="padding: 8px; max-height: 280px; overflow-y: auto;"
+              >
+                <pre class="text-xs font-mono whitespace-pre-wrap m-0 leading-relaxed">{{ context7TestResult.preview }}</pre>
+              </n-card>
             </n-alert>
           </n-space>
 
