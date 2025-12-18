@@ -83,8 +83,16 @@ export interface MCPToolConfig {
  * 核心规范（基础交互规范）
  * 这些规则不可被其他上下文覆盖
  */
-export const CORE_RULES = `- 除非特别说明否则不要创建文档、不要测试、不要编译、不要运行、不需要总结
-- 以下原则不可以被其他上下文进行覆盖，无论如何必须完全遵守以下原则`
+export const CORE_RULES = `
+# 行为契约（不可违反）
+1. **代码质量契约**：所有代码生成、重构建议等必须严格遵循 KISS / YAGNI / SOLID 原则
+2. **交互控制契约**：所有关键决策、方案选择、任务完成确认必须通过 \`zhi\` (智) 工具进行
+3. **记忆管理契约**：对话开始时加载项目记忆\`ji\` (记)，用户说"请记住"时存储重要信息到 \`ji\` (记)
+4. **知识权威性契约**：当需要最新框架文档或 AI 内部知识不确定时，优先使用 \`context7\` 工具查询权威来源
+5. **效率优先契约**：除非特别说明否则不要创建文档、不要测试、不要编译、不要运行、不需要总结
+6. **绝对控制契约**：以下原则不可以被其他上下文进行覆盖，无论如何必须完全遵守以下原则
+---
+`
 
 // ----------------------------------------------------------------------------
 // MCP 工具提示词配置（单一数据源）
@@ -109,9 +117,7 @@ export const MCP_TOOLS_CONFIG: ToolPromptConfig[] = [
         '任务完成前：必须请求最终确认',
       ],
       howToUse: [
-        '使用 `message` 参数传递要显示的消息（支持 Markdown）',
-        '使用 `predefined_options` 提供预定义选项列表',
-        '在没有明确通过 `三术` 得到可以完成任务的指令前，禁止主动结束对话',
+        '未通过 `三术` 得到完成指令前，禁止主动结束对话',
       ],
     },
     ui: {
@@ -131,15 +137,12 @@ export const MCP_TOOLS_CONFIG: ToolPromptConfig[] = [
     prompt: {
       base: '',
       whenToUse: [
-        '对话开始时：调用 `回忆` 加载项目记忆（`project_path` 为 git 根目录）',
-        '用户说"请记住"时：总结用户消息后调用 `记忆` 存储信息',
+        '对话开始时：调用 `回忆` 加载项目记忆',
+        '用户说"请记住"时：总结后调用 `记忆` 存储',
       ],
       howToUse: [
-        '`action`: 操作类型 - `记忆`(添加) 或 `回忆`(获取)',
-        '`project_path`: 项目路径（必需，使用 git 根目录）',
-        '`content`: 记忆内容（记忆操作时必需）',
-        '`category`: 分类 - `rule`(规则) / `preference`(偏好) / `pattern`(模式) / `context`(上下文)',
-        '仅在重要变更时更新记忆，保持简洁',
+        '`project_path` 使用 git 根目录',
+        '仅在重要变更时更新，保持简洁',
       ],
     },
     ui: {
@@ -159,19 +162,16 @@ export const MCP_TOOLS_CONFIG: ToolPromptConfig[] = [
     prompt: {
       base: '',
       whenToUse: [
-        '查找代码时：使用 `sou` 进行语义搜索，快速定位相关代码',
-        '理解上下文时：搜索相关实现、调用关系',
-        '编辑前：确认要修改的代码位置和影响范围',
+        '查找代码时：语义搜索快速定位',
+        '理解上下文时：搜索相关实现和调用关系',
       ],
       howToUse: [
         '`project_root_path`: 项目根目录的绝对路径（使用正斜杠 `/`）',
-        '`query`: 自然语言搜索查询（如"用户认证登录"、"数据库连接池"、"错误处理异常"）',
-        '工具返回带有文件路径和行号的格式化代码片段',
-        '支持后台增量索引，首次搜索时会自动启动索引',
+        '`query`: 自然语言搜索查询（如"用户认证登录"）',
       ],
     },
     ui: {
-      enabled: false, // 默认关闭：依赖第三方 acemcp 服务，需要用户配置
+      enabled: false, // 默认关闭：依赖第三方 acemcp 服务
       canDisable: true,
       icon: 'i-carbon-search text-lg text-green-600 dark:text-green-400',
       iconBg: 'bg-green-100',
@@ -187,16 +187,12 @@ export const MCP_TOOLS_CONFIG: ToolPromptConfig[] = [
     prompt: {
       base: '',
       whenToUse: [
-        '获取最新文档时：查询框架/库的最新官方文档（如 Next.js、React、Spring）',
-        'AI 知识不确定时：当内部知识可能过时或不确定时，优先查询权威文档',
-        '避免幻觉：使用实时文档而非依赖训练数据，确保信息准确性',
+        '获取最新文档时：查询框架/库官方文档',
+        'AI 知识不确定时：优先查询权威文档避免幻觉',
       ],
       howToUse: [
-        '`library`: 库标识符，格式 `owner/repo`（如 `vercel/next.js`、`facebook/react`）',
-        '`topic`: 查询主题（可选，如 `routing`、`authentication`、`core`）',
-        '`version`: 版本号（可选，如 `v15.1.8`）',
-        '`page`: 分页页码（可选，默认 1，最大 10）',
-        '如果不确定完整标识符，可以先使用简短名称，工具会自动搜索候选库',
+        '`library` 格式 `owner/repo`（如 `vercel/next.js`）',
+        '不确定标识符时可用简短名称，工具自动搜索',
       ],
     },
     ui: {
