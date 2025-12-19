@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import type { ProjectIndexStatus } from '../../types/tauri'
+import type { IndexStatus, ProjectIndexStatus } from '../../types/tauri'
 import { invoke } from '@tauri-apps/api/core'
 import { useDialog, useMessage } from 'naive-ui'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useAcemcpSync } from '../../composables/useAcemcpSync'
+import { ProjectCard, ProjectCardSkeleton } from '../index'
 import McpIndexStatusDrawer from '../popup/McpIndexStatusDrawer.vue'
 
 // 使用 Acemcp 同步状态管理
@@ -19,6 +20,30 @@ const watchingProjects = ref<string[]>([])
 const selectedProject = ref<string>('')
 const showDrawer = ref(false)
 const resyncLoading = ref(false)
+
+// 搜索和筛选状态
+const searchQuery = ref('')
+const statusFilter = ref<IndexStatus | 'all'>('all')
+const sortBy = ref<'status' | 'time' | 'name'>('status')
+
+// 状态筛选选项
+const statusOptions = [
+  { label: '全部状态', value: 'all' },
+  { label: '索引中', value: 'indexing' },
+  { label: '已完成', value: 'synced' },
+  { label: '失败', value: 'failed' },
+  { label: '未索引', value: 'idle' },
+]
+
+// 排序选项
+const sortOptions = [
+  { label: '按状态', value: 'status' },
+  { label: '按时间', value: 'time' },
+  { label: '按名称', value: 'name' },
+]
+
+// 轮询定时器
+let pollingTimer: number | null = null
 
 // 选中项目的状态信息（用于抽屉组件）
 const selectedProjectStatus = computed<ProjectIndexStatus | null>(() => {
@@ -68,25 +93,117 @@ const selectedIsIndexing = computed(() => {
   return selectedProjectStatus.value?.status === 'indexing'
 })
 
-// 计算项目列表（转换为数组便于渲染）
+// 是否有正在索引的项目（用于控制轮询频率）
+const hasIndexingProject = computed(() => {
+  return Object.values(allProjects.value).some(p => p.status === 'indexing')
+})
+
+// 计算项目列表（带搜索、筛选和排序）
 const projectList = computed(() => {
-  return Object.values(allProjects.value).sort((a, b) => {
-    // 按状态排序：索引中 > 已完成 > 失败 > 未索引
-    const statusOrder = { indexing: 0, synced: 1, failed: 2, idle: 3 }
-    return statusOrder[a.status] - statusOrder[b.status]
+  let list = Object.values(allProjects.value)
+
+  // 搜索过滤
+  if (searchQuery.value.trim()) {
+    const query = searchQuery.value.toLowerCase()
+    list = list.filter(p => p.project_root.toLowerCase().includes(query))
+  }
+
+  // 状态筛选
+  if (statusFilter.value !== 'all') {
+    list = list.filter(p => p.status === statusFilter.value)
+  }
+
+  // 排序
+  const statusOrder = { indexing: 0, synced: 1, failed: 2, idle: 3 }
+  list.sort((a, b) => {
+    switch (sortBy.value) {
+      case 'status':
+        return statusOrder[a.status] - statusOrder[b.status]
+      case 'time': {
+        const timeA = a.last_success_time ? new Date(a.last_success_time).getTime() : 0
+        const timeB = b.last_success_time ? new Date(b.last_success_time).getTime() : 0
+        return timeB - timeA // 最近的在前
+      }
+      case 'name': {
+        const nameA = a.project_root.split(/[/\\]/).pop() || ''
+        const nameB = b.project_root.split(/[/\\]/).pop() || ''
+        return nameA.localeCompare(nameB)
+      }
+      default:
+        return 0
+    }
   })
+
+  return list
+})
+
+// 统计信息
+const stats = computed(() => {
+  const projects = Object.values(allProjects.value)
+  return {
+    total: projects.length,
+    indexing: projects.filter(p => p.status === 'indexing').length,
+    synced: projects.filter(p => p.status === 'synced').length,
+    failed: projects.filter(p => p.status === 'failed').length,
+  }
 })
 
 // 初始化加载
 onMounted(async () => {
   await loadAllData()
+  startPolling()
 })
 
-// 加载所有数据
+// 组件卸载时清理
+onUnmounted(() => {
+  stopPolling()
+})
+
+// 开始轮询
+function startPolling() {
+  if (pollingTimer) return
+  // 根据是否有索引中的项目调整轮询频率
+  const interval = hasIndexingProject.value ? 3000 : 30000
+  pollingTimer = window.setInterval(async () => {
+    await refreshData()
+    // 动态调整轮询频率
+    if (pollingTimer) {
+      const newInterval = hasIndexingProject.value ? 3000 : 30000
+      if (newInterval !== interval) {
+        stopPolling()
+        startPolling()
+      }
+    }
+  }, interval)
+}
+
+// 停止轮询
+function stopPolling() {
+  if (pollingTimer) {
+    clearInterval(pollingTimer)
+    pollingTimer = null
+  }
+}
+
+// 刷新数据（不显示加载状态）
+async function refreshData() {
+  try {
+    const [statusResult, watchingResult] = await Promise.all([
+      invoke<{ projects: Record<string, ProjectIndexStatus> }>('get_all_acemcp_index_status'),
+      invoke<string[]>('get_watching_projects'),
+    ])
+    allProjects.value = statusResult.projects
+    watchingProjects.value = watchingResult
+  }
+  catch (err) {
+    console.error('刷新项目索引数据失败:', err)
+  }
+}
+
+// 加载所有数据（显示加载状态）
 async function loadAllData() {
   loading.value = true
   try {
-    // 并行加载所有项目状态和监听列表
     const [statusResult, watchingResult] = await Promise.all([
       invoke<{ projects: Record<string, ProjectIndexStatus> }>('get_all_acemcp_index_status'),
       invoke<string[]>('get_watching_projects'),
@@ -103,7 +220,7 @@ async function loadAllData() {
   }
 }
 
-// 复制项目路径
+// 复制项目路径（直接使用子组件传递的规范化路径）
 async function copyPath(path: string) {
   try {
     await navigator.clipboard.writeText(path)
@@ -115,19 +232,17 @@ async function copyPath(path: string) {
 }
 
 // 切换项目监听状态
-async function toggleWatching(projectRoot: string, currentlyWatching: boolean) {
+async function toggleWatching(projectRoot: string) {
+  const currentlyWatching = watchingProjects.value.includes(projectRoot)
   try {
     if (currentlyWatching) {
       await invoke('stop_project_watching', { projectRootPath: projectRoot })
       message.success('已停止监听项目')
     }
     else {
-      // 开启监听（后端会自动添加到监听列表）
       await invoke('trigger_acemcp_index_update', { projectRootPath: projectRoot })
       message.success('已开启监听项目')
     }
-    // 重新加载监听列表
-    await fetchWatchingProjects()
     watchingProjects.value = await invoke<string[]>('get_watching_projects')
   }
   catch (err) {
@@ -184,244 +299,113 @@ async function handleDrawerResync() {
   }
 }
 
-// 格式化时间
-function formatTime(timeStr: string | null): string {
-  if (!timeStr)
-    return '从未索引'
-  try {
-    const date = new Date(timeStr)
-    return date.toLocaleString('zh-CN', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    })
-  }
-  catch {
-    return '时间格式错误'
-  }
-}
 
-// 获取状态配置
-function getStatusConfig(status: string) {
-  const configs = {
-    idle: {
-      text: '未索引',
-      type: 'default' as const,
-      color: 'text-gray-500 dark:text-gray-400',
-      bgColor: 'bg-gray-100 dark:bg-gray-800',
-      icon: 'i-carbon-circle-dash',
-    },
-    indexing: {
-      text: '索引中',
-      type: 'info' as const,
-      color: 'text-blue-500 dark:text-blue-400',
-      bgColor: 'bg-blue-100 dark:bg-blue-900',
-      icon: 'i-carbon-in-progress animate-spin',
-    },
-    synced: {
-      text: '已完成',
-      type: 'success' as const,
-      color: 'text-green-500 dark:text-green-400',
-      bgColor: 'bg-green-100 dark:bg-green-900',
-      icon: 'i-carbon-checkmark-filled',
-    },
-    failed: {
-      text: '失败',
-      type: 'error' as const,
-      color: 'text-red-500 dark:text-red-400',
-      bgColor: 'bg-red-100 dark:bg-red-900',
-      icon: 'i-carbon-warning-filled',
-    },
-  }
-  return configs[status as keyof typeof configs] || configs.idle
-}
 </script>
 
 <template>
   <div class="project-index-manager">
-    <!-- 加载状态 -->
-    <div v-if="loading" class="space-y-4">
-      <n-skeleton v-for="i in 3" :key="i" text :repeat="3" class="mb-4" />
+    <!-- 顶部工具栏 -->
+    <div class="toolbar-section">
+      <!-- 统计信息 -->
+      <div class="stats-bar">
+        <div class="stat-chip">
+          <div class="i-carbon-folder text-primary-500" />
+          <span>{{ stats.total }} 个项目</span>
+        </div>
+        <div v-if="stats.indexing > 0" class="stat-chip text-blue-500">
+          <div class="i-carbon-in-progress animate-spin" />
+          <span>{{ stats.indexing }} 索引中</span>
+        </div>
+        <div v-if="stats.synced > 0" class="stat-chip text-green-500">
+          <div class="i-carbon-checkmark-filled" />
+          <span>{{ stats.synced }} 已完成</span>
+        </div>
+        <div v-if="stats.failed > 0" class="stat-chip text-red-500">
+          <div class="i-carbon-warning-filled" />
+          <span>{{ stats.failed }} 失败</span>
+        </div>
+      </div>
+
+      <!-- 搜索和筛选 -->
+      <div class="filter-bar">
+        <n-input
+          v-model:value="searchQuery"
+          placeholder="搜索项目..."
+          clearable
+          size="small"
+          class="search-input"
+        >
+          <template #prefix>
+            <div class="i-carbon-search opacity-50" />
+          </template>
+        </n-input>
+
+        <n-select
+          v-model:value="statusFilter"
+          :options="statusOptions"
+          size="small"
+          class="filter-select"
+          placeholder="状态"
+        />
+
+        <n-select
+          v-model:value="sortBy"
+          :options="sortOptions"
+          size="small"
+          class="sort-select"
+          placeholder="排序"
+        />
+
+        <n-button size="small" quaternary @click="loadAllData">
+          <template #icon>
+            <div class="i-carbon-renew" />
+          </template>
+        </n-button>
+      </div>
+    </div>
+
+    <!-- 加载状态 - 骨架屏网格 -->
+    <div v-if="loading" class="card-grid">
+      <ProjectCardSkeleton v-for="i in 6" :key="i" />
     </div>
 
     <!-- 空状态 -->
-    <n-empty
-      v-else-if="projectList.length === 0"
-      description="暂无项目索引数据"
-      class="py-8"
-    >
-      <template #icon>
-        <div class="i-carbon-folder-off text-4xl opacity-40" />
-      </template>
-      <template #extra>
-        <div class="text-sm opacity-60 mt-2">
-          打开项目后将自动显示索引状态
-        </div>
-      </template>
-    </n-empty>
+    <div v-else-if="projectList.length === 0 && !searchQuery && statusFilter === 'all'" class="empty-state">
+      <div class="empty-icon">
+        <div class="i-carbon-folder-off text-5xl opacity-30" />
+      </div>
+      <div class="empty-title">暂无项目索引数据</div>
+      <div class="empty-desc">
+        使用代码搜索工具后，项目将自动显示在这里
+      </div>
+    </div>
 
-    <!-- 项目列表 -->
-    <div v-else class="space-y-4">
-      <div
+    <!-- 搜索无结果 -->
+    <div v-else-if="projectList.length === 0" class="empty-state">
+      <div class="empty-icon">
+        <div class="i-carbon-search text-4xl opacity-30" />
+      </div>
+      <div class="empty-title">未找到匹配的项目</div>
+      <div class="empty-desc">
+        尝试调整搜索条件或筛选器
+      </div>
+      <n-button size="small" @click="searchQuery = ''; statusFilter = 'all'">
+        清除筛选
+      </n-button>
+    </div>
+
+    <!-- 项目卡片网格 -->
+    <div v-else class="card-grid">
+      <ProjectCard
         v-for="project in projectList"
         :key="project.project_root"
-        class="project-card"
-        :class="getStatusConfig(project.status).bgColor"
-      >
-        <div class="flex flex-col gap-3 p-4">
-          <!-- 顶部：项目路径和状态 -->
-          <div class="flex items-start justify-between gap-3">
-            <!-- 项目路径 -->
-            <n-tooltip trigger="hover">
-              <template #trigger>
-                <div
-                  class="flex-1 font-mono text-sm cursor-pointer hover:text-primary-600 dark:hover:text-primary-400 transition-colors truncate"
-                  @click="copyPath(project.project_root)"
-                >
-                  <div class="i-carbon-folder inline-block mr-2 opacity-60" />
-                  {{ project.project_root }}
-                </div>
-              </template>
-              点击复制路径
-            </n-tooltip>
-
-            <!-- 状态徽章 -->
-            <n-tag
-              :type="getStatusConfig(project.status).type"
-              :bordered="false"
-              size="small"
-              class="flex-shrink-0"
-            >
-              <template #icon>
-                <div :class="[getStatusConfig(project.status).icon, 'text-sm']" />
-              </template>
-              {{ getStatusConfig(project.status).text }}
-            </n-tag>
-          </div>
-
-          <!-- 进度条（仅索引中时显示） -->
-          <div v-if="project.status === 'indexing'" class="w-full">
-            <n-progress
-              type="line"
-              :percentage="project.progress"
-              :show-indicator="true"
-              :height="8"
-              :border-radius="4"
-              processing
-            />
-          </div>
-
-          <!-- 统计信息 -->
-          <div class="flex items-center gap-4 text-xs opacity-70 flex-wrap">
-            <n-tooltip trigger="hover">
-              <template #trigger>
-                <div class="flex items-center gap-1">
-                  <div class="i-carbon-document" />
-                  <span>总计: {{ project.total_files }}</span>
-                </div>
-              </template>
-              项目中的总文件数
-            </n-tooltip>
-            <n-tooltip trigger="hover">
-              <template #trigger>
-                <div class="flex items-center gap-1">
-                  <div class="i-carbon-checkmark-filled text-green-500" />
-                  <span>已索引: {{ project.indexed_files }}</span>
-                </div>
-              </template>
-              已成功索引的文件数
-            </n-tooltip>
-            <n-tooltip v-if="project.pending_files > 0" trigger="hover">
-              <template #trigger>
-                <div class="flex items-center gap-1">
-                  <div class="i-carbon-time text-blue-500" />
-                  <span>待处理: {{ project.pending_files }}</span>
-                </div>
-              </template>
-              等待索引的文件数
-            </n-tooltip>
-            <n-tooltip v-if="project.failed_files > 0" trigger="hover">
-              <template #trigger>
-                <div class="flex items-center gap-1">
-                  <div class="i-carbon-warning-filled text-red-500" />
-                  <span>失败: {{ project.failed_files }}</span>
-                </div>
-              </template>
-              索引失败的文件数
-            </n-tooltip>
-          </div>
-
-          <!-- 索引时间 -->
-          <div class="text-xs opacity-60">
-            <n-tooltip trigger="hover">
-              <template #trigger>
-                <div class="flex items-center gap-1">
-                  <div class="i-carbon-time" />
-                  <span>最后索引: {{ formatTime(project.last_success_time) }}</span>
-                </div>
-              </template>
-              {{ project.last_success_time ? '上次成功索引的时间' : '该项目尚未成功索引' }}
-            </n-tooltip>
-          </div>
-
-          <!-- 操作按钮组 -->
-          <div class="flex items-center gap-2 pt-2 border-t border-gray-200 dark:border-gray-700">
-            <!-- 监听开关 -->
-            <n-tooltip trigger="hover">
-              <template #trigger>
-                <div class="flex items-center gap-2">
-                  <n-switch
-                    :value="watchingProjects.includes(project.project_root)"
-                    size="small"
-                    @update:value="toggleWatching(project.project_root, watchingProjects.includes(project.project_root))"
-                  >
-                    <template #checked>
-                      <div class="i-carbon-view text-xs" />
-                    </template>
-                    <template #unchecked>
-                      <div class="i-carbon-view-off text-xs" />
-                    </template>
-                  </n-switch>
-                  <span class="text-xs opacity-70">实时监听</span>
-                </div>
-              </template>
-              实时同步上传项目变更
-            </n-tooltip>
-
-            <div class="flex-1" />
-
-            <!-- 重新索引按钮 -->
-            <n-button
-              size="small"
-              secondary
-              type="primary"
-              :disabled="project.status === 'indexing'"
-              @click="handleReindex(project.project_root)"
-            >
-              <template #icon>
-                <div class="i-carbon-renew" />
-              </template>
-              重新索引
-            </n-button>
-
-            <!-- 查看结构树按钮 -->
-            <n-button
-              size="small"
-              secondary
-              type="info"
-              @click="viewProjectTree(project.project_root)"
-            >
-              <template #icon>
-                <div class="i-carbon-tree-view" />
-              </template>
-              查看结构树
-            </n-button>
-          </div>
-        </div>
-      </div>
+        :project="project"
+        :is-watching="watchingProjects.includes(project.project_root)"
+	        @view-tree="viewProjectTree(project.project_root)"
+	        @reindex="handleReindex(project.project_root)"
+	        @toggle-watching="toggleWatching(project.project_root)"
+	        @copy-path="copyPath"
+      />
     </div>
 
     <!-- 项目结构树抽屉 -->
@@ -441,81 +425,106 @@ function getStatusConfig(status: string) {
 <style scoped>
 /* 项目索引管理容器 */
 .project-index-manager {
-  max-width: 900px;
+  max-width: 100%;
   margin: 0 auto;
 }
 
-/* 项目卡片样式 - 科技感设计 */
-.project-card {
-  position: relative;
-  border-radius: 12px;
-  overflow: hidden;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  border: 1px solid rgba(128, 128, 128, 0.2);
-  backdrop-filter: blur(8px);
+/* 顶部工具栏区域 */
+.toolbar-section {
+  margin-bottom: 16px;
+  space-y: 12px;
 }
 
-/* 卡片悬停效果 */
-.project-card:hover {
-  transform: translateY(-2px);
-  box-shadow:
-    0 8px 25px -5px rgba(0, 0, 0, 0.1),
-    0 10px 10px -5px rgba(0, 0, 0, 0.04);
-  border-color: rgba(59, 130, 246, 0.3);
+/* 统计信息栏 */
+.stats-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
-/* 科技感光效扫描动画 */
-.project-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: -100%;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(255, 255, 255, 0.08),
-    transparent
-  );
-  transition: left 0.6s ease;
-  pointer-events: none;
+.stat-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  opacity: 0.8;
 }
 
-.project-card:hover::before {
-  left: 100%;
+/* 筛选栏 */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
 }
 
-/* 深色模式下的光效调整 */
-:deep(.dark) .project-card::before {
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(255, 255, 255, 0.05),
-    transparent
-  );
+.search-input {
+  flex: 1;
+  min-width: 150px;
+  max-width: 250px;
 }
 
-/* 卡片顶部装饰线 - 科技感 */
-.project-card::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(59, 130, 246, 0.5),
-    rgba(147, 51, 234, 0.5),
-    transparent
-  );
-  opacity: 0;
-  transition: opacity 0.3s ease;
+.filter-select {
+  width: 100px;
 }
 
-.project-card:hover::after {
-  opacity: 1;
+.sort-select {
+  width: 90px;
+}
+
+/* 卡片网格布局 */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+/* 空状态样式 */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+  text-align: center;
+}
+
+.empty-icon {
+  margin-bottom: 16px;
+}
+
+.empty-title {
+  font-size: 16px;
+  font-weight: 500;
+  margin-bottom: 8px;
+  opacity: 0.8;
+}
+
+.empty-desc {
+  font-size: 13px;
+  opacity: 0.5;
+  margin-bottom: 16px;
+}
+
+/* 响应式调整 */
+@media (max-width: 768px) {
+  .card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .search-input {
+    max-width: none;
+  }
+
+  .filter-select,
+  .sort-select {
+    width: 100%;
+  }
 }
 </style>

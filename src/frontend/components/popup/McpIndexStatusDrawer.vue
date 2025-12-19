@@ -32,6 +32,18 @@ const drawerVisible = computed({
   set: (val: boolean) => emit('update:show', val),
 })
 
+// 规范化展示路径（去掉 Windows 扩展前缀并统一斜杠）
+const displayPath = computed(() => {
+  let p = props.projectRoot || ''
+  // 处理 Windows 扩展路径前缀 \\?\ 或 //?/
+  if (p.startsWith('\\\\?\\'))
+    p = p.slice(4)
+  else if (p.startsWith('//?/'))
+    p = p.slice(4)
+  // 统一使用正斜杠
+  return p.replace(/\\/g, '/')
+})
+
 // 文件索引状态数据
 const filesStatus = ref<ProjectFilesStatus | null>(null)
 const loadingFiles = ref(false)
@@ -213,8 +225,8 @@ function handleResyncClick() {
         <div class="space-y-1">
           <div class="flex items-center justify-between">
             <span class="text-gray-500">项目路径</span>
-            <span class="ml-2 truncate max-w-[260px]" :title="projectRoot">
-              {{ projectRoot || '未提供' }}
+            <span class="ml-2 truncate max-w-[260px]" :title="displayPath">
+              {{ displayPath || '未提供' }}
             </span>
           </div>
           <div class="flex items-center justify-between">
