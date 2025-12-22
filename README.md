@@ -22,6 +22,27 @@
 
 ---
 
+## 📥 Releases 下载
+
+### 快速下载
+
+从 [GitHub Releases 页面](https://github.com/yuaotian/sanshu/releases) 下载最新版本的预编译可执行文件：
+
+| 平台 | 下载链接 | 说明 |
+|------|---------|------|
+| **Windows x86_64** | [下载 .zip](https://github.com/yuaotian/sanshu/releases/latest) | 适用于 64 位 Windows 系统 |
+| **macOS ARM64** | [下载 .tar.gz](https://github.com/yuaotian/sanshu/releases/latest) | 适用于 Apple Silicon (M1/M2/M3) |
+| **macOS x86_64** | [下载 .tar.gz](https://github.com/yuaotian/sanshu/releases/latest) | 适用于 Intel 芯片的 Mac |
+| **Linux x86_64** | [下载 .tar.gz](https://github.com/yuaotian/sanshu/releases/latest) | 适用于 64 位 Linux 系统 |
+
+### 安装说明
+
+下载后请参考 [📦 安装与使用](#-安装与使用) 章节完成环境配置。
+
+> 💡 **提示**：如果你更喜欢从源码构建或使用包管理器安装，请查看下方的 [📦 安装与使用](#-安装与使用) 章节。
+
+---
+
 ## 📖 简介
 
 **三术 (sanshu)** 是一个集成了 **智 (zhi)**、**记 (ji)**、**搜 (sou)** 三大核心能力的 AI 辅助编程增强系统。它通过 MCP (Model Context Protocol) 协议与 AI 助手深度协同，实现了从被动应答到主动协作的范式转变。
