@@ -481,17 +481,21 @@ pub async fn remove_acemcp_project_index(project_root_path: String) -> Result<St
     use std::fs;
     use std::collections::HashMap;
 
-    // 规范化路径：不使用 canonicalize()，因为目录可能已被删除
-    // 仅进行字符串级别的规范化：去除扩展路径前缀，统一使用正斜杠
-    let mut normalized_root = project_root_path.clone();
-    // 去除 Windows 扩展长度路径前缀
-    if normalized_root.starts_with("\\\\?\\") {
-        normalized_root = normalized_root[4..].to_string();
-    } else if normalized_root.starts_with("//?/") {
-        normalized_root = normalized_root[4..].to_string();
+    // 辅助函数：规范化路径 key（去除扩展路径前缀，统一使用正斜杠）
+    fn normalize_path_key(path: &str) -> String {
+        let mut normalized = path.to_string();
+        // 去除 Windows 扩展长度路径前缀
+        if normalized.starts_with("\\\\?\\") {
+            normalized = normalized[4..].to_string();
+        } else if normalized.starts_with("//?/") {
+            normalized = normalized[4..].to_string();
+        }
+        // 统一使用正斜杠
+        normalized.replace('\\', "/")
     }
-    // 统一使用正斜杠
-    normalized_root = normalized_root.replace('\\', "/");
+
+    // 规范化传入的路径
+    let normalized_root = normalize_path_key(&project_root_path);
 
     log::info!("[remove_acemcp_project_index] 开始删除项目索引记录");
     log::info!("[remove_acemcp_project_index] 原始路径: {}", project_root_path);
@@ -512,10 +516,17 @@ pub async fn remove_acemcp_project_index(project_root_path: String) -> Result<St
                 let existing_keys: Vec<&String> = projects.keys().collect();
                 log::info!("[remove_acemcp_project_index] projects.json 中现有项目: {:?}", existing_keys);
                 
-                if projects.remove(&normalized_root).is_some() {
+                // 遍历查找匹配的 key（对每个 key 也进行规范化后比较）
+                let key_to_remove: Option<String> = projects.keys()
+                    .find(|k| normalize_path_key(k) == normalized_root)
+                    .cloned();
+                
+                if let Some(key) = key_to_remove {
+                    log::info!("[remove_acemcp_project_index] 找到匹配的 key: {}", key);
+                    projects.remove(&key);
                     if let Ok(new_data) = serde_json::to_string_pretty(&projects) {
                         let _ = fs::write(&projects_path, new_data);
-                        log::info!("[remove_acemcp_project_index] ✓ 已从 projects.json 删除项目: {}", normalized_root);
+                        log::info!("[remove_acemcp_project_index] ✓ 已从 projects.json 删除项目: {}", key);
                         projects_deleted = true;
                     }
                 } else {
@@ -538,10 +549,17 @@ pub async fn remove_acemcp_project_index(project_root_path: String) -> Result<St
                         let existing_keys: Vec<&String> = map.keys().collect();
                         log::info!("[remove_acemcp_project_index] projects_status.json 中现有项目: {:?}", existing_keys);
                         
-                        if map.remove(&normalized_root).is_some() {
+                        // 遍历查找匹配的 key（对每个 key 也进行规范化后比较）
+                        let key_to_remove: Option<String> = map.keys()
+                            .find(|k| normalize_path_key(k) == normalized_root)
+                            .cloned();
+                        
+                        if let Some(key) = key_to_remove {
+                            log::info!("[remove_acemcp_project_index] 找到匹配的 key: {}", key);
+                            map.remove(&key);
                             if let Ok(new_data) = serde_json::to_string_pretty(&status) {
                                 let _ = fs::write(&status_path, new_data);
-                                log::info!("[remove_acemcp_project_index] ✓ 已从 projects_status.json 删除项目: {}", normalized_root);
+                                log::info!("[remove_acemcp_project_index] ✓ 已从 projects_status.json 删除项目: {}", key);
                                 status_deleted = true;
                             }
                         } else {
