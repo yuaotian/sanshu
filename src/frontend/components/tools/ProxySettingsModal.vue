@@ -1,3 +1,5 @@
+<!-- eslint-disable vue/no-mutating-props -->
+<!-- eslint-disable style/max-statements-per-line -->
 <script setup lang="ts">
 /**
  * 代理设置独立弹窗组件
