@@ -18,7 +18,7 @@ pub fn setup_window_event_listeners(app_handle: &AppHandle) {
                 tauri::async_runtime::spawn(async move {
                     let state = app_handle.state::<AppState>();
 
-                    log_important!(info, "🖱️ 窗口关闭按钮被点击");
+                    // log_important!(info, "🖱️ 窗口关闭按钮被点击");
 
                     // 窗口关闭按钮点击应该直接退出，不需要双重确认
                     match crate::ui::exit::handle_system_exit_request(
@@ -30,7 +30,7 @@ pub fn setup_window_event_listeners(app_handle: &AppHandle) {
                             if !exited {
                                 log_important!(info, "退出被阻止，等待二次确认");
                             } else {
-                                log_important!(info, "应用已退出");
+                                // log_important!(info, "应用已退出");
                             }
                         }
                         Err(e) => {
