@@ -4,8 +4,8 @@
  * 包含：代理配置、自动检测、测速、测速报告等功能
  */
 import { invoke } from '@tauri-apps/api/core'
-import { useMessage, useDialog } from 'naive-ui'
-import { ref, computed, watch } from 'vue'
+import { useDialog, useMessage } from 'naive-ui'
+import { computed, ref, watch } from 'vue'
 
 // Props
 const props = defineProps<{
@@ -96,7 +96,7 @@ const addProjectIndexing = ref(false)
 
 const showModal = computed({
   get: () => props.show,
-  set: (v) => emit('update:show', v)
+  set: v => emit('update:show', v),
 })
 
 const speedTestQueries = computed(() => {
@@ -290,12 +290,12 @@ async function openProjectPicker() {
   }
 
   projectPickerSelected.value = speedTestProjectRoot.value || indexedProjects.value[0].project_root
-  
+
   // 强制确保有选中值，如果当前没有，则选中列表第一个
   if (!projectPickerSelected.value && indexedProjects.value.length > 0) {
-     projectPickerSelected.value = indexedProjects.value[0].project_root
+    projectPickerSelected.value = indexedProjects.value[0].project_root
   }
-  
+
   projectPickerVisible.value = true
 }
 
@@ -524,16 +524,16 @@ async function copyQueryDetail(detail: SpeedTestQueryDetail, idx: number) {
     proxy_ms: detail.proxy_time_ms,
     direct_ms: detail.direct_time_ms,
     success: detail.success,
-    error: detail.error
+    error: detail.error,
   }
   try {
     await navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
     message.success(`已复制 Q${idx + 1} 明细`)
-  } catch (e) {
+  }
+  catch (e) {
     message.error(`复制失败: ${e}`)
   }
 }
-
 
 async function copyMetricResult(metric: SpeedTestMetric) {
   try {
@@ -544,7 +544,6 @@ async function copyMetricResult(metric: SpeedTestMetric) {
     message.error(`复制失败: ${e}`)
   }
 }
-
 
 async function downloadSpeedTestReport() {
   const report = buildSpeedTestReportPayload()
@@ -581,28 +580,39 @@ function getProjectName(projectRoot: string): string {
 }
 
 function formatIndexTime(ts: string | null): string {
-  if (!ts) return '未完成'
-  try { return new Date(ts).toLocaleString() } catch { return ts }
+  if (!ts)
+    return '未完成'
+  try { return new Date(ts).toLocaleString() }
+  catch { return ts }
 }
 
 function formatSpeedTestTime(ts: string): string {
-  if (!ts) return '-'
-  try { return new Date(ts).toLocaleString() } catch { return ts }
+  if (!ts)
+    return '-'
+  try { return new Date(ts).toLocaleString() }
+  catch { return ts }
 }
 
 function calcDiff(proxyMs: number | null, directMs: number | null): string {
-  if (proxyMs === null || directMs === null) return '-'
-  if (directMs === 0) return '-'
+  if (proxyMs === null || directMs === null)
+    return '-'
+  if (directMs === 0)
+    return '-'
   const diff = ((directMs - proxyMs) / directMs * 100).toFixed(0)
-  if (Number(diff) > 0) return `⬇️${diff}%`
-  if (Number(diff) < 0) return `⬆️${Math.abs(Number(diff))}%`
+  if (Number(diff) > 0)
+    return `⬇️${diff}%`
+  if (Number(diff) < 0)
+    return `⬆️${Math.abs(Number(diff))}%`
   return '0%'
 }
 
 function getDiffColor(proxyMs: number | null, directMs: number | null): string {
-  if (proxyMs === null || directMs === null) return 'inherit'
-  if (proxyMs < directMs) return '#22c55e'
-  if (proxyMs > directMs) return '#ef4444'
+  if (proxyMs === null || directMs === null)
+    return 'inherit'
+  if (proxyMs < directMs)
+    return '#22c55e'
+  if (proxyMs > directMs)
+    return '#ef4444'
   return 'inherit'
 }
 </script>
@@ -627,21 +637,27 @@ function getDiffColor(proxyMs: number | null, directMs: number | null): string {
             <div class="i-carbon-network-3 text-2xl" />
           </div>
           <div>
-            <div class="font-medium text-base mb-1">启用代理服务</div>
+            <div class="font-medium text-base mb-1">
+              启用代理服务
+            </div>
             <div class="text-xs text-gray-500 dark:text-gray-400">
               启用后，所有 ACE API 请求将通过此代理。
-              <div class="inline-block mt-1 px-1.5 py-0.5 rounded bg-orange-50 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400 text-[10px]" v-if="!config.proxy_enabled">
+              <div v-if="!config.proxy_enabled" class="inline-block mt-1 px-1.5 py-0.5 rounded bg-orange-50 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400 text-[10px]">
                 当前直接连接
               </div>
-              <div class="inline-block mt-1 px-1.5 py-0.5 rounded bg-green-50 dark:bg-green-900/30 text-green-600 dark:text-green-400 text-[10px]" v-else>
+              <div v-else class="inline-block mt-1 px-1.5 py-0.5 rounded bg-green-50 dark:bg-green-900/30 text-green-600 dark:text-green-400 text-[10px]">
                 代理已启用 ({{ config.proxy_type.toUpperCase() }}://{{ config.proxy_host }}:{{ config.proxy_port }})
               </div>
             </div>
           </div>
         </div>
         <n-switch v-model:value="config.proxy_enabled" size="large">
-          <template #checked>开启</template>
-          <template #unchecked>关闭</template>
+          <template #checked>
+            开启
+          </template>
+          <template #unchecked>
+            关闭
+          </template>
         </n-switch>
       </div>
 
@@ -651,209 +667,235 @@ function getDiffColor(proxyMs: number | null, directMs: number | null): string {
           <n-space vertical size="large" class="pt-2">
             <!-- 代理表单 -->
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-               <!-- 基础信息 -->
+              <!-- 基础信息 -->
               <div class="md:col-span-2">
-                 <div class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">基础连接</div>
-                 <div class="grid grid-cols-12 gap-3">
-                   <div class="col-span-12 md:col-span-5">
-                      <n-form-item label="Host (地址)" size="small">
-                        <n-input v-model:value="config.proxy_host" placeholder="127.0.0.1" clearable />
-                      </n-form-item>
-                   </div>
-                   <div class="col-span-12 md:col-span-3">
-                      <n-form-item label="Port (端口)" size="small">
-                        <n-input-number v-model:value="config.proxy_port" :min="1" :max="65535" class="w-full" :show-button="false" />
-                      </n-form-item>
-                   </div>
-                   <div class="col-span-12 md:col-span-4">
-                      <n-form-item label="Type (类型)" size="small">
-                         <n-select v-model:value="config.proxy_type" :options="[{label:'HTTP',value:'http'},{label:'HTTPS',value:'https'},{label:'SOCKS5',value:'socks5'}]" />
-                      </n-form-item>
-                   </div>
-                 </div>
+                <div class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
+                  基础连接
+                </div>
+                <div class="grid grid-cols-12 gap-3">
+                  <div class="col-span-12 md:col-span-5">
+                    <n-form-item label="Host (地址)" size="small">
+                      <n-input v-model:value="config.proxy_host" placeholder="127.0.0.1" clearable />
+                    </n-form-item>
+                  </div>
+                  <div class="col-span-12 md:col-span-3">
+                    <n-form-item label="Port (端口)" size="small">
+                      <n-input-number v-model:value="config.proxy_port" :min="1" :max="65535" class="w-full" :show-button="false" />
+                    </n-form-item>
+                  </div>
+                  <div class="col-span-12 md:col-span-4">
+                    <n-form-item label="Type (类型)" size="small">
+                      <n-select v-model:value="config.proxy_type" :options="[{ label: 'HTTP', value: 'http' }, { label: 'HTTPS', value: 'https' }, { label: 'SOCKS5', value: 'socks5' }]" />
+                    </n-form-item>
+                  </div>
+                </div>
               </div>
 
-               <!-- 认证信息 -->
+              <!-- 认证信息 -->
               <div class="md:col-span-2">
-                 <div class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2 mt-2">身份认证 (可选)</div>
-                 <div class="grid grid-cols-12 gap-3">
-                   <div class="col-span-12 md:col-span-6">
-                      <n-form-item label="用户名" size="small">
-                        <n-input v-model:value="config.proxy_username" placeholder="无" clearable />
-                      </n-form-item>
-                   </div>
-                   <div class="col-span-12 md:col-span-6">
-                      <n-form-item label="密码" size="small">
-                        <n-input v-model:value="config.proxy_password" type="password" show-password-on="click" placeholder="无" clearable />
-                      </n-form-item>
-                   </div>
-                 </div>
+                <div class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2 mt-2">
+                  身份认证 (可选)
+                </div>
+                <div class="grid grid-cols-12 gap-3">
+                  <div class="col-span-12 md:col-span-6">
+                    <n-form-item label="用户名" size="small">
+                      <n-input v-model:value="config.proxy_username" placeholder="无" clearable />
+                    </n-form-item>
+                  </div>
+                  <div class="col-span-12 md:col-span-6">
+                    <n-form-item label="密码" size="small">
+                      <n-input v-model:value="config.proxy_password" type="password" show-password-on="click" placeholder="无" clearable />
+                    </n-form-item>
+                  </div>
+                </div>
               </div>
             </div>
 
             <!-- 检测区域 -->
             <div class="p-4 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/30">
-               <div class="flex items-center justify-between mb-3">
-                 <div class="flex flex-col">
-                   <div class="text-sm font-medium">自动检测本地代理</div>
-                   <div class="text-xs text-gray-500">自动扫描常用端口和进程</div>
-                 </div>
-                 <n-button secondary size="small" :loading="proxyDetecting" @click="detectProxy">
-                    <template #icon><div class="i-carbon-radar" /></template>
-                    开始检测
-                 </n-button>
-               </div>
-               
-               <n-form-item label="额外扫描端口 (可选)" label-placement="left" size="small" :show-feedback="false">
-                  <n-input v-model:value="extraDetectPortsText" placeholder="8888, 8081" class="max-w-[300px]" />
-               </n-form-item>
+              <div class="flex items-center justify-between mb-3">
+                <div class="flex flex-col">
+                  <div class="text-sm font-medium">
+                    自动检测本地代理
+                  </div>
+                  <div class="text-xs text-gray-500">
+                    自动扫描常用端口和进程
+                  </div>
+                </div>
+                <n-button secondary size="small" :loading="proxyDetecting" @click="detectProxy">
+                  <template #icon>
+                    <div class="i-carbon-radar" />
+                  </template>
+                  开始检测
+                </n-button>
+              </div>
 
-               <!-- 检测结果展示 -->
-               <n-collapse-transition :show="detectedProxies.length > 0">
-                 <div class="mt-3 flex flex-wrap gap-2">
-                    <div 
-                      v-for="(p, idx) in detectedProxies" :key="idx" 
-                      class="px-3 py-1.5 rounded-full text-xs font-mono cursor-pointer border transition-colors flex items-center gap-2"
-                      :class="config.proxy_port === p.port ? 'bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-900/40 dark:text-blue-300 dark:border-blue-700' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50 dark:bg-slate-800 dark:text-gray-300 dark:border-slate-700'"
-                      @click="applyProxy(p)"
-                    >
-                       <span>{{ p.host }}:{{ p.port }}</span>
-                       <span class="opacity-70">{{ p.proxy_type.toUpperCase() }}</span>
-                       <span v-if="p.response_time_ms" class="px-1 rounded bg-black/5 dark:bg-white/10">{{ p.response_time_ms }}ms</span>
-                    </div>
-                 </div>
-               </n-collapse-transition>
+              <n-form-item label="额外扫描端口 (可选)" label-placement="left" size="small" :show-feedback="false">
+                <n-input v-model:value="extraDetectPortsText" placeholder="8888, 8081" class="max-w-[300px]" />
+              </n-form-item>
+
+              <!-- 检测结果展示 -->
+              <n-collapse-transition :show="detectedProxies.length > 0">
+                <div class="mt-3 flex flex-wrap gap-2">
+                  <div
+                    v-for="(p, idx) in detectedProxies" :key="idx"
+                    class="px-3 py-1.5 rounded-full text-xs font-mono cursor-pointer border transition-colors flex items-center gap-2"
+                    :class="config.proxy_port === p.port ? 'bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-900/40 dark:text-blue-300 dark:border-blue-700' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50 dark:bg-slate-800 dark:text-gray-300 dark:border-slate-700'"
+                    @click="applyProxy(p)"
+                  >
+                    <span>{{ p.host }}:{{ p.port }}</span>
+                    <span class="opacity-70">{{ p.proxy_type.toUpperCase() }}</span>
+                    <span v-if="p.response_time_ms" class="px-1 rounded bg-black/5 dark:bg-white/10">{{ p.response_time_ms }}ms</span>
+                  </div>
+                </div>
+              </n-collapse-transition>
             </div>
           </n-space>
         </n-tab-pane>
 
         <!-- Tab 2: 测速与诊断 -->
         <n-tab-pane name="speedtest" tab="网络测速与诊断">
-           <n-space vertical size="medium" class="pt-2">
-              <!-- 配置项 -->
-              <div class="grid grid-cols-12 gap-4">
-                 <div class="col-span-12 md:col-span-4">
-                    <n-form-item label="测试模式" size="small">
-                      <n-select v-model:value="speedTestMode" :options="[{label:'对比 (代理 vs 直连)',value:'compare'},{label:'仅代理',value:'proxy'},{label:'仅直连',value:'direct'}]" />
-                    </n-form-item>
-                 </div>
-                 
-                 <div class="col-span-12 md:col-span-8">
-                    <n-form-item label="测试项目" size="small">
-                        <n-input-group>
-                          <n-input v-model:value="speedTestProjectRoot" placeholder="请选择已索引项目用于上传测速" readonly />
-                          <n-button secondary @click="openProjectPicker">选择</n-button>
-                        </n-input-group>
-                    </n-form-item>
-                 </div>
-
-                 <div class="col-span-12">
-                     <n-form-item label="测试查询语 (每行一条，最多5条)" size="small">
-                        <n-input v-model:value="speedTestQuery" type="textarea" :rows="2" placeholder="Ping; Upload; Search Query..." />
-                     </n-form-item>
-                 </div>
+          <n-space vertical size="medium" class="pt-2">
+            <!-- 配置项 -->
+            <div class="grid grid-cols-12 gap-4">
+              <div class="col-span-12 md:col-span-4">
+                <n-form-item label="测试模式" size="small">
+                  <n-select v-model:value="speedTestMode" :options="[{ label: '对比 (代理 vs 直连)', value: 'compare' }, { label: '仅代理', value: 'proxy' }, { label: '仅直连', value: 'direct' }]" />
+                </n-form-item>
               </div>
 
-              <!-- 启动区 -->
-              <div class="flex items-center gap-3">
-                 <n-tooltip :disabled="!speedTestDisabled">
-                    <template #trigger>
-                       <n-button type="primary" :loading="proxyTesting" :disabled="speedTestDisabled" @click="runSpeedTest" class="px-6">
-                          <template #icon><div class="i-carbon-rocket" /></template>
-                          开始测速
-                       </n-button>
+              <div class="col-span-12 md:col-span-8">
+                <n-form-item label="测试项目" size="small">
+                  <n-input-group>
+                    <n-input v-model:value="speedTestProjectRoot" placeholder="请选择已索引项目用于上传测速" readonly />
+                    <n-button secondary @click="openProjectPicker">
+                      选择
+                    </n-button>
+                  </n-input-group>
+                </n-form-item>
+              </div>
+
+              <div class="col-span-12">
+                <n-form-item label="测试查询语 (每行一条，最多5条)" size="small">
+                  <n-input v-model:value="speedTestQuery" type="textarea" :rows="2" placeholder="Ping; Upload; Search Query..." />
+                </n-form-item>
+              </div>
+            </div>
+
+            <!-- 启动区 -->
+            <div class="flex items-center gap-3">
+              <n-tooltip :disabled="!speedTestDisabled">
+                <template #trigger>
+                  <n-button type="primary" :loading="proxyTesting" :disabled="speedTestDisabled" class="px-6" @click="runSpeedTest">
+                    <template #icon>
+                      <div class="i-carbon-rocket" />
                     </template>
-                    {{ speedTestDisabledReason }}
-                 </n-tooltip>
-                 
-                 <span v-if="proxyTesting" class="text-xs text-gray-500 animate-pulse">{{ speedTestProgress }}</span>
+                    开始测速
+                  </n-button>
+                </template>
+                {{ speedTestDisabledReason }}
+              </n-tooltip>
+
+              <span v-if="proxyTesting" class="text-xs text-gray-500 animate-pulse">{{ speedTestProgress }}</span>
+            </div>
+
+            <!-- 结果区 -->
+            <div v-if="speedTestResult" class="mt-2 text-sm">
+              <div class="flex items-center justify-between mb-2">
+                <div class="font-bold flex items-center gap-2">
+                  测试结果
+                  <n-tag :type="speedTestResult.success ? 'success' : 'warning'" size="small" round>
+                    {{ speedTestResult.success ? 'Success' : 'Partial Fail' }}
+                  </n-tag>
+                </div>
+                <div class="flex gap-2">
+                  <n-button size="tiny" secondary @click="copySpeedTestReport">
+                    复制JSON
+                  </n-button>
+                  <n-button size="tiny" secondary @click="downloadSpeedTestReport">
+                    导出报告
+                  </n-button>
+                </div>
               </div>
 
-              <!-- 结果区 -->
-              <div v-if="speedTestResult" class="mt-2 text-sm">
-                 <div class="flex items-center justify-between mb-2">
-                    <div class="font-bold flex items-center gap-2">
-                       测试结果
-                       <n-tag :type="speedTestResult.success ? 'success' : 'warning'" size="small" round>
-                         {{ speedTestResult.success ? 'Success' : 'Partial Fail' }}
-                       </n-tag>
+              <!-- 主要指标卡片 -->
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+                <div
+                  v-for="(metric, idx) in speedTestMetricsForDisplay" :key="idx"
+                  class="p-3 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 relative group"
+                >
+                  <div class="flex justify-between items-start mb-2">
+                    <span class="font-medium text-gray-700 dark:text-gray-200">{{ metric.name }}</span>
+                    <div class="opacity-0 group-hover:opacity-100 transition-opacity absolute top-2 right-2">
+                      <n-button text size="tiny" @click="copyMetricResult(metric)">
+                        <div class="i-carbon-copy" />
+                      </n-button>
                     </div>
-                    <div class="flex gap-2">
-                       <n-button size="tiny" secondary @click="copySpeedTestReport">复制JSON</n-button>
-                       <n-button size="tiny" secondary @click="downloadSpeedTestReport">导出报告</n-button>
+                  </div>
+
+                  <div class="flex items-end justify-between font-mono text-xs">
+                    <!-- 代理耗时 -->
+                    <div v-if="speedTestResult.mode !== 'direct'">
+                      <div class="text-gray-400 scale-[0.8] origin-left">
+                        PROXY
+                      </div>
+                      <div :class="metric.proxy_time_ms !== null ? 'text-blue-600 dark:text-blue-400 font-bold text-base' : 'text-gray-300'">
+                        {{ metric.proxy_time_ms !== null ? `${metric.proxy_time_ms}ms` : '-' }}
+                      </div>
                     </div>
-                 </div>
 
-                 <!-- 主要指标卡片 -->
-                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-                    <div v-for="(metric, idx) in speedTestMetricsForDisplay" :key="idx" 
-                         class="p-3 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 relative group"
-                    >
-                       <div class="flex justify-between items-start mb-2">
-                          <span class="font-medium text-gray-700 dark:text-gray-200">{{ metric.name }}</span>
-                          <div class="opacity-0 group-hover:opacity-100 transition-opacity absolute top-2 right-2">
-                             <n-button text size="tiny" @click="copyMetricResult(metric)"><div class="i-carbon-copy" /></n-button>
-                          </div>
-                       </div>
-                       
-                       <div class="flex items-end justify-between font-mono text-xs">
-                          <!-- 代理耗时 -->
-                          <div v-if="speedTestResult.mode !== 'direct'">
-                             <div class="text-gray-400 scale-[0.8] origin-left">PROXY</div>
-                             <div :class="metric.proxy_time_ms !== null ? 'text-blue-600 dark:text-blue-400 font-bold text-base' : 'text-gray-300'">
-                               {{ metric.proxy_time_ms !== null ? metric.proxy_time_ms + 'ms' : '-' }}
-                             </div>
-                          </div>
-                          
-                          <!-- 差异可视 -->
-                          <div v-if="speedTestResult.mode === 'compare'" class="flex-1 text-center px-2 pb-1">
-                             <div class="text-[10px] font-bold" :style="{ color: getDiffColor(metric.proxy_time_ms, metric.direct_time_ms) }">
-                                {{ calcDiff(metric.proxy_time_ms, metric.direct_time_ms) }}
-                             </div>
-                          </div>
-
-                          <!-- 直连耗时 -->
-                          <div v-if="speedTestResult.mode !== 'proxy'" class="text-right">
-                             <div class="text-gray-400 scale-[0.8] origin-right">DIRECT</div>
-                             <div :class="metric.direct_time_ms !== null ? 'text-orange-600 dark:text-orange-400 font-bold text-base' : 'text-gray-300'">
-                               {{ metric.direct_time_ms !== null ? metric.direct_time_ms + 'ms' : '-' }}
-                             </div>
-                          </div>
-                       </div>
-                       
-                       <div v-if="metric.error" class="mt-2 text-[10px] text-red-500 leading-tight border-t border-red-100 dark:border-red-900/30 pt-1">
-                          {{ metric.error }}
-                       </div>
+                    <!-- 差异可视 -->
+                    <div v-if="speedTestResult.mode === 'compare'" class="flex-1 text-center px-2 pb-1">
+                      <div class="text-[10px] font-bold" :style="{ color: getDiffColor(metric.proxy_time_ms, metric.direct_time_ms) }">
+                        {{ calcDiff(metric.proxy_time_ms, metric.direct_time_ms) }}
+                      </div>
                     </div>
-                 </div>
 
-                 <!-- 多查询详情折叠 -->
-                 <div v-if="multiQuerySearchSummary" class="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
-                    <div class="bg-gray-50 dark:bg-slate-800/50 px-3 py-2 flex justify-between items-center cursor-pointer hover:bg-gray-100 dark:hover:bg-slate-800 transition-colors"
-                         @click="multiQueryDetailsExpanded = !multiQueryDetailsExpanded"
-                    >
-                       <span class="text-xs font-medium">查看 {{ multiQuerySearchDetails.length }} 条查询明细</span>
-                       <div class="i-carbon-chevron-down transition-transform" :class="{ 'rotate-180': multiQueryDetailsExpanded }" />
+                    <!-- 直连耗时 -->
+                    <div v-if="speedTestResult.mode !== 'proxy'" class="text-right">
+                      <div class="text-gray-400 scale-[0.8] origin-right">
+                        DIRECT
+                      </div>
+                      <div :class="metric.direct_time_ms !== null ? 'text-orange-600 dark:text-orange-400 font-bold text-base' : 'text-gray-300'">
+                        {{ metric.direct_time_ms !== null ? `${metric.direct_time_ms}ms` : '-' }}
+                      </div>
                     </div>
-                    <n-collapse-transition :show="multiQueryDetailsExpanded">
-                       <div class="p-2 space-y-1 bg-white dark:bg-slate-900">
-                          <div v-for="(d, i) in multiQuerySearchDetails" :key="i" class="flex items-center justify-between text-xs p-1.5 hover:bg-gray-50 dark:hover:bg-slate-800 rounded">
-                             <span class="truncate max-w-[150px] text-gray-500" :title="d.query">{{ d.query }}</span>
-                             <div class="flex gap-3 font-mono">
-                                <span v-if="speedTestResult.mode !== 'direct'" class="text-blue-600">{{ d.proxy_time_ms ?? '-' }}ms</span>
-                                <span v-if="speedTestResult.mode !== 'proxy'" class="text-orange-600">{{ d.direct_time_ms ?? '-' }}ms</span>
-                             </div>
-                          </div>
-                       </div>
-                    </n-collapse-transition>
-                 </div>
+                  </div>
 
-                 <!-- 建议 -->
-                 <div class="mt-3 text-xs text-gray-600 dark:text-gray-300 p-2 bg-yellow-50 dark:bg-yellow-900/10 rounded border border-yellow-100 dark:border-yellow-900/20">
-                    💡 {{ speedTestResult.recommendation }}
-                 </div>
+                  <div v-if="metric.error" class="mt-2 text-[10px] text-red-500 leading-tight border-t border-red-100 dark:border-red-900/30 pt-1">
+                    {{ metric.error }}
+                  </div>
+                </div>
               </div>
-           </n-space>
+
+              <!-- 多查询详情折叠 -->
+              <div v-if="multiQuerySearchSummary" class="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
+                <div
+                  class="bg-gray-50 dark:bg-slate-800/50 px-3 py-2 flex justify-between items-center cursor-pointer hover:bg-gray-100 dark:hover:bg-slate-800 transition-colors"
+                  @click="multiQueryDetailsExpanded = !multiQueryDetailsExpanded"
+                >
+                  <span class="text-xs font-medium">查看 {{ multiQuerySearchDetails.length }} 条查询明细</span>
+                  <div class="i-carbon-chevron-down transition-transform" :class="{ 'rotate-180': multiQueryDetailsExpanded }" />
+                </div>
+                <n-collapse-transition :show="multiQueryDetailsExpanded">
+                  <div class="p-2 space-y-1 bg-white dark:bg-slate-900">
+                    <div v-for="(d, i) in multiQuerySearchDetails" :key="i" class="flex items-center justify-between text-xs p-1.5 hover:bg-gray-50 dark:hover:bg-slate-800 rounded">
+                      <span class="truncate max-w-[150px] text-gray-500" :title="d.query">{{ d.query }}</span>
+                      <div class="flex gap-3 font-mono">
+                        <span v-if="speedTestResult.mode !== 'direct'" class="text-blue-600">{{ d.proxy_time_ms ?? '-' }}ms</span>
+                        <span v-if="speedTestResult.mode !== 'proxy'" class="text-orange-600">{{ d.direct_time_ms ?? '-' }}ms</span>
+                      </div>
+                    </div>
+                  </div>
+                </n-collapse-transition>
+              </div>
+
+              <!-- 建议 -->
+              <div class="mt-3 text-xs text-gray-600 dark:text-gray-300 p-2 bg-yellow-50 dark:bg-yellow-900/10 rounded border border-yellow-100 dark:border-yellow-900/20">
+                💡 {{ speedTestResult.recommendation }}
+              </div>
+            </div>
+          </n-space>
         </n-tab-pane>
       </n-tabs>
     </div>
@@ -863,53 +905,66 @@ function getDiffColor(proxyMs: number | null, directMs: number | null): string {
       <n-radio-group v-model:value="selectedProxyIndex">
         <n-space vertical>
           <n-radio v-for="(p, idx) in detectedProxies" :key="idx" :value="idx">
-             {{ p.host }}:{{ p.port }} ({{ p.proxy_type }}) - {{ p.response_time_ms }}ms
+            {{ p.host }}:{{ p.port }} ({{ p.proxy_type }}) - {{ p.response_time_ms }}ms
           </n-radio>
         </n-space>
       </n-radio-group>
       <template #footer>
         <div class="flex justify-end gap-2">
-           <n-button size="small" secondary @click="proxyPickerVisible = false">取消</n-button>
-           <n-button size="small" type="primary" @click="confirmProxySelection">确认</n-button>
+          <n-button size="small" secondary @click="proxyPickerVisible = false">
+            取消
+          </n-button>
+          <n-button size="small" type="primary" @click="confirmProxySelection">
+            确认
+          </n-button>
         </div>
       </template>
     </n-modal>
-    
+
     <!-- 子弹窗：项目选择器 -->
     <n-modal v-model:show="projectPickerVisible" preset="card" title="选择测试项目" style="width: 500px" size="small">
-       <div class="h-[300px] overflow-y-auto pr-2">
-          <n-radio-group v-model:value="projectPickerSelected">
-             <n-space vertical>
-                <n-radio v-for="p in indexedProjects" :key="p.project_root" :value="p.project_root">
-                   <div class="text-xs">
-                      <div class="font-medium">{{ getProjectName(p.project_root) }}</div>
-                      <div class="text-gray-400">{{ p.total_files }} files · {{ formatIndexTime(p.last_success_time) }}</div>
-                   </div>
-                </n-radio>
-             </n-space>
-          </n-radio-group>
-       </div>
-       <template #action>
-          <div class="flex justify-between items-center w-full">
-             <n-button size="small" secondary @click="addProjectVisible = true">添加新项目</n-button>
-             <div class="flex gap-2">
-                <n-button size="small" secondary @click="projectPickerVisible = false">取消</n-button>
-                <n-button size="small" type="primary" @click="confirmProjectSelectionAndRun">确定</n-button>
-             </div>
+      <div class="h-[300px] overflow-y-auto pr-2">
+        <n-radio-group v-model:value="projectPickerSelected">
+          <n-space vertical>
+            <n-radio v-for="p in indexedProjects" :key="p.project_root" :value="p.project_root">
+              <div class="text-xs">
+                <div class="font-medium">
+                  {{ getProjectName(p.project_root) }}
+                </div>
+                <div class="text-gray-400">
+                  {{ p.total_files }} files · {{ formatIndexTime(p.last_success_time) }}
+                </div>
+              </div>
+            </n-radio>
+          </n-space>
+        </n-radio-group>
+      </div>
+      <template #action>
+        <div class="flex justify-between items-center w-full">
+          <n-button size="small" secondary @click="addProjectVisible = true">
+            添加新项目
+          </n-button>
+          <div class="flex gap-2">
+            <n-button size="small" secondary @click="projectPickerVisible = false">
+              取消
+            </n-button>
+            <n-button size="small" type="primary" @click="confirmProjectSelectionAndRun">
+              确定
+            </n-button>
           </div>
-       </template>
+        </div>
+      </template>
     </n-modal>
 
     <!-- 子弹窗：添加项目 -->
     <n-modal v-model:show="addProjectVisible" preset="card" title="添加新项目" style="width: 400px" size="small">
-       <n-space vertical>
-          <n-input v-model:value="addProjectPath" placeholder="输入绝对路径..." />
-          <n-button block type="primary" :loading="addProjectIndexing" @click="addProjectAndIndexAndRun">
-             索引并添加到测试
-          </n-button>
-       </n-space>
+      <n-space vertical>
+        <n-input v-model:value="addProjectPath" placeholder="输入绝对路径..." />
+        <n-button block type="primary" :loading="addProjectIndexing" @click="addProjectAndIndexAndRun">
+          索引并添加到测试
+        </n-button>
+      </n-space>
     </n-modal>
-
   </n-modal>
 </template>
 
