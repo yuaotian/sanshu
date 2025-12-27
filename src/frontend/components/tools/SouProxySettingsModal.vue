@@ -693,7 +693,7 @@ function formatRelativeTime(timeStr: string | null): string {
             <div class="font-medium text-base mb-1">
               启用代理服务
             </div>
-            <div class="text-xs text-gray-500 dark:text-gray-400">
+            <div class="text-xs text-gray-500 text-gray-400">
               启用后，所有 ACE API 请求将通过此代理。
               <div v-if="!config.proxy_enabled" class="inline-block mt-1 px-1.5 py-0.5 rounded bg-orange-50 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400 text-[10px]">
                 当前直接连接
@@ -793,7 +793,7 @@ function formatRelativeTime(timeStr: string | null): string {
                   <div
                     v-for="(p, idx) in detectedProxies" :key="idx"
                     class="px-3 py-1.5 rounded-full text-xs font-mono cursor-pointer border transition-colors flex items-center gap-2"
-                    :class="config.proxy_port === p.port ? 'bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-900/40 dark:text-blue-300 dark:border-blue-700' : 'bg-slate-50 text-gray-600 border-slate-200 hover:bg-slate-100 dark:bg-slate-800 dark:text-gray-300 dark:border-slate-700'"
+                    :class="config.proxy_port === p.port ? 'bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-900/40 dark:text-blue-300 dark:border-blue-700' : 'bg-slate-50 text-gray-600 border-slate-200 hover:bg-slate-100 dark:bg-slate-800 text-gray-300 dark:border-slate-700'"
                     @click="applyProxy(p)"
                   >
                     <span>{{ p.host }}:{{ p.port }}</span>
@@ -854,7 +854,7 @@ function formatRelativeTime(timeStr: string | null): string {
                       <div class="i-fa6-solid-code" />
                     </div>
                     <div class="flex-1 min-w-0">
-                      <div class="font-medium text-base text-gray-800 dark:text-gray-100 truncate">
+                      <div class="font-medium text-base text-gray-800 text-gray-100 truncate">
                         {{ getProjectName(currentProjectInfo.project_root) }}
                       </div>
                       <div class="text-xs text-gray-500 truncate font-mono mt-0.5" :title="currentProjectInfo.project_root">
@@ -1027,7 +1027,7 @@ function formatRelativeTime(timeStr: string | null): string {
                        <!-- 建议 Box -->
                        <div v-if="speedTestResult.recommendation" class="flex gap-3 p-4 rounded-xl bg-slate-50 dark:bg-slate-700/30 border border-slate-100 dark:border-slate-700">
                         <div class="i-fa6-solid-wand-magic-sparkles text-purple-500 mt-1" />
-                        <div class="text-sm text-gray-700 dark:text-gray-200">
+                        <div class="text-sm text-gray-700 text-gray-200">
                           <span class="font-bold block mb-1">智能诊断建议</span>
                           {{ speedTestResult.recommendation }}
                         </div>
@@ -1042,7 +1042,7 @@ function formatRelativeTime(timeStr: string | null): string {
                         >
                           <!-- 标题 - 使用高对比度颜色确保文字清晰 -->
                           <div class="flex justify-between items-start mb-4">
-                            <span class="font-semibold text-sm text-gray-800 dark:text-gray-100">{{ metric.name }}</span>
+                            <span class="font-semibold text-sm text-gray-800 text-gray-100">{{ metric.name }}</span>
                             <div v-if="metric.success" class="i-fa6-solid-circle-check text-green-500" />
                             <div v-else class="i-fa6-solid-circle-xmark text-red-500" />
                           </div>
@@ -1186,7 +1186,7 @@ function formatRelativeTime(timeStr: string | null): string {
                 <div v-if="selectedProxyIndex === idx" class="i-fa6-solid-check text-white text-xs" />
               </div>
               <div>
-                <div class="font-mono font-medium text-sm text-gray-800 dark:text-gray-200">
+                <div class="font-mono font-medium text-sm text-gray-800 text-gray-200">
                   {{ p.host }}:{{ p.port }}
                 </div>
                 <div class="text-xs text-gray-500 mt-0.5">
@@ -1270,7 +1270,7 @@ function formatRelativeTime(timeStr: string | null): string {
                <!-- 图标：使用高亮颜色增强视觉效果 -->
                <div class="i-fa6-solid-code-branch text-primary-500 dark:text-primary-400 group-hover:text-primary-600 dark:group-hover:text-primary-300 transition-colors" />
                <!-- 标题文字：使用高对比度颜色确保清晰可读 -->
-               <div class="font-bold text-sm truncate text-gray-800 dark:text-gray-100" :title="getProjectName(p.project_root)">
+               <div class="font-bold text-sm truncate text-gray-800 text-gray-100" :title="getProjectName(p.project_root)">
                  {{ getProjectName(p.project_root) }}
                </div>
              </div>
