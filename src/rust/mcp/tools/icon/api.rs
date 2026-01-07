@@ -104,7 +104,6 @@ pub fn get_cache_stats() -> super::types::IconCacheStats {
     
     match cache {
         Some(cache) => {
-            let now = Instant::now();
             let total = cache.len();
             let valid = cache.values()
                 .filter(|e| e.created_at.elapsed() < Duration::from_secs(expiry))

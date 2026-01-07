@@ -276,11 +276,16 @@ pub async fn select_icon_save_directory(
         }
     }
     
-    // 选择目录
-    let result = builder.pick_folder();
+    // 使用 tokio oneshot channel 接收回调结果
+    let (tx, rx) = tokio::sync::oneshot::channel();
     
-    match result {
-        Some(path) => Ok(Some(path.to_string_lossy().to_string())),
-        None => Ok(None),
-    }
+    // 选择目录（Tauri 2.0 使用回调模式）
+    builder.pick_folder(move |folder_path| {
+        let _ = tx.send(folder_path);
+    });
+    
+    // 等待回调结果
+    let result = rx.await.map_err(|_| "对话框选择被取消".to_string())?;
+    
+    Ok(result.map(|path| path.to_string()))
 }

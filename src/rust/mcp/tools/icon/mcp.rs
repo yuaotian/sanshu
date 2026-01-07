@@ -61,7 +61,7 @@ impl IconTool {
                 icons: None,
                 meta: None,
                 output_schema: None,
-                title: Some(Cow::Borrowed("图标搜索")),
+                title: Some("图标搜索".to_string()),
             }
         } else {
             // 不应该到达这里
