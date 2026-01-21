@@ -195,14 +195,14 @@ const previewBackgroundClass = computed(() => {
 
 const previewScaleClass = computed(() => {
   const map: Record<number, string> = {
-    50: 'scale-50',
-    75: 'scale-75',
-    100: 'scale-100',
-    125: 'scale-125',
-    150: 'scale-150',
-    200: 'scale-200',
+    50: 'preview-scale-50',
+    75: 'preview-scale-75',
+    100: 'preview-scale-100',
+    125: 'preview-scale-125',
+    150: 'preview-scale-150',
+    200: 'preview-scale-200',
   }
-  return map[previewScale.value] || 'scale-100'
+  return map[previewScale.value] || 'preview-scale-100'
 })
 
 const previewBusy = computed(() => editorStatus.value === 'loading' || previewUpdating.value)
@@ -599,6 +599,9 @@ function buildEditedSvgPair(svg: string, state: IconEditorState, focusKey: strin
 
     // 按当前编辑状态应用颜色、尺寸与变换
     const viewBoxInfo = readViewBox(svgEl, state)
+
+    // 移除内联样式，避免 width/height 被固定为 1em 导致预览过小
+    svgEl.removeAttribute('style')
 
     svgEl.setAttribute('width', String(state.width))
     svgEl.setAttribute('height', String(state.height))
@@ -1359,7 +1362,7 @@ async function handleCancel() {
                         SVG 加载失败
                       </div>
                       <div v-else-if="editorPreviewSvg" class="w-full h-full flex items-center justify-center">
-                        <div class="origin-center transition-transform duration-200" :class="previewScaleClass">
+                        <div class="preview-scale-wrapper w-full h-full flex items-center justify-center" :class="previewScaleClass">
                           <div class="editor-preview w-full h-full" v-html="editorPreviewSvg" />
                         </div>
                       </div>
@@ -1720,6 +1723,29 @@ async function handleCancel() {
 
 .editor-preview :deep([data-editor-focus='true']) {
   filter: drop-shadow(0 0 6px rgba(126, 156, 180, 0.6));
+}
+
+/* 预览缩放（避免依赖预设类缺失） */
+.preview-scale-wrapper {
+  transform-origin: center;
+}
+.preview-scale-50 {
+  transform: scale(0.5);
+}
+.preview-scale-75 {
+  transform: scale(0.75);
+}
+.preview-scale-100 {
+  transform: scale(1);
+}
+.preview-scale-125 {
+  transform: scale(1.25);
+}
+.preview-scale-150 {
+  transform: scale(1.5);
+}
+.preview-scale-200 {
+  transform: scale(2);
 }
 
 /* 网格背景图案 */
