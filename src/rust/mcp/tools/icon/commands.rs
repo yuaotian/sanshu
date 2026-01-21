@@ -184,7 +184,7 @@ fn convert_svg_to_png(svg_content: &str, output_path: &PathBuf, size: u32) -> Re
         .ok_or("创建画布失败")?;
     
     // 计算缩放变换（保持比例居中）
-    let svg_size = tree.size();
+    let svg_size = tree.size;
     let scale = (size as f32 / svg_size.width().max(svg_size.height())).min(1.0);
     let transform = tiny_skia::Transform::from_scale(scale, scale);
     

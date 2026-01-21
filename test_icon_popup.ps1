@@ -71,7 +71,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "`n[测试运行阶段]" -ForegroundColor Cyan
 
 # 确定可执行文件路径
-$ExePath = "target/$Mode/sanshu.exe"
+$ExePath = "target/$Mode/等一下.exe"
 
 if (-not (Test-Path $ExePath)) {
     Write-Host "错误: 找不到可执行文件 $ExePath" -ForegroundColor Red
