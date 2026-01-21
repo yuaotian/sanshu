@@ -2,7 +2,7 @@
 import type { IconItem, IconSaveItem, IconSaveRequest, IconSaveResult } from '../../../types/icon'
 import { invoke } from '@tauri-apps/api/core'
 import { useMessage } from 'naive-ui'
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useIconSearch } from '../../../composables/useIconSearch'
 import IconWorkshop from './IconWorkshop.vue'
 
@@ -61,11 +61,54 @@ interface IconEditorState {
   roundStroke: boolean
   strokeWidth: number | null
   rectRadius: number | null
+  // 线条级别编辑
+  activeElementKey: string | null
+  elementStyles: Record<string, SvgElementStyle>
+}
+
+interface SvgElementOption {
+  key: string
+  label: string
+  tag: string
+}
+
+interface SvgElementStyle {
+  enabled: boolean
+  strokeColor: string
+  strokeWidth: number | null
+  roundStroke: boolean
 }
 
 const editorStates = ref<Record<number, IconEditorState>>({})
 const originalSvgMap = ref<Record<number, string>>({})
 const editedSvgMap = ref<Record<number, string>>({})
+const elementOptionsMap = ref<Record<number, SvgElementOption[]>>({})
+const elementDefaultStyles = ref<Record<number, Record<string, SvgElementStyle>>>({})
+
+// ============ 编辑器弹窗状态 ============
+const editorModalOpen = ref(false)
+const editorModalRef = ref<HTMLElement | null>(null)
+const editorRect = ref({ x: 0, y: 0, width: 0, height: 0 })
+const editorRectInitialized = ref(false)
+const dragState = ref<{
+  mode: 'move' | 'resize' | null
+  startX: number
+  startY: number
+  startLeft: number
+  startTop: number
+  startWidth: number
+  startHeight: number
+  prevUserSelect: string
+}>({
+  mode: null,
+  startX: 0,
+  startY: 0,
+  startLeft: 0,
+  startTop: 0,
+  startWidth: 0,
+  startHeight: 0,
+  prevUserSelect: '',
+})
 
 const activeIcon = computed(() => {
   if (!selectedIcons.value.length)
@@ -74,6 +117,25 @@ const activeIcon = computed(() => {
 })
 
 const activeState = ref<IconEditorState | null>(null)
+const activeElementOptions = computed(() => {
+  const icon = activeIcon.value
+  if (!icon)
+    return []
+  return elementOptionsMap.value[icon.id] || []
+})
+const activeElementKey = computed({
+  get: () => activeState.value?.activeElementKey ?? null,
+  set: (value) => {
+    if (activeState.value)
+      activeState.value.activeElementKey = value
+  },
+})
+const activeElementStyle = computed(() => {
+  const state = activeState.value
+  if (!state || !state.activeElementKey)
+    return null
+  return state.elementStyles[state.activeElementKey] || null
+})
 
 const showProgressOverlay = computed(() => isSaving.value || needsConfirm.value)
 
@@ -110,9 +172,36 @@ watch(activeState, () => {
   schedulePreviewUpdate()
 }, { deep: true })
 
+watch(activeElementKey, () => {
+  ensureActiveElementStyle()
+}, { immediate: true })
+
 watch(() => [activeState.value?.color, activeState.value?.applyColor], ([color, apply]) => {
   if (apply && color)
     pushRecentColor(color)
+})
+
+watch(editorRect, () => {
+  applyEditorRect()
+}, { deep: true })
+
+watch(editorModalOpen, (open) => {
+  if (!open)
+    return
+  nextTick(() => {
+    initEditorRect()
+    clampEditorRect()
+    applyEditorRect()
+  })
+})
+
+onMounted(() => {
+  window.addEventListener('resize', handleWindowResize)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', handleWindowResize)
+  handlePointerUp()
 })
 
 function handleSelectionChange(icons: IconItem[]) {
@@ -133,9 +222,9 @@ function schedulePreviewUpdate() {
     if (!originalSvg)
       return
 
-    const edited = applySvgEdits(originalSvg, state)
-    editorPreviewSvg.value = edited
-    editedSvgMap.value[icon.id] = edited
+    const { finalSvg, previewSvg } = buildEditedSvgPair(originalSvg, state, state.activeElementKey)
+    editorPreviewSvg.value = previewSvg
+    editedSvgMap.value[icon.id] = finalSvg
   }, 200)
 }
 
@@ -148,11 +237,18 @@ async function prepareEditor(icon: IconItem) {
     return
   }
 
+  ensureEditableElements(icon, originalSvg)
+
   if (!editorStates.value[icon.id])
     editorStates.value[icon.id] = createDefaultState(originalSvg)
 
   activeState.value = editorStates.value[icon.id]
+  const options = elementOptionsMap.value[icon.id] || []
+  if (activeState.value.activeElementKey && !options.some(option => option.key === activeState.value?.activeElementKey)) {
+    activeState.value.activeElementKey = null
+  }
   editorStatus.value = 'ready'
+  ensureActiveElementStyle()
   schedulePreviewUpdate()
 }
 
@@ -182,6 +278,110 @@ async function ensureOriginalSvg(icon: IconItem) {
   return null
 }
 
+function ensureEditableElements(icon: IconItem, svg: string) {
+  if (elementOptionsMap.value[icon.id])
+    return
+  const { options, defaults } = extractEditableElements(svg)
+  elementOptionsMap.value[icon.id] = options
+  elementDefaultStyles.value[icon.id] = defaults
+}
+
+function extractEditableElements(svg: string) {
+  try {
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml')
+    const svgEl = doc.querySelector('svg')
+    if (!svgEl)
+      return { options: [], defaults: {} as Record<string, SvgElementStyle> }
+
+    const nodes = collectEditableNodes(svgEl)
+    const options: SvgElementOption[] = []
+    const defaults: Record<string, SvgElementStyle> = {}
+
+    nodes.forEach((node, index) => {
+      const key = buildElementKey(node, index)
+      const tag = node.tagName.toLowerCase()
+      const id = node.getAttribute('id') || ''
+      const label = id ? `${tag}#${id}` : `${tag} ${index + 1}`
+      options.push({ key, label, tag })
+      defaults[key] = createElementStyleFromNode(node)
+    })
+
+    return { options, defaults }
+  }
+  catch (error) {
+    console.error('解析 SVG 线条元素失败:', error)
+    return { options: [], defaults: {} as Record<string, SvgElementStyle> }
+  }
+}
+
+function collectEditableNodes(svgEl: SVGSVGElement) {
+  const nodes = Array.from(svgEl.querySelectorAll('path, line, rect, circle, ellipse, polyline, polygon'))
+  return nodes.filter(node => !node.closest('defs'))
+}
+
+function buildElementKey(node: Element, index: number) {
+  return `${node.tagName.toLowerCase()}-${index + 1}`
+}
+
+function createElementStyleFromNode(node: Element): SvgElementStyle {
+  const stroke = node.getAttribute('stroke')
+  const strokeWidth = node.getAttribute('stroke-width')
+  const linecap = node.getAttribute('stroke-linecap')
+  const linejoin = node.getAttribute('stroke-linejoin')
+  const parsedWidth = strokeWidth ? Number.parseFloat(strokeWidth) : null
+
+  return {
+    enabled: Boolean(stroke || strokeWidth || linecap || linejoin),
+    strokeColor: stroke || '#8B8B8B',
+    strokeWidth: Number.isFinite(parsedWidth) ? parsedWidth : null,
+    roundStroke: linecap === 'round' || linejoin === 'round',
+  }
+}
+
+function ensureActiveElementStyle() {
+  const icon = activeIcon.value
+  const state = activeState.value
+  if (!icon || !state || !state.activeElementKey)
+    return
+
+  if (!state.elementStyles[state.activeElementKey]) {
+    const defaults = elementDefaultStyles.value[icon.id]?.[state.activeElementKey]
+    state.elementStyles[state.activeElementKey] = defaults
+      ? { ...defaults }
+      : {
+          enabled: false,
+          strokeColor: '#8B8B8B',
+          strokeWidth: null,
+          roundStroke: false,
+        }
+  }
+}
+
+function updateActiveElementStyle<K extends keyof SvgElementStyle>(key: K, value: SvgElementStyle[K]) {
+  const style = activeElementStyle.value
+  if (!style)
+    return
+  style[key] = value
+  schedulePreviewUpdate()
+}
+
+function resetActiveElementStyle() {
+  const icon = activeIcon.value
+  const state = activeState.value
+  if (!icon || !state || !state.activeElementKey)
+    return
+  const defaults = elementDefaultStyles.value[icon.id]?.[state.activeElementKey]
+  state.elementStyles[state.activeElementKey] = defaults
+    ? { ...defaults }
+    : {
+        enabled: false,
+        strokeColor: '#8B8B8B',
+        strokeWidth: null,
+        roundStroke: false,
+      }
+  schedulePreviewUpdate()
+}
+
 function createDefaultState(svg: string): IconEditorState {
   const { width, height } = parseSvgSize(svg)
   return {
@@ -195,6 +395,8 @@ function createDefaultState(svg: string): IconEditorState {
     roundStroke: false,
     strokeWidth: null,
     rectRadius: null,
+    activeElementKey: null,
+    elementStyles: {},
   }
 }
 
@@ -229,12 +431,12 @@ function parseSvgSize(svg: string) {
   return { width: 64, height: 64 }
 }
 
-function applySvgEdits(svg: string, state: IconEditorState) {
+function buildEditedSvgPair(svg: string, state: IconEditorState, focusKey: string | null) {
   try {
     const doc = new DOMParser().parseFromString(svg, 'image/svg+xml')
     const svgEl = doc.querySelector('svg')
     if (!svgEl)
-      return svg
+      return { finalSvg: svg, previewSvg: svg }
 
     // 按当前编辑状态应用颜色、尺寸与变换
     const viewBoxInfo = readViewBox(svgEl, state)
@@ -271,6 +473,38 @@ function applySvgEdits(svg: string, state: IconEditorState) {
       })
     }
 
+    // 应用线条级别覆盖
+    const editableNodes = collectEditableNodes(svgEl)
+    let focusNode: Element | null = null
+    editableNodes.forEach((node, index) => {
+      const key = buildElementKey(node, index)
+      if (focusKey && key === focusKey)
+        focusNode = node
+
+      const style = state.elementStyles[key]
+      if (!style || !style.enabled)
+        return
+
+      if (style.strokeColor)
+        node.setAttribute('stroke', style.strokeColor)
+
+      if (style.strokeWidth !== null) {
+        if (style.strokeWidth > 0)
+          node.setAttribute('stroke-width', String(style.strokeWidth))
+        else
+          node.removeAttribute('stroke-width')
+      }
+
+      if (style.roundStroke) {
+        node.setAttribute('stroke-linecap', 'round')
+        node.setAttribute('stroke-linejoin', 'round')
+      }
+      else {
+        node.removeAttribute('stroke-linecap')
+        node.removeAttribute('stroke-linejoin')
+      }
+    })
+
     const transforms: string[] = []
     if (state.flipX)
       transforms.push(`translate(${viewBoxInfo.minX * 2 + viewBoxInfo.width} 0) scale(-1 1)`)
@@ -293,11 +527,21 @@ function applySvgEdits(svg: string, state: IconEditorState) {
       svgEl.appendChild(group)
     }
 
-    return new XMLSerializer().serializeToString(svgEl)
+    const serializer = new XMLSerializer()
+    const finalSvg = serializer.serializeToString(svgEl)
+    let previewSvg = finalSvg
+
+    // 仅在预览中标记选中线条
+    if (focusNode) {
+      focusNode.setAttribute('data-editor-focus', 'true')
+      previewSvg = serializer.serializeToString(svgEl)
+    }
+
+    return { finalSvg, previewSvg }
   }
   catch (error) {
     console.error('应用 SVG 编辑失败:', error)
-    return svg
+    return { finalSvg: svg, previewSvg: svg }
   }
 }
 
@@ -361,13 +605,149 @@ function resetActiveEditor() {
   schedulePreviewUpdate()
 }
 
+function openEditorModal() {
+  editorModalOpen.value = true
+  nextTick(() => {
+    initEditorRect()
+    clampEditorRect()
+    applyEditorRect()
+  })
+}
+
+function closeEditorModal() {
+  editorModalOpen.value = false
+  handlePointerUp()
+}
+
+function initEditorRect() {
+  if (editorRectInitialized.value)
+    return
+  const { width, height } = getViewportSize()
+  const baseWidth = Math.round(width * 0.58)
+  const baseHeight = Math.round(height * 0.78)
+  const targetWidth = Math.min(Math.max(baseWidth, 360), Math.max(360, width - 32))
+  const targetHeight = Math.min(Math.max(baseHeight, 460), Math.max(460, height - 32))
+  editorRect.value = {
+    x: Math.round((width - targetWidth) / 2),
+    y: Math.round((height - targetHeight) / 2),
+    width: targetWidth,
+    height: targetHeight,
+  }
+  editorRectInitialized.value = true
+}
+
+function getViewportSize() {
+  return { width: window.innerWidth, height: window.innerHeight }
+}
+
+function handleWindowResize() {
+  if (!editorModalOpen.value)
+    return
+  clampEditorRect()
+  applyEditorRect()
+}
+
+function clampEditorRect() {
+  const { width, height } = getViewportSize()
+  const padding = 12
+  const maxWidth = Math.max(260, width - padding * 2)
+  const maxHeight = Math.max(320, height - padding * 2)
+  const minWidth = Math.min(360, maxWidth)
+  const minHeight = Math.min(420, maxHeight)
+
+  const nextWidth = Math.min(Math.max(editorRect.value.width, minWidth), maxWidth)
+  const nextHeight = Math.min(Math.max(editorRect.value.height, minHeight), maxHeight)
+  const nextX = Math.min(Math.max(editorRect.value.x, padding), width - nextWidth - padding)
+  const nextY = Math.min(Math.max(editorRect.value.y, padding), height - nextHeight - padding)
+
+  editorRect.value = {
+    x: Math.max(padding, nextX),
+    y: Math.max(padding, nextY),
+    width: nextWidth,
+    height: nextHeight,
+  }
+}
+
+function applyEditorRect() {
+  const el = editorModalRef.value
+  if (!el)
+    return
+  el.style.transform = `translate(${editorRect.value.x}px, ${editorRect.value.y}px)`
+  el.style.width = `${editorRect.value.width}px`
+  el.style.height = `${editorRect.value.height}px`
+}
+
+function startDrag(event: PointerEvent) {
+  if (!editorModalRef.value)
+    return
+  dragState.value = {
+    mode: 'move',
+    startX: event.clientX,
+    startY: event.clientY,
+    startLeft: editorRect.value.x,
+    startTop: editorRect.value.y,
+    startWidth: editorRect.value.width,
+    startHeight: editorRect.value.height,
+    prevUserSelect: document.body.style.userSelect || '',
+  }
+  document.body.style.userSelect = 'none'
+  window.addEventListener('pointermove', handlePointerMove)
+  window.addEventListener('pointerup', handlePointerUp)
+}
+
+function startResize(event: PointerEvent) {
+  if (!editorModalRef.value)
+    return
+  dragState.value = {
+    mode: 'resize',
+    startX: event.clientX,
+    startY: event.clientY,
+    startLeft: editorRect.value.x,
+    startTop: editorRect.value.y,
+    startWidth: editorRect.value.width,
+    startHeight: editorRect.value.height,
+    prevUserSelect: document.body.style.userSelect || '',
+  }
+  document.body.style.userSelect = 'none'
+  window.addEventListener('pointermove', handlePointerMove)
+  window.addEventListener('pointerup', handlePointerUp)
+}
+
+function handlePointerMove(event: PointerEvent) {
+  if (!dragState.value.mode)
+    return
+  const deltaX = event.clientX - dragState.value.startX
+  const deltaY = event.clientY - dragState.value.startY
+
+  if (dragState.value.mode === 'move') {
+    editorRect.value.x = dragState.value.startLeft + deltaX
+    editorRect.value.y = dragState.value.startTop + deltaY
+  }
+  else if (dragState.value.mode === 'resize') {
+    editorRect.value.width = dragState.value.startWidth + deltaX
+    editorRect.value.height = dragState.value.startHeight + deltaY
+  }
+
+  clampEditorRect()
+  applyEditorRect()
+}
+
+function handlePointerUp() {
+  dragState.value.mode = null
+  document.body.style.userSelect = dragState.value.prevUserSelect
+  window.removeEventListener('pointermove', handlePointerMove)
+  window.removeEventListener('pointerup', handlePointerUp)
+}
+
 async function copyEditedSvg() {
-  if (!editorPreviewSvg.value) {
+  const icon = activeIcon.value
+  const edited = icon ? getEditedSvg(icon) : editorPreviewSvg.value
+  if (!edited) {
     message.warning('暂无可复制的 SVG')
     return
   }
   try {
-    await navigator.clipboard.writeText(editorPreviewSvg.value)
+    await navigator.clipboard.writeText(edited)
     message.success('已复制编辑后的 SVG')
   }
   catch (error) {
@@ -405,8 +785,11 @@ function getEditedSvg(icon: IconItem) {
 
   const state = editorStates.value[icon.id]
   const original = originalSvgMap.value[icon.id]
-  if (state && original)
-    return applySvgEdits(original, state)
+  if (state && original) {
+    const { finalSvg } = buildEditedSvgPair(original, state, null)
+    editedSvgMap.value[icon.id] = finalSvg
+    return finalSvg
+  }
 
   return null
 }
@@ -559,15 +942,28 @@ async function handleCancel() {
         <span class="font-medium">图标工坊</span>
       </div>
 
-      <n-button
-        secondary
-        type="error"
-        size="small"
-        :disabled="isSaving || needsConfirm"
-        @click="handleCancel"
-      >
-        取消 / 关闭
-      </n-button>
+      <div class="flex items-center gap-2">
+        <n-button
+          secondary
+          size="small"
+          :disabled="!selectedIcons.length || showProgressOverlay"
+          @click="openEditorModal"
+        >
+          <template #icon>
+            <div class="i-carbon-color-palette" />
+          </template>
+          SVG 编辑器
+        </n-button>
+        <n-button
+          secondary
+          type="error"
+          size="small"
+          :disabled="isSaving || needsConfirm"
+          @click="handleCancel"
+        >
+          取消 / 关闭
+        </n-button>
+      </div>
     </div>
 
     <!-- 主内容区 -->
@@ -657,8 +1053,8 @@ async function handleCancel() {
           </div>
         </transition>
 
-        <div class="h-full flex flex-col lg:flex-row gap-4">
-          <div class="flex-1 min-w-0">
+        <div class="h-full flex flex-col gap-4">
+          <div class="flex-1 min-w-0 icon-popup-scope">
             <IconWorkshop
               mode="popup"
               :active="true"
@@ -671,240 +1067,368 @@ async function handleCancel() {
               @selection-change="handleSelectionChange"
             />
           </div>
+        </div>
+      </div>
+    </div>
 
-          <!-- SVG 编辑器面板 -->
-          <div class="w-full lg:w-80 xl:w-96 flex-shrink-0">
-            <div class="h-full rounded-2xl border border-border bg-surface-variant p-4 flex flex-col gap-4">
-              <div class="flex items-center gap-2">
-                <div class="i-carbon-color-palette text-lg text-primary" />
-                <span class="font-medium">SVG 编辑器</span>
+    <!-- SVG 编辑器弹窗 -->
+    <div v-if="editorModalOpen" class="fixed inset-0 z-40 pointer-events-none">
+      <div
+        ref="editorModalRef"
+        class="editor-floating pointer-events-auto"
+        :class="showProgressOverlay ? 'pointer-events-none opacity-60' : ''"
+      >
+        <div class="relative h-full rounded-2xl border border-border bg-surface-variant shadow-xl flex flex-col overflow-hidden">
+          <div class="flex items-center justify-between px-4 py-3 border-b border-border bg-surface">
+            <div class="flex items-center gap-2 cursor-move select-none" @pointerdown.prevent="startDrag">
+              <div class="i-carbon-draggable text-lg text-on-surface-secondary" />
+              <span class="font-medium">SVG 编辑器</span>
+            </div>
+            <n-button size="small" tertiary @click="closeEditorModal">
+              关闭
+            </n-button>
+          </div>
+
+          <div class="flex-1 overflow-y-auto p-4 space-y-4">
+            <div class="space-y-2">
+              <div class="text-xs text-on-surface-secondary">
+                当前选中
               </div>
+              <n-select
+                v-model:value="activeIconId"
+                size="small"
+                :options="selectedIcons.map(icon => ({ label: icon.name, value: icon.id }))"
+                placeholder="请选择图标"
+                :disabled="!selectedIcons.length"
+              />
+            </div>
 
-              <div class="space-y-2">
-                <div class="text-xs text-on-surface-secondary">
-                  当前选中
-                </div>
-                <n-select
-                  v-model:value="activeIconId"
-                  size="small"
-                  :options="selectedIcons.map(icon => ({ label: icon.name, value: icon.id }))"
-                  placeholder="请选择图标"
-                  :disabled="!selectedIcons.length"
-                />
+            <div class="rounded-xl border border-border bg-surface p-4">
+              <div class="text-xs text-on-surface-secondary mb-2">
+                实时预览
               </div>
-
-              <div class="rounded-xl border border-border bg-surface p-4">
-                <div class="text-xs text-on-surface-secondary mb-2">
-                  实时预览
+              <div class="editor-preview aspect-square w-full max-w-64 rounded-xl bg-surface-100 flex items-center justify-center mx-auto overflow-hidden">
+                <n-skeleton v-if="editorStatus === 'loading'" text :repeat="4" class="w-full" />
+                <div v-else-if="editorStatus === 'error'" class="text-xs text-red-500">
+                  SVG 加载失败
                 </div>
-                <div class="aspect-square w-full rounded-lg bg-surface-100 flex items-center justify-center">
-                  <n-skeleton v-if="editorStatus === 'loading'" text :repeat="4" class="w-full" />
-                  <div v-else-if="editorStatus === 'error'" class="text-xs text-red-500">
-                    SVG 加载失败
-                  </div>
-                  <div v-else-if="editorPreviewSvg" class="w-24 h-24" v-html="editorPreviewSvg" />
-                  <div v-else class="text-xs text-on-surface-secondary">
-                    请选择图标进行编辑
-                  </div>
-                </div>
-              </div>
-
-              <div class="space-y-3">
-                <div class="flex items-center justify-between">
-                  <span class="text-sm font-medium">颜色</span>
-                  <n-switch
-                    :value="activeState?.applyColor ?? false"
-                    size="small"
-                    :disabled="!activeState"
-                    @update:value="value => updateActiveState('applyColor', value)"
-                  />
-                </div>
-                <n-color-picker
-                  :value="activeState?.color"
-                  :swatches="paletteColors"
-                  size="small"
-                  :disabled="!activeState"
-                  @update:value="value => value && updateActiveState('color', value)"
-                />
-                <div class="text-xs text-on-surface-secondary">
-                  最近颜色
-                </div>
-                <div class="flex flex-wrap gap-2">
-                  <n-button
-                    v-for="color in recentColors"
-                    :key="color"
-                    size="tiny"
-                    quaternary
-                    :disabled="!activeState"
-                    @click="updateActiveState('color', color)"
-                  >
-                    {{ color }}
-                  </n-button>
-                  <div v-if="!recentColors.length" class="text-xs text-on-surface-secondary">
-                    暂无
-                  </div>
-                </div>
-              </div>
-
-              <div class="space-y-3">
-                <div class="text-sm font-medium">
-                  尺寸
-                </div>
-                <div class="grid grid-cols-2 gap-2">
-                  <n-input-number
-                    :value="activeState?.width"
-                    size="small"
-                    :min="8"
-                    :max="512"
-                    :disabled="!activeState"
-                    @update:value="value => value !== null && updateActiveState('width', value)"
-                  >
-                    <template #prefix>
-                      W
-                    </template>
-                  </n-input-number>
-                  <n-input-number
-                    :value="activeState?.height"
-                    size="small"
-                    :min="8"
-                    :max="512"
-                    :disabled="!activeState"
-                    @update:value="value => value !== null && updateActiveState('height', value)"
-                  >
-                    <template #prefix>
-                      H
-                    </template>
-                  </n-input-number>
-                </div>
-                <div class="flex flex-wrap gap-2">
-                  <n-button
-                    v-for="size in sizePresets"
-                    :key="size"
-                    size="tiny"
-                    quaternary
-                    :disabled="!activeState"
-                    @click="applySizePreset(size)"
-                  >
-                    {{ size }}
-                  </n-button>
-                </div>
-              </div>
-
-              <div class="space-y-3">
-                <div class="text-sm font-medium">
-                  变换
-                </div>
-                <n-input-number
-                  :value="activeState?.rotate"
-                  size="small"
-                  :min="-180"
-                  :max="180"
-                  :disabled="!activeState"
-                  @update:value="value => value !== null && updateActiveState('rotate', value)"
-                >
-                  <template #prefix>
-                    旋转
-                  </template>
-                </n-input-number>
-                <div class="flex gap-2">
-                  <n-button
-                    size="small"
-                    :type="activeState?.flipX ? 'primary' : 'default'"
-                    :disabled="!activeState"
-                    @click="toggleActiveState('flipX')"
-                  >
-                    <template #icon>
-                      <div class="i-carbon-flip-horizontal" />
-                    </template>
-                    水平翻转
-                  </n-button>
-                  <n-button
-                    size="small"
-                    :type="activeState?.flipY ? 'primary' : 'default'"
-                    :disabled="!activeState"
-                    @click="toggleActiveState('flipY')"
-                  >
-                    <template #icon>
-                      <div class="i-carbon-flip-vertical" />
-                    </template>
-                    垂直翻转
-                  </n-button>
-                </div>
-              </div>
-
-              <div class="space-y-3">
-                <div class="text-sm font-medium">
-                  形状微调
-                </div>
-                <div class="flex items-center justify-between">
-                  <span class="text-xs text-on-surface-secondary">线条圆角</span>
-                  <n-switch
-                    :value="activeState?.roundStroke ?? false"
-                    size="small"
-                    :disabled="!activeState"
-                    @update:value="value => updateActiveState('roundStroke', value)"
-                  />
-                </div>
-                <n-input-number
-                  :value="activeState?.strokeWidth"
-                  size="small"
-                  :min="0"
-                  :max="24"
-                  :disabled="!activeState"
-                  @update:value="value => updateActiveState('strokeWidth', value)"
-                >
-                  <template #prefix>
-                    线条粗细
-                  </template>
-                </n-input-number>
-                <n-input-number
-                  :value="activeState?.rectRadius"
-                  size="small"
-                  :min="0"
-                  :max="32"
-                  :disabled="!activeState"
-                  @update:value="value => updateActiveState('rectRadius', value)"
-                >
-                  <template #prefix>
-                    矩形圆角
-                  </template>
-                </n-input-number>
-              </div>
-
-              <div class="space-y-3">
-                <div class="text-sm font-medium">
-                  编辑器保存
-                </div>
-                <div class="flex gap-2">
-                  <n-input
-                    v-model:value="editorSavePath"
-                    size="small"
-                    placeholder="保存目录"
-                  >
-                    <template #prefix>
-                      <div class="i-carbon-folder" />
-                    </template>
-                  </n-input>
-                  <n-button size="small" secondary @click="selectEditorDirectory">
-                    选择
-                  </n-button>
-                </div>
-                <div class="flex flex-wrap gap-2">
-                  <n-button size="small" quaternary :disabled="!editorPreviewSvg" @click="copyEditedSvg">
-                    复制 SVG
-                  </n-button>
-                  <n-button size="small" quaternary :disabled="!activeState" @click="resetActiveEditor">
-                    重置编辑
-                  </n-button>
-                  <n-button type="primary" size="small" :disabled="!activeIcon" @click="saveEditedIcon">
-                    保存此 SVG
-                  </n-button>
+                <div v-else-if="editorPreviewSvg" class="w-full h-full" v-html="editorPreviewSvg" />
+                <div v-else class="text-xs text-on-surface-secondary">
+                  请选择图标进行编辑
                 </div>
               </div>
             </div>
+
+            <div class="space-y-2">
+              <div class="text-xs text-on-surface-secondary">
+                线条元素
+              </div>
+              <n-select
+                v-model:value="activeElementKey"
+                size="small"
+                :options="activeElementOptions.map(item => ({ label: item.label, value: item.key }))"
+                placeholder="选择线条元素"
+                :disabled="!activeElementOptions.length"
+              />
+              <div v-if="!activeElementOptions.length" class="text-xs text-on-surface-secondary">
+                暂无可编辑线条
+              </div>
+            </div>
+
+            <div class="space-y-3">
+              <div class="flex items-center justify-between">
+                <span class="text-sm font-medium">线条样式</span>
+                <n-switch
+                  :value="activeElementStyle?.enabled ?? false"
+                  size="small"
+                  :disabled="!activeElementStyle"
+                  @update:value="value => updateActiveElementStyle('enabled', value)"
+                />
+              </div>
+              <div class="text-xs text-on-surface-secondary">
+                启用后仅作用于当前线条
+              </div>
+              <n-color-picker
+                :value="activeElementStyle?.strokeColor ?? '#8B8B8B'"
+                :swatches="paletteColors"
+                size="small"
+                :disabled="!activeElementStyle?.enabled"
+                @update:value="value => value && updateActiveElementStyle('strokeColor', value)"
+              />
+              <n-input-number
+                :value="activeElementStyle?.strokeWidth ?? null"
+                size="small"
+                :min="0"
+                :max="24"
+                :disabled="!activeElementStyle?.enabled"
+                @update:value="value => updateActiveElementStyle('strokeWidth', value)"
+              >
+                <template #prefix>
+                  线条粗细
+                </template>
+              </n-input-number>
+              <div class="flex items-center justify-between">
+                <span class="text-xs text-on-surface-secondary">线条圆角</span>
+                <n-switch
+                  :value="activeElementStyle?.roundStroke ?? false"
+                  size="small"
+                  :disabled="!activeElementStyle?.enabled"
+                  @update:value="value => updateActiveElementStyle('roundStroke', value)"
+                />
+              </div>
+              <div class="flex justify-end">
+                <n-button size="tiny" quaternary :disabled="!activeElementStyle" @click="resetActiveElementStyle">
+                  重置线条
+                </n-button>
+              </div>
+            </div>
+
+            <div class="space-y-3">
+              <div class="flex items-center justify-between">
+                <span class="text-sm font-medium">颜色</span>
+                <n-switch
+                  :value="activeState?.applyColor ?? false"
+                  size="small"
+                  :disabled="!activeState"
+                  @update:value="value => updateActiveState('applyColor', value)"
+                />
+              </div>
+              <n-color-picker
+                :value="activeState?.color"
+                :swatches="paletteColors"
+                size="small"
+                :disabled="!activeState"
+                @update:value="value => value && updateActiveState('color', value)"
+              />
+              <div class="text-xs text-on-surface-secondary">
+                最近颜色
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <n-button
+                  v-for="color in recentColors"
+                  :key="color"
+                  size="tiny"
+                  quaternary
+                  :disabled="!activeState"
+                  @click="updateActiveState('color', color)"
+                >
+                  {{ color }}
+                </n-button>
+                <div v-if="!recentColors.length" class="text-xs text-on-surface-secondary">
+                  暂无
+                </div>
+              </div>
+            </div>
+
+            <div class="space-y-3">
+              <div class="text-sm font-medium">
+                尺寸
+              </div>
+              <div class="grid grid-cols-2 gap-2">
+                <n-input-number
+                  :value="activeState?.width"
+                  size="small"
+                  :min="8"
+                  :max="512"
+                  :disabled="!activeState"
+                  @update:value="value => value !== null && updateActiveState('width', value)"
+                >
+                  <template #prefix>
+                    W
+                  </template>
+                </n-input-number>
+                <n-input-number
+                  :value="activeState?.height"
+                  size="small"
+                  :min="8"
+                  :max="512"
+                  :disabled="!activeState"
+                  @update:value="value => value !== null && updateActiveState('height', value)"
+                >
+                  <template #prefix>
+                    H
+                  </template>
+                </n-input-number>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <n-button
+                  v-for="size in sizePresets"
+                  :key="size"
+                  size="tiny"
+                  quaternary
+                  :disabled="!activeState"
+                  @click="applySizePreset(size)"
+                >
+                  {{ size }}
+                </n-button>
+              </div>
+            </div>
+
+            <div class="space-y-3">
+              <div class="text-sm font-medium">
+                变换
+              </div>
+              <n-input-number
+                :value="activeState?.rotate"
+                size="small"
+                :min="-180"
+                :max="180"
+                :disabled="!activeState"
+                @update:value="value => value !== null && updateActiveState('rotate', value)"
+              >
+                <template #prefix>
+                  旋转
+                </template>
+              </n-input-number>
+              <div class="flex gap-2">
+                <n-button
+                  size="small"
+                  :type="activeState?.flipX ? 'primary' : 'default'"
+                  :disabled="!activeState"
+                  @click="toggleActiveState('flipX')"
+                >
+                  <template #icon>
+                    <div class="i-carbon-flip-horizontal" />
+                  </template>
+                  水平翻转
+                </n-button>
+                <n-button
+                  size="small"
+                  :type="activeState?.flipY ? 'primary' : 'default'"
+                  :disabled="!activeState"
+                  @click="toggleActiveState('flipY')"
+                >
+                  <template #icon>
+                    <div class="i-carbon-flip-vertical" />
+                  </template>
+                  垂直翻转
+                </n-button>
+              </div>
+            </div>
+
+            <div class="space-y-3">
+              <div class="text-sm font-medium">
+                形状微调
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-xs text-on-surface-secondary">线条圆角</span>
+                <n-switch
+                  :value="activeState?.roundStroke ?? false"
+                  size="small"
+                  :disabled="!activeState"
+                  @update:value="value => updateActiveState('roundStroke', value)"
+                />
+              </div>
+              <n-input-number
+                :value="activeState?.strokeWidth"
+                size="small"
+                :min="0"
+                :max="24"
+                :disabled="!activeState"
+                @update:value="value => updateActiveState('strokeWidth', value)"
+              >
+                <template #prefix>
+                  线条粗细
+                </template>
+              </n-input-number>
+              <n-input-number
+                :value="activeState?.rectRadius"
+                size="small"
+                :min="0"
+                :max="32"
+                :disabled="!activeState"
+                @update:value="value => updateActiveState('rectRadius', value)"
+              >
+                <template #prefix>
+                  矩形圆角
+                </template>
+              </n-input-number>
+            </div>
+
+            <div class="space-y-3">
+              <div class="text-sm font-medium">
+                编辑器保存
+              </div>
+              <div class="flex gap-2">
+                <n-input
+                  v-model:value="editorSavePath"
+                  size="small"
+                  placeholder="保存目录"
+                >
+                  <template #prefix>
+                    <div class="i-carbon-folder" />
+                  </template>
+                </n-input>
+                <n-button size="small" secondary @click="selectEditorDirectory">
+                  选择
+                </n-button>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <n-button size="small" quaternary :disabled="!editorPreviewSvg" @click="copyEditedSvg">
+                  复制 SVG
+                </n-button>
+                <n-button size="small" quaternary :disabled="!activeState" @click="resetActiveEditor">
+                  重置编辑
+                </n-button>
+                <n-button type="primary" size="small" :disabled="!activeIcon" @click="saveEditedIcon">
+                  保存此 SVG
+                </n-button>
+              </div>
+            </div>
+          </div>
+
+          <div
+            class="absolute bottom-2 right-2 h-5 w-5 cursor-se-resize text-on-surface-secondary/70"
+            @pointerdown.prevent="startResize"
+          >
+            <div class="h-full w-full border-r border-b border-on-surface-secondary/40 rotate-45" />
           </div>
         </div>
       </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+/* 弹窗编辑器基础布局 */
+.editor-floating {
+  position: absolute;
+  left: 0;
+  top: 0;
+  will-change: transform, width, height;
+}
+
+/* 弹窗模式下放大图标预览与网格 */
+.icon-popup-scope :deep(.icon-grid) {
+  grid-template-columns: repeat(auto-fill, minmax(clamp(120px, 18vw, 180px), 1fr));
+  gap: clamp(10px, 1.6vw, 16px);
+}
+
+.icon-popup-scope :deep(.icon-card) {
+  padding: clamp(12px, 1.8vw, 18px);
+}
+
+.icon-popup-scope :deep(.icon-preview) {
+  width: clamp(52px, 7vw, 110px);
+  height: clamp(52px, 7vw, 110px);
+}
+
+.icon-popup-scope :deep(.font-icon) {
+  font-size: clamp(36px, 6vw, 96px);
+}
+
+.icon-popup-scope :deep(.skeleton-icon) {
+  width: clamp(52px, 7vw, 110px);
+  height: clamp(52px, 7vw, 110px);
+}
+
+/* 编辑器预览放大与选中高亮 */
+.editor-preview :deep(svg) {
+  width: 100%;
+  height: 100%;
+}
+
+.editor-preview :deep([data-editor-focus='true']) {
+  filter: drop-shadow(0 0 6px rgba(126, 156, 180, 0.6));
+}
+</style>
