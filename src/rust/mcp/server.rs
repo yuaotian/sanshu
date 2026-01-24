@@ -8,8 +8,9 @@ use rmcp::{
 use rmcp::model::*;
 use std::collections::HashMap;
 
-use super::tools::{InteractionTool, MemoryTool, AcemcpTool, Context7Tool, IconTool, SkillsTool, UiuxTool};
+use super::tools::{InteractionTool, MemoryTool, AcemcpTool, Context7Tool, IconTool, SkillsTool, UiuxTool, EnhanceTool};
 use super::types::{ZhiRequest, JiyiRequest, TuRequest, SkillRunRequest};
+use crate::mcp::tools::enhance::mcp::EnhanceMcpRequest;
 use crate::mcp::tools::context7::types::Context7Request;
 use crate::config::load_standalone_config;
 use crate::{log_important, log_debug};
@@ -184,6 +185,11 @@ impl ServerHandler for ZhiServer {
             tools.extend(UiuxTool::get_tool_definitions());
         }
 
+        // 提示词增强工具 - 仅在启用时添加
+        if self.is_tool_enabled("enhance") {
+            tools.push(EnhanceTool::get_tool_definition());
+        }
+
         // 技能运行时工具 - 动态发现 skills 并追加工具
         let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         tools.extend(SkillsTool::list_dynamic_tools(&project_root));
@@ -323,6 +329,26 @@ impl ServerHandler for ZhiServer {
 
                 let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                 SkillsTool::call_tool(name, skill_request, &project_root).await
+            }
+            "enhance" => {
+                // 检查增强工具是否启用
+                if !self.is_tool_enabled("enhance") {
+                    return Err(McpError::internal_error(
+                        "提示词增强工具已被禁用".to_string(),
+                        None
+                    ));
+                }
+
+                // 解析请求参数
+                let arguments_value = request.arguments
+                    .map(serde_json::Value::Object)
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+                let enhance_request: EnhanceMcpRequest = serde_json::from_value(arguments_value)
+                    .map_err(|e| McpError::invalid_params(format!("参数解析失败: {}", e), None))?;
+
+                // 调用提示词增强工具
+                EnhanceTool::enhance(enhance_request).await
             }
             _ => {
                 Err(McpError::invalid_request(

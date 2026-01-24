@@ -156,7 +156,14 @@ pub fn build_tauri_app() -> Builder<tauri::Wry> {
             crate::mcp::tools::icon::commands::get_icon_config,
             crate::mcp::tools::icon::commands::set_icon_config,
             crate::mcp::tools::icon::commands::copy_icon_to_clipboard,
-            crate::mcp::tools::icon::commands::select_icon_save_directory
+            crate::mcp::tools::icon::commands::select_icon_save_directory,
+
+            // 提示词增强命令
+            crate::mcp::tools::enhance::commands::enhance_prompt_stream,
+            crate::mcp::tools::enhance::commands::enhance_prompt,
+            crate::mcp::tools::enhance::commands::add_chat_history,
+            crate::mcp::tools::enhance::commands::get_chat_history,
+            crate::mcp::tools::enhance::commands::clear_chat_history
         ])
         .setup(|app| {
             let app_handle = app.handle().clone();

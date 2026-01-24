@@ -6,6 +6,7 @@ import { useMessage } from 'naive-ui'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { useAcemcpSync } from '../../composables/useAcemcpSync'
+import EnhanceModal from './EnhanceModal.vue'
 import PopupActions from './PopupActions.vue'
 import PopupContent from './PopupContent.vue'
 import PopupInput from './PopupInput.vue'
@@ -81,6 +82,9 @@ const inputRef = ref()
 // 继续回复配置
 const continueReplyEnabled = ref(true)
 const continuePrompt = ref('请按照最佳实践继续')
+
+// 增强弹窗状态
+const showEnhanceModal = ref(false)
 
 // 计算属性
 const isVisible = computed(() => !!props.request)
@@ -356,59 +360,38 @@ function handleQuoteMessage(messageContent: string) {
   }
 }
 
-// 处理增强按钮点击
-async function handleEnhance() {
+// 处理增强按钮点击 - 打开增强弹窗
+function handleEnhance() {
   if (submitting.value)
     return
 
-  submitting.value = true
-
-  try {
-    // 构建增强prompt
-    const enhancePrompt = `Use the following prompt to optimize and enhance the context of the content in 《》, and return the enhanced result by calling the tool '三术' after completion.Here is an instruction that I'd like to give you, but it needs to be improved. Rewrite and enhance this instruction to make it clearer, more specific, less ambiguous, and correct any mistakes. Reply immediately with your answer, even if you're not sure. Consider the context of our conversation history when enhancing the prompt. Reply with the following format:
-
-### BEGIN RESPONSE ###
-Here is an enhanced version of the original instruction that is more specific and clear:
-<augment-enhanced-prompt>enhanced prompt goes here</augment-enhanced-prompt>
-
-### END RESPONSE ###
-
-Here is my original instruction:
-
-《${userInput.value.trim()}》`
-
-    // 使用新的结构化数据格式
-    const response = {
-      user_input: enhancePrompt,
-      selected_options: [],
-      images: [],
-      metadata: {
-        timestamp: new Date().toISOString(),
-        request_id: props.request?.id || null,
-        source: 'popup_enhance',
-      },
-    }
-
-    if (props.mockMode) {
-      // 模拟模式下的延迟
-      await new Promise(resolve => setTimeout(resolve, 1000))
-      message.success('增强请求发送成功')
-    }
-    else {
-      // 实际发送增强请求
-      await invoke('send_mcp_response', { response })
-      await invoke('exit_app')
-    }
-
-    emit('response', response)
+  // 检查是否有输入内容
+  if (!userInput.value.trim()) {
+    message.warning('请先输入要增强的提示词')
+    return
   }
-  catch (error) {
-    console.error('发送增强请求失败:', error)
-    message.error('增强请求失败，请重试')
+
+  // 打开增强弹窗
+  showEnhanceModal.value = true
+}
+
+// 处理增强结果确认
+function handleEnhanceConfirm(enhancedPrompt: string) {
+  // 替换输入框内容
+  userInput.value = enhancedPrompt
+  
+  // 同步到 PopupInput 组件
+  if (inputRef.value) {
+    inputRef.value.updateData({ userInput: enhancedPrompt })
   }
-  finally {
-    submitting.value = false
-  }
+  
+  message.success('提示词已增强')
+  showEnhanceModal.value = false
+}
+
+// 处理增强取消
+function handleEnhanceCancel() {
+  showEnhanceModal.value = false
 }
 </script>
 
@@ -460,5 +443,14 @@ Here is my original instruction:
         @submit="handleSubmit" @continue="handleContinue" @enhance="handleEnhance"
       />
     </div>
+
+    <!-- 提示词增强弹窗 -->
+    <EnhanceModal
+      v-model:show="showEnhanceModal"
+      :original-prompt="userInput"
+      :project-root-path="request?.project_root_path"
+      @confirm="handleEnhanceConfirm"
+      @cancel="handleEnhanceCancel"
+    />
   </div>
 </template>
