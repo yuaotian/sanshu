@@ -1,24 +1,47 @@
+//! 记忆管理器
+//!
+//! 核心记忆管理功能，包括：
+//! - 记忆的添加、查询
+//! - 启动时自动迁移和去重
+//! - JSON 格式存储
+
 use anyhow::Result;
 use chrono::Utc;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::types::{MemoryEntry, MemoryCategory, MemoryMetadata};
+use super::types::{MemoryEntry, MemoryCategory, MemoryStore, MemoryConfig};
+use super::similarity::TextSimilarity;
+use super::dedup::MemoryDeduplicator;
+use super::migration::MemoryMigrator;
+use crate::log_debug;
 
 /// 记忆管理器
 pub struct MemoryManager {
+    /// 记忆目录路径
     memory_dir: PathBuf,
+    /// 项目路径
     project_path: String,
+    /// 存储数据
+    store: MemoryStore,
 }
 
 impl MemoryManager {
+    /// 存储文件名
+    const STORE_FILE: &'static str = "memories.json";
+
     /// 创建新的记忆管理器
+    ///
+    /// 自动执行：
+    /// 1. 路径规范化和验证
+    /// 2. 旧格式迁移（如果需要）
+    /// 3. 启动时去重（如果配置启用）
     pub fn new(project_path: &str) -> Result<Self> {
         // 规范化项目路径
         let normalized_path = Self::normalize_project_path(project_path)?;
         let memory_dir = normalized_path.join(".sanshu-memory");
 
-        // 创建记忆目录，如果失败则说明项目不适合使用记忆功能
+        // 创建记忆目录
         fs::create_dir_all(&memory_dir)
             .map_err(|e| anyhow::anyhow!(
                 "无法在git项目中创建记忆目录: {}\n错误: {}\n这可能是因为项目目录没有写入权限。",
@@ -26,16 +49,228 @@ impl MemoryManager {
                 e
             ))?;
 
-        let manager = Self {
-            memory_dir,
-            project_path: normalized_path.to_string_lossy().to_string(),
+        let project_path_str = normalized_path.to_string_lossy().to_string();
+
+        // 检查是否需要迁移
+        if MemoryMigrator::needs_migration(&memory_dir) {
+            log_debug!("检测到旧版记忆格式，开始迁移...");
+            match MemoryMigrator::migrate(&memory_dir, &project_path_str) {
+                Ok(result) => {
+                    log_debug!(
+                        "迁移完成: 读取 {} 条，去重后 {} 条，移除 {} 条重复",
+                        result.md_entries_count,
+                        result.deduped_entries_count,
+                        result.removed_duplicates
+                    );
+                }
+                Err(e) => {
+                    log_debug!("迁移失败（将使用空存储）: {}", e);
+                }
+            }
+        }
+
+        // 加载或创建存储
+        let store_path = memory_dir.join(Self::STORE_FILE);
+        let mut store = if store_path.exists() {
+            let content = fs::read_to_string(&store_path)?;
+            serde_json::from_str(&content).unwrap_or_else(|e| {
+                log_debug!("解析存储文件失败，使用默认值: {}", e);
+                MemoryStore {
+                    project_path: project_path_str.clone(),
+                    ..Default::default()
+                }
+            })
+        } else {
+            MemoryStore {
+                project_path: project_path_str.clone(),
+                ..Default::default()
+            }
         };
 
-        // 初始化记忆文件结构
-        manager.initialize_memory_structure()?;
+        // 如果配置启用了启动时去重，执行去重
+        if store.config.dedup_on_startup && !store.entries.is_empty() {
+            let dedup = MemoryDeduplicator::new(store.config.similarity_threshold);
+            let (deduped, stats) = dedup.deduplicate(store.entries);
+
+            if stats.removed_count > 0 {
+                log_debug!(
+                    "启动时去重: 移除 {} 条重复记忆，保留 {} 条",
+                    stats.removed_count,
+                    stats.remaining_count
+                );
+                store.entries = deduped;
+                store.last_dedup_at = Utc::now();
+            }
+        }
+
+        let mut manager = Self {
+            memory_dir,
+            project_path: project_path_str,
+            store,
+        };
+
+        // 保存存储
+        manager.save_store()?;
 
         Ok(manager)
     }
+
+    /// 添加记忆条目
+    ///
+    /// 如果启用了去重检测，会检查是否与现有记忆重复
+    /// 重复时静默拒绝，返回 None
+    pub fn add_memory(&mut self, content: &str, category: MemoryCategory) -> Result<Option<String>> {
+        let content = content.trim();
+        if content.is_empty() {
+            return Err(anyhow::anyhow!("记忆内容不能为空"));
+        }
+
+        // 如果启用去重检测，检查是否重复
+        if self.store.config.enable_dedup {
+            let dedup = MemoryDeduplicator::new(self.store.config.similarity_threshold);
+            let dup_info = dedup.check_duplicate(content, &self.store.entries);
+
+            if dup_info.is_duplicate {
+                log_debug!(
+                    "记忆去重: 新内容与现有记忆相似度 {:.1}%，静默拒绝。匹配内容: {:?}",
+                    dup_info.similarity * 100.0,
+                    dup_info.matched_content
+                );
+                return Ok(None); // 静默拒绝，不报错
+            }
+        }
+
+        // 创建新记忆条目
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        let entry = MemoryEntry {
+            id: id.clone(),
+            content: content.to_string(),
+            content_normalized: TextSimilarity::normalize(content),
+            category,
+            created_at: now,
+            updated_at: now,
+        };
+
+        self.store.entries.push(entry);
+        self.save_store()?;
+
+        log_debug!("已添加记忆: {} ({:?})", id, category);
+        Ok(Some(id))
+    }
+
+    /// 获取所有记忆
+    pub fn get_all_memories(&self) -> Vec<&MemoryEntry> {
+        self.store.entries.iter().collect()
+    }
+
+    /// 获取指定分类的记忆
+    pub fn get_memories_by_category(&self, category: MemoryCategory) -> Vec<&MemoryEntry> {
+        self.store.entries
+            .iter()
+            .filter(|e| e.category == category)
+            .collect()
+    }
+
+    /// 手动执行去重
+    ///
+    /// 返回移除的记忆数量
+    pub fn deduplicate(&mut self) -> Result<usize> {
+        let dedup = MemoryDeduplicator::new(self.store.config.similarity_threshold);
+        let (deduped, stats) = dedup.deduplicate(std::mem::take(&mut self.store.entries));
+
+        self.store.entries = deduped;
+        self.store.last_dedup_at = Utc::now();
+        self.save_store()?;
+
+        log_debug!("手动去重完成: 移除 {} 条重复记忆", stats.removed_count);
+        Ok(stats.removed_count)
+    }
+
+    /// 获取记忆统计信息
+    pub fn get_stats(&self) -> MemoryStats {
+        let mut stats = MemoryStats::default();
+        stats.total = self.store.entries.len();
+
+        for entry in &self.store.entries {
+            match entry.category {
+                MemoryCategory::Rule => stats.rules += 1,
+                MemoryCategory::Preference => stats.preferences += 1,
+                MemoryCategory::Pattern => stats.patterns += 1,
+                MemoryCategory::Context => stats.contexts += 1,
+            }
+        }
+
+        stats
+    }
+
+    /// 获取项目信息供MCP调用方分析 - 压缩简化版本
+    pub fn get_project_info(&self) -> String {
+        if self.store.entries.is_empty() {
+            return "📭 暂无项目记忆".to_string();
+        }
+
+        let mut compressed_info = Vec::new();
+
+        // 按分类压缩汇总
+        let categories = [
+            (MemoryCategory::Rule, "规范"),
+            (MemoryCategory::Preference, "偏好"),
+            (MemoryCategory::Pattern, "模式"),
+            (MemoryCategory::Context, "背景"),
+        ];
+
+        for (category, title) in categories.iter() {
+            let memories: Vec<_> = self.get_memories_by_category(*category);
+            if !memories.is_empty() {
+                let items: Vec<String> = memories
+                    .iter()
+                    .map(|m| {
+                        // 去除多余空格和换行，压缩内容
+                        m.content
+                            .split_whitespace()
+                            .collect::<Vec<&str>>()
+                            .join(" ")
+                    })
+                    .filter(|s| !s.is_empty())
+                    .collect();
+
+                if !items.is_empty() {
+                    compressed_info.push(format!("**{}**: {}", title, items.join("; ")));
+                }
+            }
+        }
+
+        if compressed_info.is_empty() {
+            "📭 暂无有效项目记忆".to_string()
+        } else {
+            format!("📚 项目记忆总览: {}", compressed_info.join(" | "))
+        }
+    }
+
+    /// 获取去重配置
+    pub fn config(&self) -> &MemoryConfig {
+        &self.store.config
+    }
+
+    /// 更新去重配置
+    pub fn update_config(&mut self, config: MemoryConfig) -> Result<()> {
+        self.store.config = config;
+        self.save_store()
+    }
+
+    /// 保存存储到文件
+    fn save_store(&self) -> Result<()> {
+        let store_path = self.memory_dir.join(Self::STORE_FILE);
+        let json = serde_json::to_string_pretty(&self.store)?;
+        fs::write(&store_path, json)?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // 以下是路径处理辅助方法（保持原有逻辑）
+    // ========================================================================
 
     /// 规范化项目路径
     fn normalize_project_path(project_path: &str) -> Result<PathBuf> {
@@ -75,7 +310,6 @@ impl MemoryManager {
 
         // 验证是否为 git 根目录或其子目录
         if let Some(git_root) = Self::find_git_root(&canonical_path) {
-            // 如果找到了 git 根目录，使用 git 根目录作为项目路径
             Ok(git_root)
         } else {
             Err(anyhow::anyhow!(
@@ -86,18 +320,13 @@ impl MemoryManager {
     }
 
     /// 手动规范化路径
-    ///
-    /// 当 canonicalize 失败时的备用方案
     fn manual_canonicalize(path: &Path) -> Result<PathBuf> {
         let mut components = Vec::new();
 
         for component in path.components() {
             match component {
-                std::path::Component::CurDir => {
-                    // 忽略 "." 组件
-                }
+                std::path::Component::CurDir => {}
                 std::path::Component::ParentDir => {
-                    // 处理 ".." 组件
                     if !components.is_empty() {
                         components.pop();
                     }
@@ -121,242 +350,27 @@ impl MemoryManager {
         let mut current_path = start_path;
 
         loop {
-            // 检查当前目录是否包含 .git
             let git_path = current_path.join(".git");
             if git_path.exists() {
                 return Some(current_path.to_path_buf());
             }
 
-            // 向上一级目录查找
             match current_path.parent() {
                 Some(parent) => current_path = parent,
-                None => break, // 已经到达根目录
+                None => break,
             }
         }
 
         None
     }
+}
 
-    /// 初始化记忆文件结构
-    fn initialize_memory_structure(&self) -> Result<()> {
-        // 创建各类记忆文件，使用新的结构化格式
-        let categories = [
-            MemoryCategory::Rule,
-            MemoryCategory::Preference,
-            MemoryCategory::Pattern,
-            MemoryCategory::Context,
-        ];
-
-        for category in categories.iter() {
-            let filename = match category {
-                MemoryCategory::Rule => "rules.md",
-                MemoryCategory::Preference => "preferences.md",
-                MemoryCategory::Pattern => "patterns.md",
-                MemoryCategory::Context => "context.md",
-            };
-
-            let file_path = self.memory_dir.join(filename);
-            if !file_path.exists() {
-                let header_content = self.get_category_header(category);
-                fs::write(&file_path, header_content)?;
-            }
-        }
-
-        // 创建或更新元数据
-        self.update_metadata()?;
-
-        Ok(())
-    }
-
-    /// 添加记忆条目
-    pub fn add_memory(&self, content: &str, category: MemoryCategory) -> Result<String> {
-        let id = uuid::Uuid::new_v4().to_string();
-        let now = Utc::now();
-
-        let entry = MemoryEntry {
-            id: id.clone(),
-            content: content.to_string(),
-            category,
-            created_at: now,
-            updated_at: now,
-        };
-
-        // 将记忆添加到对应的文件中
-        self.append_to_category_file(&entry)?;
-
-        // 更新元数据
-        self.update_metadata()?;
-
-        Ok(id)
-    }
-
-    /// 获取所有记忆
-    pub fn get_all_memories(&self) -> Result<Vec<MemoryEntry>> {
-        let mut memories = Vec::new();
-
-        let categories = [
-            (MemoryCategory::Rule, "rules.md"),
-            (MemoryCategory::Preference, "preferences.md"),
-            (MemoryCategory::Pattern, "patterns.md"),
-            (MemoryCategory::Context, "context.md"),
-        ];
-
-        for (category, filename) in categories.iter() {
-            let file_path = self.memory_dir.join(filename);
-            if file_path.exists() {
-                let content = fs::read_to_string(&file_path)?;
-                let entries = self.parse_memory_file(&content, *category)?;
-                memories.extend(entries);
-            }
-        }
-
-        // 按更新时间排序
-        memories.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-
-        Ok(memories)
-    }
-
-    /// 获取指定分类的记忆
-    pub fn get_memories_by_category(&self, category: MemoryCategory) -> Result<Vec<MemoryEntry>> {
-        let filename = match category {
-            MemoryCategory::Rule => "rules.md",
-            MemoryCategory::Preference => "preferences.md",
-            MemoryCategory::Pattern => "patterns.md",
-            MemoryCategory::Context => "context.md",
-        };
-
-        let file_path = self.memory_dir.join(filename);
-        if !file_path.exists() {
-            return Ok(Vec::new());
-        }
-
-        let content = fs::read_to_string(&file_path)?;
-        self.parse_memory_file(&content, category)
-    }
-
-    /// 将记忆条目添加到对应分类文件
-    fn append_to_category_file(&self, entry: &MemoryEntry) -> Result<()> {
-        let filename = match entry.category {
-            MemoryCategory::Rule => "rules.md",
-            MemoryCategory::Preference => "preferences.md",
-            MemoryCategory::Pattern => "patterns.md",
-            MemoryCategory::Context => "context.md",
-        };
-
-        let file_path = self.memory_dir.join(filename);
-        let mut content = if file_path.exists() {
-            fs::read_to_string(&file_path)?
-        } else {
-            format!("# {}\n\n", self.get_category_title(&entry.category))
-        };
-
-        // 简化格式：一行一个记忆
-        content.push_str(&format!("- {}\n", entry.content));
-
-        fs::write(&file_path, content)?;
-        Ok(())
-    }
-
-    /// 解析记忆文件内容 - 简化版本
-    fn parse_memory_file(&self, content: &str, category: MemoryCategory) -> Result<Vec<MemoryEntry>> {
-        let mut memories = Vec::new();
-
-        // 按列表项解析，每个 "- " 开头的行是一个记忆条目
-        for line in content.lines() {
-            let line = line.trim();
-            if line.starts_with("- ") && line.len() > 2 {
-                let content = line[2..].trim(); // 去掉 "- " 前缀
-                if !content.is_empty() {
-                    let entry = MemoryEntry {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        content: content.to_string(),
-                        category,
-                        created_at: Utc::now(),
-                        updated_at: Utc::now(),
-                    };
-
-                    memories.push(entry);
-                }
-            }
-        }
-
-        Ok(memories)
-    }
-
-    /// 获取分类标题
-    fn get_category_title(&self, category: &MemoryCategory) -> &str {
-        match category {
-            MemoryCategory::Rule => "开发规范和规则",
-            MemoryCategory::Preference => "用户偏好设置",
-            MemoryCategory::Pattern => "常用模式和最佳实践",
-            MemoryCategory::Context => "项目上下文信息",
-        }
-    }
-
-    /// 获取分类文件头部（简化版本）
-    fn get_category_header(&self, category: &MemoryCategory) -> String {
-        format!("# {}\n\n", self.get_category_title(category))
-    }
-
-    /// 更新元数据
-    fn update_metadata(&self) -> Result<()> {
-        let metadata = MemoryMetadata {
-            project_path: self.project_path.clone(),
-            last_organized: Utc::now(),
-            total_entries: self.get_all_memories()?.len(),
-            version: "1.0.0".to_string(),
-        };
-
-        let metadata_path = self.memory_dir.join("metadata.json");
-        let metadata_json = serde_json::to_string_pretty(&metadata)?;
-        fs::write(metadata_path, metadata_json)?;
-
-        Ok(())
-    }
-
-    /// 获取项目信息供MCP调用方分析 - 压缩简化版本
-    pub fn get_project_info(&self) -> Result<String> {
-        // 汇总所有记忆规则并压缩
-        let all_memories = self.get_all_memories()?;
-        if all_memories.is_empty() {
-            return Ok("📭 暂无项目记忆".to_string());
-        }
-
-        let mut compressed_info = Vec::new();
-
-        // 按分类压缩汇总
-        let categories = [
-            (MemoryCategory::Rule, "规范"),
-            (MemoryCategory::Preference, "偏好"),
-            (MemoryCategory::Pattern, "模式"),
-            (MemoryCategory::Context, "背景"),
-        ];
-
-        for (category, title) in categories.iter() {
-            let memories = self.get_memories_by_category(*category)?;
-            if !memories.is_empty() {
-                let mut items = Vec::new();
-                for memory in memories {
-                    let content = memory.content.trim();
-                    if !content.is_empty() {
-                        // 去除多余空格和换行，压缩内容
-                        let compressed_content = content
-                            .split_whitespace()
-                            .collect::<Vec<&str>>()
-                            .join(" ");
-                        items.push(compressed_content);
-                    }
-                }
-                if !items.is_empty() {
-                    compressed_info.push(format!("**{}**: {}", title, items.join("; ")));
-                }
-            }
-        }
-
-        if compressed_info.is_empty() {
-            Ok("📭 暂无有效项目记忆".to_string())
-        } else {
-            Ok(format!("📚 项目记忆总览: {}", compressed_info.join(" | ")))
-        }
-    }
+/// 记忆统计信息
+#[derive(Debug, Default)]
+pub struct MemoryStats {
+    pub total: usize,
+    pub rules: usize,
+    pub preferences: usize,
+    pub patterns: usize,
+    pub contexts: usize,
 }

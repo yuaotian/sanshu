@@ -24,7 +24,8 @@ impl MemoryTool {
             )).into());
         }
 
-        let manager = MemoryManager::new(&request.project_path)
+        // 创建记忆管理器（会自动执行迁移和启动时去重）
+        let mut manager = MemoryManager::new(&request.project_path)
             .map_err(|e| McpError::internal_error(format!("创建记忆管理器失败: {}", e), None))?;
 
         // 检查 sou 工具是否启用，如果启用则尝试触发后台索引
@@ -43,22 +44,36 @@ impl MemoryTool {
                     return Err(McpError::invalid_params("缺少记忆内容".to_string(), None));
                 }
 
-                let category = match request.category.as_str() {
-                    "rule" => MemoryCategory::Rule,
-                    "preference" => MemoryCategory::Preference,
-                    "pattern" => MemoryCategory::Pattern,
-                    "context" => MemoryCategory::Context,
-                    _ => MemoryCategory::Context,
-                };
+                // 使用 MemoryCategory 的新方法解析分类
+                let category = MemoryCategory::from_str(&request.category);
 
-                let id = manager.add_memory(&request.content, category)
-                    .map_err(|e| McpError::internal_error(format!("添加记忆失败: {}", e), None))?;
-
-                format!("✅ 记忆已添加，ID: {}\n📝 内容: {}\n📂 分类: {:?}{}", id, request.content, category, index_hint)
+                // 添加记忆（带去重检测）
+                match manager.add_memory(&request.content, category) {
+                    Ok(Some(id)) => {
+                        format!(
+                            "✅ 记忆已添加，ID: {}\n📝 内容: {}\n📂 分类: {}{}",
+                            id,
+                            request.content,
+                            category.display_name(),
+                            index_hint
+                        )
+                    }
+                    Ok(None) => {
+                        // 被去重静默拒绝
+                        format!(
+                            "⚠️ 记忆已存在相似内容，未重复添加\n📝 内容: {}\n📂 分类: {}{}",
+                            request.content,
+                            category.display_name(),
+                            index_hint
+                        )
+                    }
+                    Err(e) => {
+                        return Err(McpError::internal_error(format!("添加记忆失败: {}", e), None));
+                    }
+                }
             }
             "回忆" => {
-                let info = manager.get_project_info()
-                    .map_err(|e| McpError::internal_error(format!("获取项目信息失败: {}", e), None))?;
+                let info = manager.get_project_info();
                 format!("{}{}", info, index_hint)
             }
             _ => {
