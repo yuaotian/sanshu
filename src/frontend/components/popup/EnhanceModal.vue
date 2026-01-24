@@ -55,6 +55,12 @@ const statusText = computed(() => {
 async function startEnhance() {
   if (isEnhancing.value) return
 
+  // 启动前释放旧监听，避免重复订阅导致多次回调
+  if (unlisten) {
+    unlisten()
+    unlisten = null
+  }
+
   // 重置状态
   isEnhancing.value = true
   streamContent.value = ''
@@ -115,6 +121,12 @@ function handleConfirm() {
   handleClose()
 }
 
+// 重试增强
+function handleRetry() {
+  if (isEnhancing.value) return
+  startEnhance()
+}
+
 // 取消/关闭
 function handleClose() {
   emit('update:show', false)
@@ -140,6 +152,10 @@ function cleanup() {
 watch(() => props.show, (newValue) => {
   if (newValue && props.originalPrompt) {
     startEnhance()
+  }
+  // 关闭弹窗时清理监听与状态，避免残留
+  if (!newValue) {
+    cleanup()
   }
 })
 
@@ -230,10 +246,16 @@ onUnmounted(() => {
     <!-- 操作按钮 -->
     <div class="flex justify-end gap-3">
       <n-button
-        :disabled="isEnhancing"
         @click="handleClose"
       >
         取消
+      </n-button>
+      <n-button
+        v-if="errorMessage && !isEnhancing"
+        type="warning"
+        @click="handleRetry"
+      >
+        重试
       </n-button>
       <n-button
         type="primary"

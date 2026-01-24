@@ -203,6 +203,32 @@ impl PromptEnhancer {
             .map(|m| m.as_str().trim().to_string())
     }
 
+    /// 解析 SSE 单行（兼容 data: 前缀）
+    fn parse_sse_json_line(line: &str) -> Option<serde_json::Value> {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let payload = trimmed.strip_prefix("data:")
+            .map(|s| s.trim())
+            .unwrap_or(trimmed);
+        serde_json::from_str::<serde_json::Value>(payload).ok()
+    }
+
+    /// 处理跨分片的 SSE 行，保留尾部未完整行
+    fn drain_sse_lines<F>(buffer: &mut String, chunk: &str, mut on_line: F)
+    where
+        F: FnMut(&str),
+    {
+        buffer.push_str(chunk);
+        let mut parts = buffer.split('\n').collect::<Vec<_>>();
+        let remainder = parts.pop().unwrap_or("");
+        for line in parts {
+            on_line(line.trim_end_matches('\r'));
+        }
+        *buffer = remainder.to_string();
+    }
+
     /// 同步增强（等待完成后返回）
     pub async fn enhance(&self, request: EnhanceRequest) -> Result<EnhanceResponse> {
         let payload = self.build_request_payload(
@@ -249,25 +275,31 @@ impl PromptEnhancer {
         // 处理 SSE 流式响应
         let mut accumulated_text = String::new();
         let mut stream = response.bytes_stream();
+        let mut sse_buffer = String::new();
 
         while let Some(chunk_result) = stream.next().await {
             match chunk_result {
                 Ok(bytes) => {
                     let text = String::from_utf8_lossy(&bytes);
-                    // SSE 响应每行是一个 JSON 对象
-                    for line in text.lines() {
-                        if line.is_empty() {
-                            continue;
-                        }
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+                    // 使用缓冲拆行，避免 JSON 跨分片丢失
+                    Self::drain_sse_lines(&mut sse_buffer, &text, |line| {
+                        if let Some(json) = Self::parse_sse_json_line(line) {
                             if let Some(text_chunk) = json.get("text").and_then(|t| t.as_str()) {
                                 accumulated_text.push_str(text_chunk);
                             }
                         }
-                    }
+                    });
                 }
                 Err(e) => {
                     log_debug!("读取流式响应失败: {}", e);
+                }
+            }
+        }
+        // 处理最后残留的未换行片段
+        if !sse_buffer.trim().is_empty() {
+            if let Some(json) = Self::parse_sse_json_line(&sse_buffer) {
+                if let Some(text_chunk) = json.get("text").and_then(|t| t.as_str()) {
+                    accumulated_text.push_str(text_chunk);
                 }
             }
         }
@@ -340,24 +372,24 @@ impl PromptEnhancer {
         let mut accumulated_text = String::new();
         let mut stream = response.bytes_stream();
         let mut chunk_count = 0u32;
+        let mut sse_buffer = String::new();
+        let mut stream_failed = false;
 
         while let Some(chunk_result) = stream.next().await {
             match chunk_result {
                 Ok(bytes) => {
                     let text = String::from_utf8_lossy(&bytes);
-                    for line in text.lines() {
-                        if line.is_empty() {
-                            continue;
-                        }
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+                    // 使用缓冲拆行，避免 JSON 跨分片丢失
+                    Self::drain_sse_lines(&mut sse_buffer, &text, |line| {
+                        if let Some(json) = Self::parse_sse_json_line(line) {
                             if let Some(text_chunk) = json.get("text").and_then(|t| t.as_str()) {
                                 if !text_chunk.is_empty() {
                                     accumulated_text.push_str(text_chunk);
                                     chunk_count += 1;
-                                    
+
                                     // 估算进度（基于常见响应长度）
                                     let progress = std::cmp::min(90, (chunk_count * 2) as u8);
-                                    
+
                                     on_event(EnhanceStreamEvent::chunk(
                                         text_chunk,
                                         &accumulated_text,
@@ -366,10 +398,33 @@ impl PromptEnhancer {
                                 }
                             }
                         }
-                    }
+                    });
                 }
                 Err(e) => {
                     log_debug!("读取流式响应失败: {}", e);
+                    // 读取失败时通知前端并终止流
+                    let error_msg = format!("读取流式响应失败: {}", e);
+                    on_event(EnhanceStreamEvent::error(&error_msg));
+                    stream_failed = true;
+                    break;
+                }
+            }
+        }
+        // 处理最后残留的未换行片段
+        if !stream_failed && !sse_buffer.trim().is_empty() {
+            if let Some(json) = Self::parse_sse_json_line(&sse_buffer) {
+                if let Some(text_chunk) = json.get("text").and_then(|t| t.as_str()) {
+                    if !text_chunk.is_empty() {
+                        accumulated_text.push_str(text_chunk);
+                        chunk_count += 1;
+
+                        let progress = std::cmp::min(90, (chunk_count * 2) as u8);
+                        on_event(EnhanceStreamEvent::chunk(
+                            text_chunk,
+                            &accumulated_text,
+                            progress,
+                        ));
+                    }
                 }
             }
         }

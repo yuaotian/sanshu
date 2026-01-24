@@ -92,6 +92,19 @@ pub async fn get_mcp_tools_config(state: State<'_, AppState>) -> Result<Vec<MCPT
         has_config: false,
     });
 
+    // 提示词增强工具 - 依赖 acemcp 配置
+    tools.push(MCPToolConfig {
+        id: mcp::TOOL_ENHANCE.to_string(),
+        name: "提示词增强".to_string(),
+        description: "将口语化提示词增强为结构化专业提示词，支持上下文与历史".to_string(),
+        enabled: config.mcp_config.tools.get(mcp::TOOL_ENHANCE).copied().unwrap_or(false),
+        can_disable: true,
+        icon: "i-carbon-magic-wand text-lg text-indigo-600 dark:text-indigo-400".to_string(),
+        icon_bg: "bg-indigo-100 dark:bg-indigo-900".to_string(),
+        dark_icon_bg: "dark:bg-indigo-800".to_string(),
+        has_config: false, // 提示词增强没有独立配置面板
+    });
+
     // 图标工坊工具 - UI 功能工具，始终存在，有配置选项
     tools.push(MCPToolConfig {
         id: "icon".to_string(),

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::types::*;
 use super::core::PromptEnhancer;
+use super::history::ChatHistoryManager;
 use crate::log_important;
 
 /// MCP 增强工具请求参数
@@ -18,6 +19,9 @@ pub struct EnhanceMcpRequest {
     /// 项目根路径（可选）
     #[serde(default)]
     pub project_root_path: Option<String>,
+    /// 是否包含对话历史（可选）
+    #[serde(default)]
+    pub include_history: Option<bool>,
 }
 
 /// 提示词增强 MCP 工具
@@ -36,6 +40,10 @@ impl EnhanceTool {
                 "project_root_path": {
                     "type": "string",
                     "description": "项目根目录的绝对路径（可选）。如果提供，将利用项目的代码上下文来提升增强质量。"
+                },
+                "include_history": {
+                    "type": "boolean",
+                    "description": "是否包含对话历史（可选，默认 true）。"
                 }
             },
             "required": ["prompt"]
@@ -79,16 +87,29 @@ impl EnhanceTool {
             }
         };
 
+        let project_root_path = request.project_root_path.clone();
+        let include_history = request.include_history.unwrap_or(true);
+
         let enhance_request = EnhanceRequest {
             prompt: request.prompt.clone(),
-            project_root_path: request.project_root_path,
+            project_root_path: project_root_path.clone(),
             current_file_path: None,
-            include_history: true,
+            include_history,
         };
 
         match enhancer.enhance(enhance_request).await {
             Ok(response) => {
                 if response.success {
+                    // 记录对话历史（仅在提供项目路径时）
+                    if let Some(ref path) = project_root_path {
+                        if let Ok(manager) = ChatHistoryManager::new(path) {
+                            let _ = manager.add_entry(
+                                &request.prompt,
+                                &response.enhanced_prompt,
+                                "mcp"
+                            );
+                        }
+                    }
                     // 成功：返回增强后的提示词
                     let result_text = format!(
                         "## 增强后的提示词\n\n{}\n\n---\n*使用了 {} 个代码上下文块，{} 条对话历史*",
