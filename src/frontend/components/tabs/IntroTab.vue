@@ -9,7 +9,7 @@ const features = ref<Feature[]>([])
 
 onMounted(async () => {
   // 模拟加载延迟，展示骨架屏体验
-  await new Promise(resolve => setTimeout(resolve, 200))
+  await new Promise(resolve => setTimeout(resolve, 600))
   
   features.value = [
     {
