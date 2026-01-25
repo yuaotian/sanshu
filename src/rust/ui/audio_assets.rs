@@ -197,7 +197,7 @@ impl AudioAssetManager {
 
         // 优先从内嵌资源复制
         if let Some(embedded_file) = EmbeddedAudio::get(&asset.filename) {
-            std::fs::write(&target_path, embedded_file.data.as_ref())
+            std::fs::write(&target_path, &*embedded_file.data)
                 .map_err(|e| anyhow::anyhow!("写入内嵌音频文件失败: {}", e))?;
 
             return Ok(target_path);
