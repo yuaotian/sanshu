@@ -15,6 +15,7 @@ onMounted(async () => {
     {
       icon: 'i-carbon-chat text-xl text-blue-600 dark:text-blue-400',
       title: 'Zhi 智能交互',
+      titleClass: 'text-blue-600 dark:text-blue-400',
       subtitle: '审时度势，智在必行',
       iconWrapperClass: 'bg-blue-50 dark:bg-blue-900/30',
       features: [
@@ -28,6 +29,7 @@ onMounted(async () => {
     {
       icon: 'i-carbon-data-base text-xl text-purple-600 dark:text-purple-400',
       title: 'Ji 记忆管理',
+      titleClass: 'text-purple-600 dark:text-purple-400',
       subtitle: '博闻强记，温故知新',
       iconWrapperClass: 'bg-purple-50 dark:bg-purple-900/30',
       features: [
@@ -41,6 +43,7 @@ onMounted(async () => {
     {
       icon: 'i-carbon-search text-xl text-emerald-600 dark:text-emerald-400',
       title: 'Sou 语义搜索',
+      titleClass: 'text-emerald-600 dark:text-emerald-400',
       subtitle: '搜神索隐，洞若观火',
       iconWrapperClass: 'bg-emerald-50 dark:bg-emerald-900/30',
       features: [
@@ -54,6 +57,7 @@ onMounted(async () => {
     {
       icon: 'i-carbon-document text-xl text-orange-600 dark:text-orange-400',
       title: 'Context7 文档',
+      titleClass: 'text-orange-600 dark:text-orange-400',
       subtitle: '博采众长，与时俱进',
       iconWrapperClass: 'bg-orange-50 dark:bg-orange-900/30',
       features: [
@@ -67,6 +71,7 @@ onMounted(async () => {
     {
       icon: 'i-carbon-paint-brush text-xl text-pink-600 dark:text-pink-400',
       title: 'UI/UX Pro Max',
+      titleClass: 'text-pink-600 dark:text-pink-400',
       subtitle: '万技归一，随用随载',
       iconWrapperClass: 'bg-pink-50 dark:bg-pink-900/30',
       features: [
@@ -80,6 +85,7 @@ onMounted(async () => {
     {
       icon: 'i-carbon-image text-xl text-indigo-600 dark:text-indigo-400',
       title: 'Tu 图标工坊',
+      titleClass: 'text-indigo-600 dark:text-indigo-400',
       subtitle: '以图会意，取用自如',
       iconWrapperClass: 'bg-indigo-50 dark:bg-indigo-900/30',
       features: [
@@ -93,6 +99,7 @@ onMounted(async () => {
     {
       icon: 'i-carbon-magic-wand text-xl text-cyan-600 dark:text-cyan-400',
       title: 'Enhance 增强',
+      titleClass: 'text-cyan-600 dark:text-cyan-400',
       subtitle: '化繁为简，精准表达',
       iconWrapperClass: 'bg-cyan-50 dark:bg-cyan-900/30',
       features: [
@@ -106,6 +113,7 @@ onMounted(async () => {
     {
       icon: 'i-carbon-settings text-xl text-gray-600 dark:text-gray-400',
       title: '个性化设置',
+      titleClass: 'text-gray-600 dark:text-gray-400',
       subtitle: '掌控全局，随心所欲',
       iconWrapperClass: 'bg-gray-50 dark:bg-gray-800/50',
       features: [

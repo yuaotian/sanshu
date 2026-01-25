@@ -4,6 +4,7 @@ import { NSkeleton, NSpace, NCard } from 'naive-ui'
 export interface Feature {
   icon: string
   title: string
+  titleClass?: string
   subtitle: string
   iconWrapperClass: string
   features: string[]
@@ -41,7 +42,10 @@ defineProps<{
 
         <!-- 标题信息 -->
         <div>
-          <div class="text-base font-semibold text-gray-900 dark:text-gray-100 leading-tight">
+          <div
+            class="text-base font-semibold leading-tight"
+            :class="feature.titleClass || 'text-gray-900 dark:text-gray-100'"
+          >
             {{ feature.title }}
           </div>
           <div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
