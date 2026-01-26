@@ -46,7 +46,7 @@ struct SkillActionConfig {
 }
 
 impl SkillsTool {
-    /// 获取动态工具列表（包含 skill.run 与各个 skill.<name>）
+    /// 获取动态工具列表（包含 skill_run 与各个 skill_<name>）
     pub fn list_dynamic_tools(project_root: &Path) -> Vec<Tool> {
         let mut tools = Vec::new();
         tools.push(Self::get_skill_run_tool_definition());
@@ -54,8 +54,9 @@ impl SkillsTool {
         let skills = scan_skills(project_root);
         let input_schema = skills_input_schema();
 
+        // 兼容 Antigravity：动态技能工具名使用下划线分隔
         for skill in skills {
-            let tool_name = format!("skill.{}", skill.name);
+            let tool_name = format!("skill_{}", skill.name);
             let description = skill.description.clone().unwrap_or_else(|| "技能工具".to_string());
             tools.push(Tool {
                 name: Cow::Owned(tool_name),
@@ -78,10 +79,10 @@ impl SkillsTool {
         mut request: SkillRunRequest,
         project_root: &Path,
     ) -> Result<CallToolResult, McpError> {
-        let skill_name = if tool_name == "skill.run" {
+        let skill_name = if tool_name == "skill_run" {
             request.skill_name.clone().unwrap_or_default()
         } else {
-            tool_name.trim_start_matches("skill.").to_string()
+            tool_name.trim_start_matches("skill_").to_string()
         };
 
         if skill_name.trim().is_empty() {
@@ -167,7 +168,7 @@ impl SkillsTool {
     fn get_skill_run_tool_definition() -> Tool {
         let schema = skills_input_schema();
         Tool {
-            name: Cow::Borrowed("skill.run"),
+            name: Cow::Borrowed("skill_run"),
             description: Some(Cow::Borrowed("通用技能执行工具，按名称调用指定 skill")),
             input_schema: Arc::new(schema),
             annotations: None,
@@ -183,7 +184,7 @@ fn skills_input_schema() -> serde_json::Map<String, serde_json::Value> {
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
-            "skill_name": { "type": "string", "description": "技能名称（仅 skill.run 需要）" },
+            "skill_name": { "type": "string", "description": "技能名称（仅 skill_run 需要）" },
             "action": { "type": "string", "description": "动作名称（如 search/design_system/custom）" },
             "query": { "type": "string", "description": "查询或输入（可选）" },
             "args": { "type": "array", "items": { "type": "string" }, "description": "追加参数（可选）" }

@@ -326,7 +326,8 @@ impl ServerHandler for ZhiServer {
                 // 调用图标工坊工具
                 IconTool::tu(tu_request).await
             }
-            name if name.starts_with("uiux.") => {
+            // 兼容 Antigravity：UI/UX 工具名使用下划线分隔
+            name if name.starts_with("uiux_") => {
                 if !self.is_tool_enabled("uiux") {
                     return Err(McpError::internal_error(
                         "UI/UX 工具已被禁用".to_string(),
@@ -340,7 +341,7 @@ impl ServerHandler for ZhiServer {
 
                 UiuxTool::call_tool(name, arguments_value).await
             }
-            name if name == "skill.run" || name.starts_with("skill.") => {
+            name if name == "skill_run" || name.starts_with("skill_") => {
                 // 解析请求参数
                 let arguments_value = request.arguments
                     .map(serde_json::Value::Object)

@@ -16,6 +16,7 @@ pub struct UiuxTool;
 
 impl UiuxTool {
     pub fn get_tool_definitions() -> Vec<Tool> {
+        // 兼容 Antigravity：工具名使用下划线分隔
         let mut tools = Vec::new();
 
         let search_schema = serde_json::json!({
@@ -31,7 +32,7 @@ impl UiuxTool {
 
         if let serde_json::Value::Object(schema_map) = search_schema {
             tools.push(Tool {
-                name: Cow::Borrowed("uiux.search"),
+                name: Cow::Borrowed("uiux_search"),
                 description: Some(Cow::Borrowed("UI/UX 知识库检索（领域搜索）")),
                 input_schema: Arc::new(schema_map),
                 annotations: None,
@@ -55,7 +56,7 @@ impl UiuxTool {
 
         if let serde_json::Value::Object(schema_map) = stack_schema {
             tools.push(Tool {
-                name: Cow::Borrowed("uiux.stack"),
+                name: Cow::Borrowed("uiux_stack"),
                 description: Some(Cow::Borrowed("UI/UX 栈相关指南检索")),
                 input_schema: Arc::new(schema_map),
                 annotations: None,
@@ -81,7 +82,7 @@ impl UiuxTool {
 
         if let serde_json::Value::Object(schema_map) = design_schema {
             tools.push(Tool {
-                name: Cow::Borrowed("uiux.design_system"),
+                name: Cow::Borrowed("uiux_design_system"),
                 description: Some(Cow::Borrowed("生成完整设计系统建议")),
                 input_schema: Arc::new(schema_map),
                 annotations: None,
@@ -102,7 +103,7 @@ impl UiuxTool {
 
         if let serde_json::Value::Object(schema_map) = suggest_schema {
             tools.push(Tool {
-                name: Cow::Borrowed("uiux.suggest"),
+                name: Cow::Borrowed("uiux_suggest"),
                 description: Some(Cow::Borrowed("基于资料库关键词判断是否建议使用 UI/UX 技能")),
                 input_schema: Arc::new(schema_map),
                 annotations: None,
@@ -118,7 +119,7 @@ impl UiuxTool {
 
     pub async fn call_tool(tool_name: &str, arguments: serde_json::Value) -> Result<CallToolResult, McpError> {
         match tool_name {
-            "uiux.search" => {
+            "uiux_search" => {
                 let req: UiuxSearchRequest = serde_json::from_value(arguments)
                     .map_err(|e| McpError::invalid_params(format!("参数解析失败: {}", e), None))?;
                 let result = engine::search_domain(&req.query, req.domain.as_deref(), req.max_results.map(|v| v as usize));
@@ -131,7 +132,7 @@ impl UiuxTool {
                 };
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            "uiux.stack" => {
+            "uiux_stack" => {
                 let req: UiuxStackRequest = serde_json::from_value(arguments)
                     .map_err(|e| McpError::invalid_params(format!("参数解析失败: {}", e), None))?;
                 let result = engine::search_stack(&req.query, &req.stack, req.max_results.map(|v| v as usize));
@@ -144,7 +145,7 @@ impl UiuxTool {
                 };
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            "uiux.design_system" => {
+            "uiux_design_system" => {
                 let req: UiuxDesignSystemRequest = serde_json::from_value(arguments)
                     .map_err(|e| McpError::invalid_params(format!("参数解析失败: {}", e), None))?;
                 let output_dir = req.output_dir.as_ref().map(PathBuf::from);
@@ -159,7 +160,7 @@ impl UiuxTool {
                 .map_err(|e| McpError::internal_error(e, None))?;
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            "uiux.suggest" => {
+            "uiux_suggest" => {
                 let req: UiuxSuggestRequest = serde_json::from_value(arguments)
                     .map_err(|e| McpError::invalid_params(format!("参数解析失败: {}", e), None))?;
                 let result = engine::suggest(&req.text);
@@ -171,7 +172,7 @@ impl UiuxTool {
         }
     }
 
-    /// skill.ui-ux-pro-max 兼容入口
+    /// skill_ui-ux-pro-max 入口
     pub async fn call_from_skill(action: &str, request: &SkillRunRequest) -> Result<CallToolResult, McpError> {
         match action {
             "design_system" => {
