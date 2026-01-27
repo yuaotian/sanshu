@@ -15,6 +15,15 @@ impl InteractionTool {
     pub async fn zhi(
         request: ZhiRequest,
     ) -> Result<CallToolResult, McpError> {
+        // 记录 UI/UX 上下文控制信号，便于审计排查
+        if request.uiux_intent.is_some() || request.uiux_context_policy.is_some() || request.uiux_reason.is_some() {
+            log::info!(
+                "UI/UX 上下文信号: intent={:?}, policy={:?}, reason={:?}",
+                request.uiux_intent.as_deref(),
+                request.uiux_context_policy.as_deref(),
+                request.uiux_reason.as_deref()
+            );
+        }
         let popup_request = PopupRequest {
             id: generate_request_id(),
             message: request.message,

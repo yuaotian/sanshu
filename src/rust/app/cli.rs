@@ -146,6 +146,17 @@ fn handle_cli_mode(args: &[String]) -> Result<()> {
         }
     }
 
+    // 记录 UI/UX 上下文控制信号，便于审计排查
+    if uiux_intent.is_some() || uiux_context_policy.is_some() || uiux_reason.is_some() {
+        log_important!(
+            info,
+            "UI/UX 上下文信号: intent={:?}, policy={:?}, reason={:?}",
+            uiux_intent.as_deref(),
+            uiux_context_policy.as_deref(),
+            uiux_reason.as_deref()
+        );
+    }
+
     // 构建请求并写入环境变量，供前端读取
     let request = PopupRequest {
         id: generate_request_id(),

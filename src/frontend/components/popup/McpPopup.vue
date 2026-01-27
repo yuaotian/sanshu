@@ -6,6 +6,7 @@ import { useMessage } from 'naive-ui'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { useAcemcpSync } from '../../composables/useAcemcpSync'
+import { getContextPolicyStatus, shouldShowPolicyIndicator } from '../../utils/conditionalContext'
 import EnhanceModal from './EnhanceModal.vue'
 import PopupActions from './PopupActions.vue'
 import PopupContent from './PopupContent.vue'
@@ -103,6 +104,10 @@ const canSubmit = computed(() => {
 const inputStatusText = computed(() => {
   return inputRef.value?.statusText || '等待输入...'
 })
+
+// UI/UX 上下文策略状态（用于可视化展示）
+const policyStatus = computed(() => getContextPolicyStatus(props.request))
+const showPolicyIndicator = computed(() => shouldShowPolicyIndicator(props.request))
 
 // 加载继续回复配置
 async function loadReplyConfig() {
@@ -482,6 +487,29 @@ function handleOpenMcpToolsTab() {
         <span class="text-white/50">项目：</span>
         <span class="break-all text-white/90">{{ request?.project_root_path }}</span>
       </div>
+    </div>
+
+    <!-- UI/UX 上下文策略指示器（仅在有策略信息时显示） -->
+    <div
+      v-if="showPolicyIndicator"
+      class="mx-2 mt-2 px-3 py-2 bg-black-100 rounded-lg border border-gray-700/50"
+    >
+      <n-tooltip trigger="hover" placement="bottom">
+        <template #trigger>
+          <div class="flex items-center gap-2 text-xs cursor-help">
+            <div :class="[policyStatus.icon, policyStatus.colorClass]" class="w-4 h-4" />
+            <span class="text-white/80">上下文策略：</span>
+            <span :class="policyStatus.colorClass" class="font-medium">{{ policyStatus.label }}</span>
+          </div>
+        </template>
+        <div class="text-xs space-y-1 max-w-[280px]">
+          <div class="font-medium">UI/UX 上下文追加策略</div>
+          <div>{{ policyStatus.reason }}</div>
+          <div class="text-white/60 pt-1 border-t border-white/10">
+            意图：{{ policyStatus.intent }} · 策略：{{ policyStatus.policy }}
+          </div>
+        </div>
+      </n-tooltip>
     </div>
 
     <!-- 内容区域 - 可滚动 -->

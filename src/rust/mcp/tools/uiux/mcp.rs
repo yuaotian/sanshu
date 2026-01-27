@@ -526,12 +526,18 @@ fn handle_design_system(
 
 fn handle_suggest(req: UiuxSuggestRequest, defaults: UiuxDefaults) -> Result<CallToolResult, McpError> {
     let lang = resolve_lang(req.lang, defaults);
-    let _output_format = resolve_output_format(req.output_format, defaults);
+    let output_format = resolve_output_format(req.output_format, defaults);
     let result = engine::suggest(&req.text);
     let text = localize::suggest_summary(lang, &result);
+    // text 输出时保留兼容字段，方便旧消费方按需读取
+    let legacy_text = if matches!(output_format, UiuxOutputFormat::Text) {
+        Some(text.clone())
+    } else {
+        None
+    };
     let data = UiuxSuggestData {
         result,
-        legacy_text: None,
+        legacy_text,
     };
     build_response("uiux_suggest", lang, data, text, vec![])
 }
