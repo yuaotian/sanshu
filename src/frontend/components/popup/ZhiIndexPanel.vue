@@ -213,11 +213,11 @@ function handleOpenDetail() {
           <!-- 分隔符 -->
           <span class="status-divider">·</span>
           <!-- 文件数 -->
-          <span class="status-files">{{ totalFiles }} 个文件</span>
+          <span class="status-files">已索引 {{ indexedFiles }}/{{ totalFiles }} 个文件</span>
           <!-- 最后同步时间（如有） -->
           <template v-if="lastSyncTime">
             <span class="status-divider">·</span>
-            <span class="status-time">{{ lastSyncTime }}</span>
+            <span class="status-time">上次同步 {{ lastSyncTime }}</span>
           </template>
         </div>
         <div class="header-right">
@@ -264,8 +264,8 @@ function handleOpenDetail() {
               trigger="click"
               placement="bottom-start"
               :options="[
-                { label: '增量同步', key: 'incremental', icon: () => h('div', { class: 'i-carbon-restart' }) },
-                { label: '全量重建', key: 'full', icon: () => h('div', { class: 'i-carbon-renew' }) },
+                { label: '增量同步（推荐）', key: 'incremental', icon: () => h('div', { class: 'i-carbon-restart' }) },
+                { label: '全量重建（清空索引）', key: 'full', icon: () => h('div', { class: 'i-carbon-renew' }) },
               ]"
               @select="handleResync"
               @clickoutside="showSyncMenu = false"

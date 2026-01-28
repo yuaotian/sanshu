@@ -2,7 +2,7 @@
 import type { McpRequest } from '../../types/popup'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { useMessage } from 'naive-ui'
+import { useDialog, useMessage } from 'naive-ui'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { useAcemcpSync } from '../../composables/useAcemcpSync'
@@ -66,6 +66,7 @@ const emit = defineEmits<Emits>()
 
 // 使用消息提示
 const message = useMessage()
+const dialog = useDialog()
 
 // 索引状态管理
 const {
@@ -480,16 +481,17 @@ function handleOpenMcpToolsTab() {
   emit('openMcpToolsTab')
 }
 
-// 处理索引重新同步请求
-async function handleIndexResync(type: 'incremental' | 'full') {
+// 实际执行索引同步/重建
+async function runIndexResync(type: 'incremental' | 'full') {
   if (!props.request?.project_root_path || resyncLoading.value)
     return
 
   resyncLoading.value = true
   try {
-    // 根据类型触发增量同步 / 全量重建
     const result = await triggerIndexUpdate(props.request.project_root_path, type)
-    message.success(typeof result === 'string' ? result : `${type === 'full' ? '全量重建' : '增量同步'}已触发`)
+    const fallback = type === 'full' ? '全量重建已触发' : '增量同步已触发'
+    const messageText = typeof result === 'string' ? result : fallback
+    message.success(type === 'full' ? `全量重建：${messageText}` : messageText)
   }
   catch (error) {
     console.error('触发索引更新失败:', error)
@@ -498,6 +500,28 @@ async function handleIndexResync(type: 'incremental' | 'full') {
   finally {
     resyncLoading.value = false
   }
+}
+
+// 处理索引重新同步请求
+function handleIndexResync(type: 'incremental' | 'full') {
+  if (!props.request?.project_root_path || resyncLoading.value)
+    return
+
+  if (type === 'full') {
+    const projectRoot = props.request.project_root_path
+    dialog.warning({
+      title: '确认全量重建',
+      content: `将清理本地索引记录并重新上传所有文件。\n\n项目：${projectRoot}\n\n过程较慢，但不会阻塞当前对话。是否继续？`,
+      positiveText: '继续',
+      negativeText: '取消',
+      onPositiveClick: async () => {
+        await runIndexResync(type)
+      },
+    })
+    return
+  }
+
+  runIndexResync(type)
 }
 
 // 处理打开索引详情抽屉
