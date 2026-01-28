@@ -98,12 +98,12 @@ export function getContextPolicyStatus(request?: McpRequest | null): ContextPoli
 /**
  * 判断是否应该显示策略指示器
  * @param request MCP 请求对象
- * @returns 只要弹窗存在请求就显示策略指示器（全局提示）
+ * @returns 只有显式传入 UI/UX 信号时才显示策略指示器（YAGNI：不显示用户不需要的信息）
  */
 export function shouldShowPolicyIndicator(request?: McpRequest | null): boolean {
   if (!request) return false
-  // 全局提示：即使未传入 UI/UX 参数，也展示当前默认策略状态
-  return true
+  // 只有 AI 显式传入 UI/UX 参数时才显示策略指示器，避免非 UI 美化场景的无关提示
+  return !!(request.uiux_intent || request.uiux_context_policy || request.uiux_reason)
 }
 
 // 复用条件性 prompt 的上下文拼接逻辑，保持与弹窗输入一致
