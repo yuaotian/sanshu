@@ -108,9 +108,13 @@ impl ServerHandler for ZhiServer {
                 "is_markdown": {
                     "type": "boolean",
                     "description": "消息是否为Markdown格式，默认为true"
+                },
+                "project_root_path": {
+                    "type": "string",
+                    "description": "项目根目录绝对路径（必填）"
                 }
             },
-            "required": ["message"]
+            "required": ["message", "project_root_path"]
         });
 
         if let serde_json::Value::Object(schema_map) = zhi_schema {
