@@ -36,10 +36,10 @@
 
 | 🖥️ 平台 | 📥 GitHub 直链 | 🌏 国内加速 | 📋 说明 |
 |:-------:|:-------------:|:-----------:|:------:|
-| **Windows x64** | [下载 .zip ⏬](https://github.com/yuaotian/sanshu/releases/download/v0.4.6/sanshu-cli-v0.4.6-windows-x86_64.zip) | [wget.la ⏬](https://wget.la/https://github.com/yuaotian/sanshu/releases/download/v0.4.6/sanshu-cli-v0.4.6-windows-x86_64.zip) | 64位 Windows 系统 |
-| **macOS ARM64** | [下载 .tar.gz ⏬](https://github.com/yuaotian/sanshu/releases/download/v0.4.6/sanshu-cli-v0.4.6-macos-aarch64.tar.gz) | [wget.la ⏬](https://wget.la/https://github.com/yuaotian/sanshu/releases/download/v0.4.6/sanshu-cli-v0.4.6-macos-aarch64.tar.gz) | Apple Silicon (M1/M2/M3) |
-| **macOS Intel** | [下载 .tar.gz ⏬](https://github.com/yuaotian/sanshu/releases/download/v0.4.6/sanshu-cli-v0.4.6-macos-x86_64.tar.gz) | [wget.la ⏬](https://wget.la/https://github.com/yuaotian/sanshu/releases/download/v0.4.6/sanshu-cli-v0.4.6-macos-x86_64.tar.gz) | Intel 芯片 Mac |
-| **Linux x64** | [下载 .tar.gz ⏬](https://github.com/yuaotian/sanshu/releases/download/v0.4.6/sanshu-cli-v0.4.6-linux-x86_64.tar.gz) | [wget.la ⏬](https://wget.la/https://github.com/yuaotian/sanshu/releases/download/v0.4.6/sanshu-cli-v0.4.6-linux-x86_64.tar.gz) | 64位 Linux 系统 |
+| **Windows x64** | [下载 .zip ⏬](https://github.com/yuaotian/sanshu/releases/download/v0.4.7/sanshu-cli-v0.4.7-windows-x86_64.zip) | [wget.la ⏬](https://wget.la/https://github.com/yuaotian/sanshu/releases/download/v0.4.7/sanshu-cli-v0.4.7-windows-x86_64.zip) | 64位 Windows 系统 |
+| **macOS ARM64** | [下载 .tar.gz ⏬](https://github.com/yuaotian/sanshu/releases/download/v0.4.7/sanshu-cli-v0.4.7-macos-aarch64.tar.gz) | [wget.la ⏬](https://wget.la/https://github.com/yuaotian/sanshu/releases/download/v0.4.7/sanshu-cli-v0.4.7-macos-aarch64.tar.gz) | Apple Silicon (M1/M2/M3) |
+| **macOS Intel** | [下载 .tar.gz ⏬](https://github.com/yuaotian/sanshu/releases/download/v0.4.7/sanshu-cli-v0.4.7-macos-x86_64.tar.gz) | [wget.la ⏬](https://wget.la/https://github.com/yuaotian/sanshu/releases/download/v0.4.7/sanshu-cli-v0.4.7-macos-x86_64.tar.gz) | Intel 芯片 Mac |
+| **Linux x64** | [下载 .tar.gz ⏬](https://github.com/yuaotian/sanshu/releases/download/v0.4.7/sanshu-cli-v0.4.7-linux-x86_64.tar.gz) | [wget.la ⏬](https://wget.la/https://github.com/yuaotian/sanshu/releases/download/v0.4.7/sanshu-cli-v0.4.7-linux-x86_64.tar.gz) | 64位 Linux 系统 |
 
 > **🎯 如何选择下载链接？**
 >
@@ -65,7 +65,7 @@
 > **💡 wget.la 是什么？**
 > wget.la 是专业的 GitHub 加速服务，为中国大陆用户提供更快的下载体验。所有链接均指向官方 GitHub Releases，确保安全性和完整性。
 
-> **📋 版本信息**：当前最新版本 0.4.6 | 上次更新：2026-01-28
+> **📋 版本信息**：当前最新版本 0.4.7 | 上次更新：2026-01-28
 
 ### 安装说明
 
