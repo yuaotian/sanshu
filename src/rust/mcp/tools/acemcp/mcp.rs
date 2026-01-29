@@ -726,6 +726,11 @@ fn split_content(path: &str, content: &str, max_lines: usize) -> Vec<BlobItem> {
     blobs
 }
 
+// 去除 blob 路径中的 chunk 后缀，恢复文件级路径
+fn strip_chunk_suffix(path: &str) -> &str {
+    path.split("#chunk").next().unwrap_or(path)
+}
+
 /// 构建排除模式的 GlobSet
 fn build_exclude_globset(exclude_patterns: &[String]) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
@@ -1242,11 +1247,14 @@ pub(crate) async fn update_index(config: &AcemcpConfig, project_root_path: &str)
     };
 
     // 提取最近增量索引的文件路径（从 new_blobs 中获取，最多 5 个）
-    let recent_files: Vec<String> = new_blobs
+    // 说明：按路径排序并做文件级去重，保证展示稳定且不带 chunk 后缀
+    let mut recent_files: Vec<String> = new_blobs
         .iter()
-        .map(|b| b.path.clone())
-        .take(5)
+        .map(|b| strip_chunk_suffix(&b.path).to_string())
         .collect();
+    recent_files.sort();
+    recent_files.dedup();
+    recent_files.truncate(5);
 
     // 更新状态：索引成功完成
     let _ = update_project_status(project_root_path, |status| {

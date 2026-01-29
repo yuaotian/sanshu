@@ -203,14 +203,28 @@ const isSyncing = computed(() => props.resyncLoading || props.isIndexing)
 const projectName = computed(() => {
   if (!props.projectRoot)
     return null
-  // 兼容 Windows 和 Unix 路径分隔符
-  const segments = props.projectRoot.replace(/\\/g, '/').split('/')
+  // 兼容 Windows 和 Unix 路径分隔符，并去除末尾分隔符
+  const normalized = props.projectRoot.replace(/\\/g, '/').replace(/\/+$/, '')
+  if (!normalized)
+    return null
+  const segments = normalized.split('/')
   return segments[segments.length - 1] || null
 })
 
 // 最近增量索引的文件列表
 const recentIndexedFiles = computed(() => {
-  return props.projectStatus?.recent_indexed_files ?? []
+  const files = props.projectStatus?.recent_indexed_files ?? []
+  const normalized: string[] = []
+  const seen = new Set<string>()
+  for (const file of files) {
+    // 去除 chunk 后缀，避免展示为 blob 片段
+    const base = file.split('#chunk')[0] || file
+    if (!seen.has(base)) {
+      seen.add(base)
+      normalized.push(base)
+    }
+  }
+  return normalized
 })
 
 // 最近索引文件的显示文本
