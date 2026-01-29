@@ -25,8 +25,16 @@ impl MemoryTool {
         }
 
         // 创建记忆管理器（会自动执行迁移和启动时去重）
+        // 支持非 Git 项目降级模式
         let mut manager = MemoryManager::new(&request.project_path)
             .map_err(|e| McpError::internal_error(format!("创建记忆管理器失败: {}", e), None))?;
+
+        // 非 Git 项目提示（仅在降级模式时显示）
+        let non_git_hint = if manager.is_non_git_project() {
+            "\n\n⚠️ 当前目录非 Git 仓库，记忆已存储在项目根目录 `.sanshu-memory` 文件夹中。\n💡 建议初始化 Git 以获得更好的项目记忆隔离：`git init`"
+        } else {
+            ""
+        };
 
         // 检查 sou 工具是否启用，如果启用则尝试触发后台索引
         let mut index_hint = String::new();
@@ -51,20 +59,22 @@ impl MemoryTool {
                 match manager.add_memory(&request.content, category) {
                     Ok(Some(id)) => {
                         format!(
-                            "✅ 记忆已添加，ID: {}\n📝 内容: {}\n📂 分类: {}{}",
+                            "✅ 记忆已添加，ID: {}\n📝 内容: {}\n📂 分类: {}{}{}",
                             id,
                             request.content,
                             category.display_name(),
-                            index_hint
+                            index_hint,
+                            non_git_hint
                         )
                     }
                     Ok(None) => {
                         // 被去重静默拒绝
                         format!(
-                            "⚠️ 记忆已存在相似内容，未重复添加\n📝 内容: {}\n📂 分类: {}{}",
+                            "⚠️ 记忆已存在相似内容，未重复添加\n📝 内容: {}\n📂 分类: {}{}{}",
                             request.content,
                             category.display_name(),
-                            index_hint
+                            index_hint,
+                            non_git_hint
                         )
                     }
                     Err(e) => {
@@ -74,7 +84,7 @@ impl MemoryTool {
             }
             "回忆" => {
                 let info = manager.get_project_info();
-                format!("{}{}", info, index_hint)
+                format!("{}{}{}", info, index_hint, non_git_hint)
             }
             // === 新增: 整理 (执行去重) ===
             "整理" => {

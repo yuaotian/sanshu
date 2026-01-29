@@ -24,6 +24,16 @@ pub struct MemoryManager {
     project_path: String,
     /// 存储数据
     store: MemoryStore,
+    /// 是否为非 Git 项目（降级模式）
+    is_non_git_project: bool,
+}
+
+/// 路径规范化结果
+struct NormalizeResult {
+    /// 规范化后的路径
+    path: PathBuf,
+    /// 是否为非 Git 项目
+    is_non_git: bool,
 }
 
 impl MemoryManager {
@@ -33,23 +43,23 @@ impl MemoryManager {
     /// 创建新的记忆管理器
     ///
     /// 自动执行：
-    /// 1. 路径规范化和验证
+    /// 1. 路径规范化和验证（支持非 Git 项目降级）
     /// 2. 旧格式迁移（如果需要）
     /// 3. 启动时去重（如果配置启用）
     pub fn new(project_path: &str) -> Result<Self> {
-        // 规范化项目路径
-        let normalized_path = Self::normalize_project_path(project_path)?;
-        let memory_dir = normalized_path.join(".sanshu-memory");
+        // 规范化项目路径（支持非 Git 项目降级）
+        let normalize_result = Self::normalize_project_path(project_path)?;
+        let memory_dir = normalize_result.path.join(".sanshu-memory");
 
         // 创建记忆目录
         fs::create_dir_all(&memory_dir)
             .map_err(|e| anyhow::anyhow!(
-                "无法在git项目中创建记忆目录: {}\n错误: {}\n这可能是因为项目目录没有写入权限。",
-                memory_dir.display(),
+                "无法创建记忆目录: {}\n错误: {}\n这可能是因为项目目录没有写入权限。",
+                Self::clean_display_path(&memory_dir),
                 e
             ))?;
 
-        let project_path_str = normalized_path.to_string_lossy().to_string();
+        let project_path_str = Self::clean_display_path(&normalize_result.path);
 
         // 检查是否需要迁移
         if MemoryMigrator::needs_migration(&memory_dir) {
@@ -108,12 +118,18 @@ impl MemoryManager {
             memory_dir,
             project_path: project_path_str,
             store,
+            is_non_git_project: normalize_result.is_non_git,
         };
 
         // 保存存储
         manager.save_store()?;
 
         Ok(manager)
+    }
+
+    /// 检查是否为非 Git 项目（降级模式）
+    pub fn is_non_git_project(&self) -> bool {
+        self.is_non_git_project
     }
 
     /// 添加记忆条目
@@ -309,11 +325,32 @@ impl MemoryManager {
     }
 
     // ========================================================================
-    // 以下是路径处理辅助方法（保持原有逻辑）
+    // 以下是路径处理辅助方法
     // ========================================================================
 
+    /// 清理 Windows 扩展路径前缀用于显示
+    /// 
+    /// Windows 的 `canonicalize()` 会返回 `\\?\C:\...` 格式的路径，
+    /// 这在错误消息和日志中显示不友好，需要清理前缀。
+    fn clean_display_path(path: &Path) -> String {
+        let path_str = path.to_string_lossy();
+        // 处理 \\?\ 格式（Windows 扩展路径语法）
+        if path_str.starts_with(r"\\?\") {
+            return path_str[4..].to_string();
+        }
+        // 处理 //?/ 格式（canonicalize 在某些情况下返回）
+        if path_str.starts_with("//?/") {
+            return path_str[4..].to_string();
+        }
+        path_str.to_string()
+    }
+
     /// 规范化项目路径
-    fn normalize_project_path(project_path: &str) -> Result<PathBuf> {
+    /// 
+    /// 支持非 Git 项目降级：
+    /// - 如果检测到 Git 仓库，使用 Git 根目录
+    /// - 如果未检测到 Git 仓库，使用当前目录并标记为降级模式
+    fn normalize_project_path(project_path: &str) -> Result<NormalizeResult> {
         // 使用增强的路径解码和规范化功能
         let normalized_path_str = crate::mcp::utils::decode_and_normalize_path(project_path)
             .map_err(|e| anyhow::anyhow!("路径格式错误: {}", e))?;
@@ -338,24 +375,35 @@ impl MemoryManager {
         if !canonical_path.exists() {
             return Err(anyhow::anyhow!(
                 "项目路径不存在: {}\n原始输入: {}\n规范化后: {}",
-                canonical_path.display(),
+                Self::clean_display_path(&canonical_path),
                 project_path,
                 normalized_path_str
             ));
         }
 
         if !canonical_path.is_dir() {
-            return Err(anyhow::anyhow!("项目路径不是目录: {}", canonical_path.display()));
+            return Err(anyhow::anyhow!(
+                "项目路径不是目录: {}",
+                Self::clean_display_path(&canonical_path)
+            ));
         }
 
-        // 验证是否为 git 根目录或其子目录
+        // 优先使用 git 根目录，否则降级使用当前目录
         if let Some(git_root) = Self::find_git_root(&canonical_path) {
-            Ok(git_root)
+            Ok(NormalizeResult {
+                path: git_root,
+                is_non_git: false,
+            })
         } else {
-            Err(anyhow::anyhow!(
-                "错误：提供的项目路径不在 git 仓库中。\n路径: {}\n请确保在 git 根目录（包含 .git 文件夹的目录）中调用此功能。",
-                canonical_path.display()
-            ))
+            // 非 Git 项目降级：使用当前目录
+            log_debug!(
+                "未检测到 Git 仓库，使用项目目录作为记忆存储位置: {}",
+                Self::clean_display_path(&canonical_path)
+            );
+            Ok(NormalizeResult {
+                path: canonical_path,
+                is_non_git: true,
+            })
         }
     }
 
