@@ -90,7 +90,7 @@ function handleOpenIndexStatus() {
           <template #trigger>
             <button
               type="button"
-              class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-slate-300/60 dark:border-white/15 bg-slate-100/60 dark:bg-white/5 hover:bg-slate-200/60 dark:hover:bg-white/10 text-xs text-slate-700 dark:text-white/85 transition-colors duration-150"
+              class="inline-flex items-center gap-1.5 rounded-full border border-black-300/60 bg-black-200/70 px-2.5 py-1 text-xs text-white transition-colors duration-150 hover:bg-black-300/70"
               @click="handleOpenIndexStatus"
             >
               <div

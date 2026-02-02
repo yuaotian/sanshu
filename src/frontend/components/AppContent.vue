@@ -195,7 +195,7 @@ onUnmounted(() => {
       class="flex flex-col w-full h-screen bg-black text-white select-none"
     >
       <!-- 头部 - 固定在顶部 -->
-      <div class="sticky top-0 z-50 flex-shrink-0 bg-black-100 border-b-2 border-black-200">
+      <div class="sticky top-0 z-50 flex-shrink-0 bg-black-200 border-b-2 border-black-300">
         <PopupHeader
           :current-theme="props.appConfig.theme"
           :loading="false"
