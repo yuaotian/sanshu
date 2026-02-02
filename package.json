@@ -2,7 +2,7 @@
   "name": "sanshu",
   "type": "module",
   "version": "0.4.8",
-  "packageManager": "pnpm@10.25.0",
+  "packageManager": "pnpm@10.28.2",
   "author": "煎饼果子(86)",
   "license": "MIT",
   "homepage": "https://github.com/yuaotian/sanshu",
