@@ -1,11 +1,11 @@
 <script setup lang="ts">
 // 修复重复的 script setup 声明，避免 SFC 解析错误
-import type { CustomPrompt } from '../../types/popup'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { useMediaQuery } from '@vueuse/core'
 import { useMessage } from 'naive-ui'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import type { CustomPrompt } from '../../types/popup'
 import { buildConditionalContext } from '../../utils/conditionalContext'
 import EnhanceConfigPanel from './enhance/EnhanceConfigPanel.vue'
 import EnhancePreview from './enhance/EnhancePreview.vue'
