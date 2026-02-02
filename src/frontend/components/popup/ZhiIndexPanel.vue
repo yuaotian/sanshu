@@ -59,6 +59,9 @@ const nestedStatus = ref<ProjectWithNestedStatus | null>(null)
 const loadingNested = ref(false)
 // 记录嵌套项目加载错误（用于前端显性提示）
 const nestedError = ref<string | null>(null)
+// 命令不可用时不再重复请求，避免反复报错
+const nestedCommandUnavailable = ref(false)
+const nestedCommandUnavailableMessage = '当前后端版本不支持“Git 子项目”功能，请升级客户端。'
 
 // ==================== 计算属性 ====================
 
@@ -246,6 +249,12 @@ async function fetchNestedStatus() {
   if (!props.projectRoot)
     return
 
+  // 命令不可用时直接提示，避免反复请求
+  if (nestedCommandUnavailable.value) {
+    nestedError.value = nestedCommandUnavailableMessage
+    return
+  }
+
   loadingNested.value = true
   nestedError.value = null
   try {
@@ -256,7 +265,14 @@ async function fetchNestedStatus() {
   }
   catch (err) {
     console.error('获取嵌套项目状态失败:', err)
-    nestedError.value = String(err)
+    const errorText = String(err)
+    const lowerText = errorText.toLowerCase()
+    if (lowerText.includes('get_acemcp_project_with_nested') && lowerText.includes('not found')) {
+      nestedCommandUnavailable.value = true
+      nestedError.value = nestedCommandUnavailableMessage
+      return
+    }
+    nestedError.value = errorText
   }
   finally {
     loadingNested.value = false
