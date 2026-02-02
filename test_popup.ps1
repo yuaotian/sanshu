@@ -60,20 +60,21 @@ function Select-BuildType {
     Write-Host "  2. Debug (包含调试信息)" -ForegroundColor Green
     Write-Host ""
 
-    while ($true) {
+    $selected = $false
+    while (-not $selected) {
         $buildChoice = Read-Host "请选择构建类型 (1-2)"
         switch ($buildChoice) {
             "1" {
                 $script:BuildType = "release"
                 Update-CliPath
                 Write-Host "✅ 已选择 Release 构建" -ForegroundColor Green
-                break
+                $selected = $true
             }
             "2" {
                 $script:BuildType = "debug"
                 Update-CliPath
                 Write-Host "✅ 已选择 Debug 构建" -ForegroundColor Green
-                break
+                $selected = $true
             }
             default {
                 Write-Host "❌ 无效选项，请选择 1 或 2" -ForegroundColor Red
@@ -137,20 +138,21 @@ function Select-CliType {
     Write-Host "  2. 全局安装版本 (系统PATH中)" -ForegroundColor Green
     Write-Host ""
 
-    while ($true) {
+    $selected = $false
+    while (-not $selected) {
         $cliChoice = Read-Host "请选择CLI类型 (1-2)"
         switch ($cliChoice) {
             "1" {
                 $script:CliType = "local"
                 Write-Host "✅ 已选择本地编译版本" -ForegroundColor Green
                 Select-BuildType
-                break
+                $selected = $true
             }
             "2" {
                 $script:CliType = "global"
                 Write-Host "✅ 已选择全局安装版本" -ForegroundColor Green
                 Check-GlobalCli
-                break
+                $selected = $true
             }
             default {
                 Write-Host "❌ 无效选项，请选择 1 或 2" -ForegroundColor Red
