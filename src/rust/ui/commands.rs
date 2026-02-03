@@ -572,8 +572,9 @@ pub async fn open_external_url(url: String) -> Result<(), String> {
 
     // 根据操作系统选择合适的命令
     let result = if cfg!(target_os = "windows") {
+        // "start" treats the first quoted arg as title; pass empty title to handle spaces.
         Command::new("cmd")
-            .args(["/C", "start", &url])
+            .args(["/C", "start", "", &url])
             .spawn()
     } else if cfg!(target_os = "macos") {
         Command::new("open")

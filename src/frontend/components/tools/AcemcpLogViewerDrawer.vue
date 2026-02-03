@@ -13,7 +13,7 @@ interface Emits {
   'update:show': [value: boolean]
 }
 
-type LogStreamEventType = 'append' | 'error'
+type LogStreamEventType = 'append' | 'error' | 'reset'
 
 interface AcemcpLogStreamEvent {
   event_type: LogStreamEventType
@@ -153,8 +153,8 @@ const filteredItems = computed(() => {
   const levels = new Set(selectedLevels.value.map(l => l.toUpperCase()))
   const q = keyword.value.trim().toLowerCase()
 
-  if (!q && levels.size === 0)
-    return allItems.value
+  if (levels.size === 0)
+    return []
 
   return allItems.value.filter((it) => {
     const lv = (it.level || '').toUpperCase()
@@ -271,6 +271,13 @@ async function startStream() {
       const payload = event.payload
       if (!payload)
         return
+
+      if (payload.event_type === 'reset') {
+        appendLines(['[log_stream] 检测到日志轮转/截断，已从新文件继续'])
+        message.info('检测到日志轮转/截断，已从新文件继续')
+        await scrollToBottom()
+        return
+      }
 
       if (payload.event_type === 'error') {
         if (payload.error)

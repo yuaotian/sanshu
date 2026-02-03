@@ -81,6 +81,7 @@ pub fn build_tauri_app() -> Builder<tauri::Wry> {
             crate::mcp::tools::acemcp::commands::read_acemcp_logs,
             crate::mcp::tools::acemcp::commands::list_acemcp_log_targets,
             crate::mcp::tools::acemcp::commands::get_acemcp_log_directory,
+            crate::mcp::tools::acemcp::commands::get_acemcp_log_file_path,
             crate::mcp::tools::acemcp::commands::export_acemcp_logs,
             crate::mcp::tools::acemcp::commands::start_acemcp_log_stream,
             crate::mcp::tools::acemcp::commands::stop_acemcp_log_stream,

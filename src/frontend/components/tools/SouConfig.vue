@@ -49,6 +49,7 @@ const config = ref({
 
 const loadingConfig = ref(false)
 const showProxyModal = ref(false)
+const logFilePath = ref('')
 const { open: openLogViewer } = useLogViewer()
 // 调试状态
 const debugProjectRoot = ref('')
@@ -204,6 +205,16 @@ async function loadAcemcpConfig() {
   }
   finally {
     loadingConfig.value = false
+  }
+}
+
+async function loadLogFilePath() {
+  try {
+    const path = await invoke('get_acemcp_log_file_path') as string
+    logFilePath.value = path || ''
+  }
+  catch {
+    logFilePath.value = ''
   }
 }
 
@@ -459,6 +470,7 @@ watch(() => config.value.text_extensions, (list) => {
 onMounted(async () => {
   if (props.active) {
     await loadAcemcpConfig()
+    await loadLogFilePath()
     await Promise.all([
       fetchAutoIndexEnabled(),
       fetchWatchingProjects(),
@@ -619,7 +631,7 @@ defineExpose({ saveConfig })
                 <template #icon>
                   <div class="i-carbon-terminal" />
                 </template>
-                日志路径: <code class="code-inline">%APPDATA%/sanshu/log/acemcp.log</code>（Windows）
+                日志路径: <code class="code-inline">{{ logFilePath || '默认：%APPDATA%/sanshu/log/acemcp.log (Windows) / ~/.config/sanshu/log/acemcp.log (macOS/Linux)' }}</code>
               </n-alert>
 
               <n-space class="mt-3">

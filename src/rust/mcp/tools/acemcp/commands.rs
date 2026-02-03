@@ -1,5 +1,6 @@
 use tauri::{AppHandle, Emitter, State};
 use once_cell::sync::Lazy;
+use std::env;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -13,7 +14,7 @@ use crate::{log_debug, log_important};
 
 #[derive(Debug, Clone, serde::Serialize)]
 struct AcemcpLogStreamEvent {
-    /// 事件类型: "append" | "error"
+    /// 事件类型: "append" | "error" | "reset"
     event_type: String,
     /// 新增日志行（不含换行符）
     lines: Vec<String>,
@@ -42,6 +43,13 @@ static ACEMCP_LOG_STREAM_CANCEL_FLAG: Lazy<Mutex<Option<Arc<AtomicBool>>>> =
     Lazy::new(|| Mutex::new(None));
 
 fn get_acemcp_log_path() -> Result<std::path::PathBuf, String> {
+    if let Ok(path) = env::var("MCP_LOG_FILE") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Ok(std::path::PathBuf::from(trimmed));
+        }
+    }
+
     // 使用 dirs::config_dir() 获取系统配置目录，确保跨平台兼容性
     // Windows: C:\Users\<用户>\AppData\Roaming\sanshu\log\acemcp.log
     // Linux: ~/.config/sanshu/log/acemcp.log
@@ -354,6 +362,13 @@ pub async fn get_acemcp_log_directory() -> Result<String, String> {
     Ok(dir.to_string_lossy().to_string())
 }
 
+#[tauri::command]
+pub async fn get_acemcp_log_file_path() -> Result<String, String> {
+    let log_path = get_acemcp_log_path()?;
+    ensure_acemcp_log_dir_exists(&log_path)?;
+    Ok(log_path.to_string_lossy().to_string())
+}
+
 /// 获取可用的日志目标列表（用于前端下拉切换）
 #[tauri::command]
 pub async fn list_acemcp_log_targets() -> Result<Vec<AcemcpLogTargetInfo>, String> {
@@ -494,12 +509,27 @@ pub async fn read_acemcp_logs(
             Ok(f) => f,
             Err(_) => continue,
         };
-        let reader = BufReader::new(file);
-        for line in reader.lines().flatten() {
+        let mut reader = BufReader::new(file);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let bytes = match reader.read_until(b'\n', &mut line) {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            if bytes == 0 {
+                break;
+            }
+
+            while matches!(line.last(), Some(b'\n') | Some(b'\r')) {
+                line.pop();
+            }
+
+            let text = String::from_utf8_lossy(&line).to_string();
             if buf.len() == max_lines {
                 buf.pop_front();
             }
-            buf.push_back(line);
+            buf.push_back(text);
         }
     }
 
@@ -685,6 +715,14 @@ pub async fn start_acemcp_log_stream(
                         file_len
                     );
                     offset = Some(0);
+                    let _ = app.emit(
+                        "acemcp-log-stream",
+                        &AcemcpLogStreamEvent {
+                            event_type: "reset".to_string(),
+                            lines: vec![],
+                            error: None,
+                        },
+                    );
                 }
                 _ => {}
             }
