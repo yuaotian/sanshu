@@ -1,10 +1,51 @@
 use tauri::{AppHandle, Emitter, State};
+use once_cell::sync::Lazy;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use crate::config::{AppState, save_config};
 use crate::network::proxy::{ProxyDetector, ProxyInfo, ProxyType};
 use super::AcemcpTool;
 use super::types::{AcemcpRequest, ProjectIndexStatus, ProjectsIndexStatus, ProjectFilesStatus, DetectedProxy, ProxySpeedTestResult, SpeedTestMetric, SpeedTestProgress, SpeedTestStageStatus, ProjectWithNestedStatus};
 use reqwest;
+use crate::{log_debug, log_important};
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct AcemcpLogStreamEvent {
+    /// 事件类型: "append" | "error"
+    event_type: String,
+    /// 新增日志行（不含换行符）
+    lines: Vec<String>,
+    /// 错误信息（仅 error 类型有值）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+static ACEMCP_LOG_STREAM_CANCEL_FLAG: Lazy<Mutex<Option<Arc<AtomicBool>>>> =
+    Lazy::new(|| Mutex::new(None));
+
+fn get_acemcp_log_path() -> Result<std::path::PathBuf, String> {
+    // 使用 dirs::config_dir() 获取系统配置目录，确保跨平台兼容性
+    // Windows: C:\Users\<用户>\AppData\Roaming\sanshu\log\acemcp.log
+    // Linux: ~/.config/sanshu/log/acemcp.log
+    // macOS: ~/Library/Application Support/sanshu/log/acemcp.log
+    let config_dir = dirs::config_dir()
+        .ok_or_else(|| "无法获取系统配置目录，请检查操作系统环境".to_string())?;
+
+    Ok(config_dir.join("sanshu").join("log").join("acemcp.log"))
+}
+
+fn ensure_acemcp_log_dir_exists(log_path: &std::path::PathBuf) -> Result<(), String> {
+    // 确保日志目录存在
+    if let Some(log_dir) = log_path.parent() {
+        if !log_dir.exists() {
+            std::fs::create_dir_all(log_dir)
+                .map_err(|e| format!("创建日志目录失败: {} (路径: {})", e, log_dir.display()))?;
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, serde::Deserialize)]
 pub struct SaveAcemcpConfigArgs {
@@ -288,30 +329,20 @@ pub async fn test_acemcp_connection(
 
 /// 读取日志文件内容
 #[tauri::command]
-pub async fn read_acemcp_logs(_state: State<'_, AppState>) -> Result<Vec<String>, String> {
-    // 使用 dirs::config_dir() 获取系统配置目录，确保跨平台兼容性
-    // Windows: C:\Users\<用户>\AppData\Roaming\sanshu\log\acemcp.log
-    // Linux: ~/.config/sanshu/log/acemcp.log
-    // macOS: ~/Library/Application Support/sanshu/log/acemcp.log
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| "无法获取系统配置目录，请检查操作系统环境".to_string())?;
+pub async fn read_acemcp_logs(
+    _state: State<'_, AppState>,
+    max_lines: Option<usize>,
+) -> Result<Vec<String>, String> {
+    let log_path = get_acemcp_log_path()?;
+    ensure_acemcp_log_dir_exists(&log_path)?;
 
-    let log_path = config_dir.join("sanshu").join("log").join("acemcp.log");
-
-    // 确保日志目录存在
-    if let Some(log_dir) = log_path.parent() {
-        if !log_dir.exists() {
-            std::fs::create_dir_all(log_dir)
-                .map_err(|e| format!("创建日志目录失败: {} (路径: {})", e, log_dir.display()))?;
-        }
-    }
-
-    // 读取当前日志 + 轮转备份（acemcp.log.1, acemcp.log.2 ...），返回最后 1000 行
+    // 读取当前日志 + 轮转备份（acemcp.log.1, acemcp.log.2 ...），返回最后 N 行（默认 1000，最大 5000）
     // 中文说明：使用流式读取避免在日志很大时一次性读入内存。
     use std::collections::VecDeque;
     use std::io::{BufRead, BufReader};
 
-    let max_lines: usize = 1000;
+    // 前端日志查看器默认 5000 行；为了避免误传导致卡顿，这里做上限保护。
+    let max_lines: usize = max_lines.unwrap_or(1000).clamp(100, 5000);
     let max_backups: usize = crate::utils::logger::LogRotationConfig::default().max_backup_count as usize;
 
     let log_dir = log_path
@@ -358,6 +389,167 @@ pub async fn read_acemcp_logs(_state: State<'_, AppState>) -> Result<Vec<String>
     }
 
     Ok(buf.into_iter().collect())
+}
+
+/// 启动 acemcp 日志流（tail -f）
+///
+/// 中文说明：
+/// - 采用轮询方式读取 acemcp.log 新增内容，跨平台更稳定（Windows 轮转 rename 更容易兼容）
+/// - 事件名称固定为 "acemcp-log-stream"，前端按需 listen/unlisten
+#[tauri::command]
+pub async fn start_acemcp_log_stream(
+    app: AppHandle,
+    interval_ms: Option<u64>,
+) -> Result<(), String> {
+    let interval_ms = interval_ms.unwrap_or(300).clamp(50, 2_000);
+    let log_path = get_acemcp_log_path()?;
+    ensure_acemcp_log_dir_exists(&log_path)?;
+
+    // 如已有旧任务，先取消（避免重复推送）
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut guard = ACEMCP_LOG_STREAM_CANCEL_FLAG
+            .lock()
+            .map_err(|_| "日志流取消锁已被毒化（poisoned）".to_string())?;
+        if let Some(old) = guard.take() {
+            old.store(true, Ordering::Relaxed);
+        }
+        *guard = Some(cancel_flag.clone());
+    }
+
+    log_important!(
+        info,
+        "[log_stream] 启动 acemcp 日志流: interval_ms={}, path={}",
+        interval_ms,
+        log_path.display()
+    );
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        use std::io::{BufRead, BufReader, Seek, SeekFrom};
+
+        // 中文说明：首次启动默认从文件末尾开始，只推送“新增日志”
+        let mut offset: Option<u64> = None;
+
+        loop {
+            if cancel_flag.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let meta = match std::fs::metadata(&log_path) {
+                Ok(m) => m,
+                Err(e) => {
+                    // 文件还未生成/临时不可读：best-effort，不刷屏
+                    log_debug!("[log_stream] 读取日志文件元信息失败（将重试）: {}", e);
+                    tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+                    continue;
+                }
+            };
+
+            let file_len = meta.len();
+            match offset {
+                None => {
+                    offset = Some(file_len);
+                }
+                Some(off) if file_len < off => {
+                    // 轮转或截断：从头开始读新文件
+                    log_debug!(
+                        "[log_stream] 检测到日志文件轮转/截断，重置 offset: old_offset={}, new_size={}",
+                        off,
+                        file_len
+                    );
+                    offset = Some(0);
+                }
+                _ => {}
+            }
+
+            let mut file = match std::fs::File::open(&log_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    log_debug!("[log_stream] 打开日志文件失败（将重试）: {}", e);
+                    tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+                    continue;
+                }
+            };
+
+            let off = offset.unwrap_or(0);
+            if file.seek(SeekFrom::Start(off)).is_err() {
+                tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+                continue;
+            }
+
+            let mut reader = BufReader::new(file);
+            let mut new_lines: Vec<String> = Vec::new();
+            let mut line = String::new();
+
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        // 去除末尾换行符
+                        while line.ends_with('\n') || line.ends_with('\r') {
+                            line.pop();
+                        }
+                        if !line.is_empty() {
+                            new_lines.push(line.clone());
+                        }
+                    }
+                    Err(e) => {
+                        let _ = app.emit(
+                            "acemcp-log-stream",
+                            &AcemcpLogStreamEvent {
+                                event_type: "error".to_string(),
+                                lines: vec![],
+                                error: Some(format!("读取日志失败: {}", e)),
+                            },
+                        );
+                        break;
+                    }
+                }
+            }
+
+            // 更新 offset
+            if let Ok(pos) = reader.stream_position() {
+                offset = Some(pos);
+            }
+
+            if !new_lines.is_empty() {
+                let _ = app.emit(
+                    "acemcp-log-stream",
+                    &AcemcpLogStreamEvent {
+                        event_type: "append".to_string(),
+                        lines: new_lines,
+                        error: None,
+                    },
+                );
+            }
+
+            tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+        }
+
+        log_debug!("[log_stream] acemcp 日志流已停止");
+    });
+
+    Ok(())
+}
+
+/// 停止 acemcp 日志流（释放后台任务）
+#[tauri::command]
+pub async fn stop_acemcp_log_stream() -> Result<(), String> {
+    let flag = {
+        let mut guard = ACEMCP_LOG_STREAM_CANCEL_FLAG
+            .lock()
+            .map_err(|_| "日志流取消锁已被毒化（poisoned）".to_string())?;
+        guard.take()
+    };
+
+    if let Some(f) = flag {
+        f.store(true, Ordering::Relaxed);
+        log_debug!("[log_stream] 收到停止请求，已设置取消标记");
+    }
+
+    Ok(())
 }
 
 #[tauri::command]

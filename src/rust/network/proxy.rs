@@ -1,5 +1,6 @@
 // 代理检测和配置模块
 use serde::{Deserialize, Serialize};
+use crate::{log_important, log_debug};
 
 /// 代理类型
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -77,20 +78,20 @@ impl ProxyDetector {
     /// - `Some(ProxyInfo)`: 找到可用的代理
     /// - `None`: 没有找到可用的代理
     pub async fn detect_available_proxy() -> Option<ProxyInfo> {
-        log::info!("🔍 开始检测本地代理");
+        log_important!(info, "[network] 开始检测本地代理");
         
         for (port, proxy_type) in Self::COMMON_PORTS {
             let proxy_info = ProxyInfo::new(proxy_type.clone(), "127.0.0.1".to_string(), *port);
             
-            log::info!("🔍 检测代理端口: {} ({})", port, proxy_type);
+            log_debug!("[network] 检测代理端口: {} ({})", port, proxy_type);
             
             if Self::check_proxy(&proxy_info).await {
-                log::info!("✅ 找到可用代理: {}:{} ({})", proxy_info.host, proxy_info.port, proxy_info.proxy_type);
+                log_important!(info, "[network] 找到可用代理: {}:{} ({})", proxy_info.host, proxy_info.port, proxy_info.proxy_type);
                 return Some(proxy_info);
             }
         }
         
-        log::warn!("⚠️ 未找到可用的本地代理");
+        log_important!(warn, "[network] 未找到可用的本地代理");
         None
     }
     
@@ -116,11 +117,11 @@ impl ProxyDetector {
                 // 端口可达，继续进行 HTTP 204 探测
             }
             Ok(Err(e)) => {
-                log::debug!("❌ 代理 {}:{} TCP 端口不可达: {}", proxy_info.host, proxy_info.port, e);
+                log_debug!("[network] 代理 {}:{} TCP 端口不可达: {}", proxy_info.host, proxy_info.port, e);
                 return false;
             }
             Err(_) => {
-                log::debug!("❌ 代理 {}:{} TCP 端口连接超时", proxy_info.host, proxy_info.port);
+                log_debug!("[network] 代理 {}:{} TCP 端口连接超时", proxy_info.host, proxy_info.port);
                 return false;
             }
         }
@@ -140,7 +141,7 @@ impl ProxyDetector {
                 match reqwest::Proxy::all(&proxy_url) {
                     Ok(proxy) => client_builder.proxy(proxy),
                     Err(e) => {
-                        log::debug!("❌ 创建HTTP代理失败: {}", e);
+                        log_debug!("[network] 创建HTTP代理失败: {}", e);
                         return false;
                     }
                 }
@@ -150,7 +151,7 @@ impl ProxyDetector {
                 match reqwest::Proxy::all(&proxy_url) {
                     Ok(proxy) => client_builder.proxy(proxy),
                     Err(e) => {
-                        log::debug!("❌ 创建SOCKS5代理失败: {}", e);
+                        log_debug!("[network] 创建SOCKS5代理失败: {}", e);
                         return false;
                     }
                 }
@@ -160,7 +161,7 @@ impl ProxyDetector {
         let client = match client.build() {
             Ok(c) => c,
             Err(e) => {
-                log::debug!("❌ 构建HTTP客户端失败: {}", e);
+                log_debug!("[network] 构建HTTP客户端失败: {}", e);
                 return false;
             }
         };
@@ -175,15 +176,15 @@ impl ProxyDetector {
             Ok(response) => {
                 let is_success = response.status().is_success() || response.status() == 204;
                 if is_success {
-                    log::debug!("✅ 代理 {}:{} 可用", proxy_info.host, proxy_info.port);
+                    log_debug!("[network] 代理 {}:{} 可用", proxy_info.host, proxy_info.port);
                 } else {
-                    log::debug!("❌ 代理 {}:{} 响应异常: HTTP {}", 
+                    log_debug!("[network] 代理 {}:{} 响应异常: HTTP {}", 
                         proxy_info.host, proxy_info.port, response.status());
                 }
                 is_success
             }
             Err(e) => {
-                log::debug!("❌ 代理 {}:{} 连接失败: {}", 
+                log_debug!("[network] 代理 {}:{} 连接失败: {}", 
                     proxy_info.host, proxy_info.port, e);
                 false
             }

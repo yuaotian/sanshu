@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use crate::config::load_standalone_config;
 use crate::mcp::types::SkillRunRequest;
+use crate::{log_important, log_debug};
 
 use super::engine;
 use super::localize;
@@ -252,41 +253,62 @@ impl UiuxTool {
     }
 
     pub async fn call_tool(tool_name: &str, arguments: serde_json::Value) -> Result<CallToolResult, McpError> {
+        log_important!(info, "[uiux] 工具调用: tool={}", tool_name);
+        log_debug!("[uiux] 参数: {:?}", arguments);
+
+        let start = std::time::Instant::now();
         let defaults = UiuxDefaults::load();
-        match tool_name {
+        let result = match tool_name {
             "uiux_search" => {
                 let req: UiuxSearchRequest = serde_json::from_value(arguments)
                     .map_err(|e| McpError::invalid_params(format!("参数解析失败: {}", e), None))?;
+                log_debug!("[uiux] search 请求: query={}, domain={:?}, mode={:?}", 
+                    req.query, req.domain, req.mode);
                 handle_search(req, defaults)
             }
             "uiux_stack" => {
                 let req: UiuxStackRequest = serde_json::from_value(arguments)
                     .map_err(|e| McpError::invalid_params(format!("参数解析失败: {}", e), None))?;
+                log_debug!("[uiux] stack 请求: query={}, stack={}", req.query, req.stack);
                 handle_stack(req, defaults)
             }
             "uiux_design_system" => {
                 let req: UiuxDesignSystemRequest = serde_json::from_value(arguments)
                     .map_err(|e| McpError::invalid_params(format!("参数解析失败: {}", e), None))?;
+                log_debug!("[uiux] design_system 请求: query={}, project={:?}", 
+                    req.query, req.project_name);
                 handle_design_system(req, defaults)
             }
             "uiux_suggest" => {
                 let req: UiuxSuggestRequest = serde_json::from_value(arguments)
                     .map_err(|e| McpError::invalid_params(format!("参数解析失败: {}", e), None))?;
+                log_debug!("[uiux] suggest 请求: text_len={}", req.text.len());
                 handle_suggest(req, defaults)
             }
-            _ => Err(McpError::invalid_params(format!("未知的工具: {}", tool_name), None)),
-        }
+            _ => {
+                log_important!(warn, "[uiux] 未知工具: {}", tool_name);
+                Err(McpError::invalid_params(format!("未知的工具: {}", tool_name), None))
+            }
+        };
+
+        log_important!(info, "[uiux] 调用完成: tool={}, elapsed={}ms, is_error={}", 
+            tool_name, start.elapsed().as_millis(), result.is_err());
+        result
     }
 
     /// skill_ui-ux-pro-max 入口
     pub async fn call_from_skill(action: &str, request: &SkillRunRequest) -> Result<CallToolResult, McpError> {
+        log_important!(info, "[uiux] skill 调用: action={}, query={:?}", action, request.query);
+        
+        let start = std::time::Instant::now();
         let defaults = UiuxDefaults::load();
-        match action {
+        let result = match action {
             "design_system" => {
                 let query = request
                     .query
                     .clone()
                     .ok_or_else(|| McpError::invalid_params("缺少 query 参数".to_string(), None))?;
+                log_debug!("[uiux] skill design_system: query={}", query);
                 let req = UiuxDesignSystemRequest {
                     query,
                     project_name: None,
@@ -305,6 +327,7 @@ impl UiuxTool {
                     .query
                     .clone()
                     .ok_or_else(|| McpError::invalid_params("缺少 query 参数".to_string(), None))?;
+                log_debug!("[uiux] skill search: query={}", query);
                 let req = UiuxSearchRequest {
                     query,
                     domain: None,
@@ -316,6 +339,7 @@ impl UiuxTool {
                 handle_search(req, defaults)
             }
             "custom" => {
+                log_debug!("[uiux] skill custom: args={:?}", request.args);
                 let options = parse_cli_args(request.args.clone().unwrap_or_default());
                 let query = options
                     .query
@@ -339,7 +363,10 @@ impl UiuxTool {
                         lang: None,
                         mode: Some(UiuxMode::DesignSystem),
                     };
-                    return handle_design_system(req, defaults);
+                    let result = handle_design_system(req, defaults);
+                    log_important!(info, "[uiux] skill 完成: action={}, duration={}ms, success={}", 
+                        action, start.elapsed().as_millis(), result.is_ok());
+                    return result;
                 }
 
                 if let Some(stack) = options.stack {
@@ -350,7 +377,10 @@ impl UiuxTool {
                         output_format: Some(output_format),
                         lang: None,
                     };
-                    return handle_stack(req, defaults);
+                    let result = handle_stack(req, defaults);
+                    log_important!(info, "[uiux] skill 完成: action={}, duration={}ms, success={}", 
+                        action, start.elapsed().as_millis(), result.is_ok());
+                    return result;
                 }
 
                 let req = UiuxSearchRequest {
@@ -363,8 +393,16 @@ impl UiuxTool {
                 };
                 handle_search(req, defaults)
             }
-            _ => Err(McpError::invalid_params(format!("未知 action: {}", action), None)),
-        }
+            _ => {
+                log_important!(warn, "[uiux] skill 未知 action: {}", action);
+                Err(McpError::invalid_params(format!("未知 action: {}", action), None))
+            }
+        };
+        
+        // 记录完成日志
+        log_important!(info, "[uiux] skill 完成: action={}, duration={}ms, success={}", 
+            action, start.elapsed().as_millis(), result.is_ok());
+        result
     }
 }
 

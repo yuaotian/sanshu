@@ -1,5 +1,6 @@
 // IP地理位置检测模块
 use serde::{Deserialize, Serialize};
+use crate::{log_important, log_debug};
 
 /// IP地理位置信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,7 +25,7 @@ pub struct GeoLocation {
 /// - 解析失败时返回 "UNKNOWN"
 /// - 超时设置为 5 秒
 pub async fn detect_geo_location() -> String {
-    log::info!("🌍 开始检测IP地理位置");
+    log_important!(info, "[network] 开始检测IP地理位置");
     
     // 创建HTTP客户端，设置较短的超时时间
     let client = match reqwest::Client::builder()
@@ -33,10 +34,12 @@ pub async fn detect_geo_location() -> String {
     {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("⚠️ 创建HTTP客户端失败: {}", e);
+            log_important!(warn, "[network] 创建HTTP客户端失败: {}", e);
             return "UNKNOWN".to_string();
         }
     };
+    
+    log_debug!("[network] 请求 ipinfo.io API");
     
     // 请求 ipinfo.io API
     match client
@@ -46,24 +49,24 @@ pub async fn detect_geo_location() -> String {
     {
         Ok(response) => {
             if !response.status().is_success() {
-                log::warn!("⚠️ IP地理位置检测请求失败: HTTP {}", response.status());
+                log_important!(warn, "[network] IP地理位置检测请求失败: HTTP {}", response.status());
                 return "UNKNOWN".to_string();
             }
             
             // 解析JSON响应
             match response.json::<GeoLocation>().await {
                 Ok(geo) => {
-                    log::info!("✅ 检测到地理位置: {} ({})", geo.country, geo.city.unwrap_or_default());
+                    log_important!(info, "[network] 检测到地理位置: {} ({})", geo.country, geo.city.clone().unwrap_or_default());
                     geo.country
                 }
                 Err(e) => {
-                    log::warn!("⚠️ 解析地理位置信息失败: {}", e);
+                    log_important!(warn, "[network] 解析地理位置信息失败: {}", e);
                     "UNKNOWN".to_string()
                 }
             }
         }
         Err(e) => {
-            log::warn!("⚠️ IP地理位置检测网络请求失败: {}", e);
+            log_important!(warn, "[network] IP地理位置检测网络请求失败: {}", e);
             "UNKNOWN".to_string()
         }
     }

@@ -10,6 +10,7 @@ import { useAcemcpSync } from '../../composables/useAcemcpSync'
 import ConfigSection from '../common/ConfigSection.vue'
 import ProjectIndexManager from '../settings/ProjectIndexManager.vue'
 import ProxySettingsModal from './SouProxySettingsModal.vue'
+import AcemcpLogViewerDrawer from './AcemcpLogViewerDrawer.vue'
 
 // Props
 const props = defineProps<{
@@ -48,6 +49,7 @@ const config = ref({
 
 const loadingConfig = ref(false)
 const showProxyModal = ref(false)
+const showLogViewer = ref(false)
 // 调试状态
 const debugProjectRoot = ref('')
 const debugQuery = ref('')
@@ -617,7 +619,7 @@ defineExpose({ saveConfig })
                 <template #icon>
                   <div class="i-carbon-terminal" />
                 </template>
-                日志路径: <code class="code-inline">~/.sanshu/log/acemcp.log</code>
+                日志路径: <code class="code-inline">%APPDATA%/sanshu/log/acemcp.log</code>（Windows）
               </n-alert>
 
               <n-space class="mt-3">
@@ -632,6 +634,12 @@ defineExpose({ saveConfig })
                     <div class="i-carbon-document" />
                   </template>
                   查看日志
+                </n-button>
+                <n-button size="small" secondary @click="showLogViewer = true">
+                  <template #icon>
+                    <div class="i-carbon-view" />
+                  </template>
+                  实时日志
                 </n-button>
                 <n-button size="small" secondary @click="clearCache">
                   <template #icon>
@@ -955,6 +963,8 @@ defineExpose({ saveConfig })
       v-model:show="showProxyModal"
       :config="config"
     />
+
+    <AcemcpLogViewerDrawer v-model:show="showLogViewer" />
   </div>
 </template>
 

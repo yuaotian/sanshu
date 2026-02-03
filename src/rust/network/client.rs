@@ -1,5 +1,6 @@
 // HTTP客户端构建器模块
 use super::proxy::ProxyInfo;
+use crate::{log_important, log_debug};
 
 /// 创建HTTP客户端
 /// 
@@ -21,7 +22,7 @@ pub fn create_http_client(
     
     // 如果提供了代理信息，配置代理
     if let Some(proxy) = proxy_info {
-        log::info!("🔧 配置HTTP客户端使用代理: {}:{} ({})", 
+        log_important!(info, "[network] 配置HTTP客户端使用代理: {}:{} ({})", 
             proxy.host, proxy.port, proxy.proxy_type);
         
         let proxy_url = proxy.to_url();
@@ -45,7 +46,7 @@ pub fn create_http_client(
         
         client_builder = client_builder.proxy(reqwest_proxy);
     } else {
-        log::info!("🔧 配置HTTP客户端使用直连");
+        log_debug!("[network] 配置HTTP客户端使用直连");
     }
     
     // 构建客户端

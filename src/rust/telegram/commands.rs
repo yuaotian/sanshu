@@ -181,6 +181,9 @@ pub async fn start_telegram_sync(
     state: State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
+    log_important!(info, "[telegram-sync] 启动同步: msg_len={}, options_count={}, markdown={}",
+        message.len(), predefined_options.len(), is_markdown);
+
     // 获取Telegram配置
     let (enabled, bot_token, chat_id, continue_reply_enabled) = {
         let config = state
@@ -196,10 +199,13 @@ pub async fn start_telegram_sync(
     };
 
     if !enabled {
+        log_important!(info, "[telegram-sync] Telegram 未启用，跳过同步");
         return Ok(());
     }
 
     if bot_token.trim().is_empty() || chat_id.trim().is_empty() {
+        log_important!(warn, "[telegram-sync] 配置不完整: token_empty={}, chat_id_empty={}",
+            bot_token.trim().is_empty(), chat_id.trim().is_empty());
         return Err("Telegram配置不完整".to_string());
     }
 
@@ -236,6 +242,8 @@ pub async fn start_telegram_sync(
         .await
         .map_err(|e| format!("发送操作消息失败: {}", e))?;
 
+    log_important!(info, "[telegram-sync] 消息发送完成，启动监听任务");
+
     // 启动消息监听（根据是否有预定义选项选择监听模式）
     let bot_token_clone = bot_token.clone();
     let chat_id_clone = chat_id.clone();
@@ -251,8 +259,8 @@ pub async fn start_telegram_sync(
         )
         .await
         {
-            Ok(_) => {}
-            Err(e) => log_important!(warn, "Telegram消息监听出错: {}", e),
+            Ok(_) => log_important!(info, "[telegram-sync] 监听任务正常结束"),
+            Err(e) => log_important!(warn, "[telegram-sync] 监听任务出错: {}", e),
         }
     });
 
