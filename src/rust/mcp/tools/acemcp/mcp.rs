@@ -174,17 +174,74 @@ impl AcemcpTool {
     }
 
     /// 手动触发索引更新（供 Tauri 命令调用）
+    /// 支持级联索引嵌套的 Git 子项目
     pub async fn trigger_index_update(project_root_path: String) -> Result<String> {
         log_important!(info, "手动触发索引更新: project_root_path={}", project_root_path);
 
         let acemcp_config = Self::get_acemcp_config().await?;
-
-        match update_index(&acemcp_config, &project_root_path).await {
-            Ok(blob_names) => {
-                Ok(format!("索引更新成功，共 {} 个 blobs", blob_names.len()))
-            }
+        
+        // 读取嵌套项目索引开关（默认启用）
+        let index_nested = crate::config::load_standalone_config()
+            .ok()
+            .and_then(|c| c.mcp_config.acemcp_index_nested_projects)
+            .unwrap_or(true);
+        
+        // 检测嵌套子项目
+        let nested_status = match Self::get_project_with_nested_status(project_root_path.clone()) {
+            Ok(status) => status,
             Err(e) => {
-                Err(anyhow::anyhow!("索引更新失败: {}", e))
+                log_debug!("获取嵌套项目状态失败，将直接索引父目录: {}", e);
+                // 回退到原有逻辑
+                return match update_index(&acemcp_config, &project_root_path).await {
+                    Ok(blob_names) => Ok(format!("索引更新成功，共 {} 个 blobs", blob_names.len())),
+                    Err(e) => Err(anyhow::anyhow!("索引更新失败: {}", e)),
+                };
+            }
+        };
+        
+        let has_nested = !nested_status.nested_projects.is_empty();
+        
+        if has_nested && index_nested {
+            // 策略A: 有嵌套子项目且开关启用，只索引子项目，不索引父目录（避免无意义上传）
+            log_important!(info, "检测到 {} 个嵌套 Git 子项目，将分别索引", nested_status.nested_projects.len());
+            
+            let mut results = Vec::new();
+            let mut errors = Vec::new();
+            
+            for nested in &nested_status.nested_projects {
+                log_important!(info, "索引嵌套子项目: {}", nested.absolute_path);
+                match update_index(&acemcp_config, &nested.absolute_path).await {
+                    Ok(blobs) => {
+                        log_important!(info, "子项目索引成功: {} ({} blobs)", nested.relative_path, blobs.len());
+                        results.push((nested.relative_path.clone(), blobs.len()));
+                    }
+                    Err(e) => {
+                        log_important!(info, "子项目索引失败: {} - {}", nested.relative_path, e);
+                        errors.push((nested.relative_path.clone(), e.to_string()));
+                    }
+                }
+            }
+            
+            if errors.is_empty() {
+                Ok(format!(
+                    "索引更新成功，共 {} 个子项目: {:?}",
+                    results.len(),
+                    results
+                ))
+            } else {
+                Ok(format!(
+                    "索引更新部分成功: 成功 {} 个，失败 {} 个。成功: {:?}，失败: {:?}",
+                    results.len(),
+                    errors.len(),
+                    results,
+                    errors
+                ))
+            }
+        } else {
+            // 策略B: 无嵌套子项目或开关关闭，直接索引
+            match update_index(&acemcp_config, &project_root_path).await {
+                Ok(blob_names) => Ok(format!("索引更新成功，共 {} 个 blobs", blob_names.len())),
+                Err(e) => Err(anyhow::anyhow!("索引更新失败: {}", e)),
             }
         }
     }

@@ -42,6 +42,8 @@ const config = ref({
   proxy_type: 'http' as 'http' | 'https' | 'socks5',
   proxy_username: '',
   proxy_password: '',
+  // 嵌套项目索引配置
+  index_nested_projects: true, // 是否自动索引嵌套的 Git 子项目（默认启用）
 })
 
 const loadingConfig = ref(false)
@@ -177,6 +179,8 @@ async function loadAcemcpConfig() {
       proxy_type: res.proxy_type || 'http',
       proxy_username: res.proxy_username || '',
       proxy_password: res.proxy_password || '',
+      // 嵌套项目索引配置
+      index_nested_projects: res.index_nested_projects ?? true,
     }
 
     // 确保选项存在
@@ -254,6 +258,8 @@ async function saveConfig() {
         proxyType: config.value.proxy_type,
         proxyUsername: config.value.proxy_username,
         proxyPassword: config.value.proxy_password,
+        // 嵌套项目索引配置
+        indexNestedProjects: config.value.index_nested_projects,
       },
     })
     message.success('配置已保存')
@@ -880,6 +886,27 @@ defineExpose({ saveConfig })
                 <n-switch :value="autoIndexEnabled" @update:value="toggleAutoIndex" />
               </div>
 
+              <!-- 嵌套项目自动索引开关 -->
+              <div class="auto-index-toggle mt-4">
+                <div class="toggle-info">
+                  <div class="toggle-icon nested-icon">
+                    <div class="i-carbon-folder-parent w-5 h-5 text-amber-500" />
+                  </div>
+                  <div>
+                    <div class="toggle-title">
+                      自动索引嵌套项目
+                    </div>
+                    <div class="toggle-desc">
+                      对父目录索引时，自动检测并索引所有 Git 子项目
+                    </div>
+                  </div>
+                </div>
+                <n-switch
+                  v-model:value="config.index_nested_projects"
+                  @update:value="saveConfig"
+                />
+              </div>
+
               <n-divider class="my-3" />
 
               <n-form-item label="防抖延迟时间" :show-feedback="false">
@@ -1024,6 +1051,15 @@ defineExpose({ saveConfig })
 
 :root.dark .toggle-icon {
   background: rgba(20, 184, 166, 0.15);
+}
+
+/* 嵌套项目图标样式 */
+.toggle-icon.nested-icon {
+  background: rgba(245, 158, 11, 0.1);
+}
+
+:root.dark .toggle-icon.nested-icon {
+  background: rgba(245, 158, 11, 0.15);
 }
 
 .toggle-title {

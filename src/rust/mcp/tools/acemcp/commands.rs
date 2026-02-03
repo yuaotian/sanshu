@@ -35,6 +35,9 @@ pub struct SaveAcemcpConfigArgs {
     pub proxy_username: Option<String>,
     #[serde(alias = "proxyPassword", alias = "proxy_password")]
     pub proxy_password: Option<String>,
+    /// 是否自动索引嵌套的 Git 子项目
+    #[serde(alias = "indexNestedProjects", alias = "index_nested_projects")]
+    pub index_nested_projects: Option<bool>,
 }
 
 
@@ -76,6 +79,8 @@ pub async fn save_acemcp_config(
         config.mcp_config.acemcp_proxy_type = args.proxy_type.clone();
         config.mcp_config.acemcp_proxy_username = args.proxy_username.clone();
         config.mcp_config.acemcp_proxy_password = args.proxy_password.clone();
+        // 保存嵌套项目索引开关
+        config.mcp_config.acemcp_index_nested_projects = args.index_nested_projects;
     }
 
     save_config(&state, &app)
@@ -362,6 +367,8 @@ pub struct AcemcpConfigResponse {
     pub proxy_type: String,
     pub proxy_username: String,
     pub proxy_password: String,
+    /// 是否自动索引嵌套的 Git 子项目（默认启用）
+    pub index_nested_projects: bool,
 }
 
 #[tauri::command]
@@ -401,6 +408,8 @@ pub async fn get_acemcp_config(state: State<'_, AppState>) -> Result<AcemcpConfi
         proxy_type: config.mcp_config.acemcp_proxy_type.clone().unwrap_or_else(|| "http".to_string()),
         proxy_username: config.mcp_config.acemcp_proxy_username.clone().unwrap_or_default(),
         proxy_password: config.mcp_config.acemcp_proxy_password.clone().unwrap_or_default(),
+        // 嵌套项目索引开关（默认启用）
+        index_nested_projects: config.mcp_config.acemcp_index_nested_projects.unwrap_or(true),
     })
 }
 
