@@ -25,6 +25,8 @@ interface Props {
 interface Emits {
   themeChange: [theme: string]
   openMainLayout: []
+  /** 打开实时日志查看器 */
+  openLogViewer: []
   toggleAlwaysOnTop: []
   /** 打开 MCP 代码索引详情抽屉 */
   openIndexStatus: []
@@ -54,6 +56,10 @@ function handleThemeChange() {
 
 function handleOpenMainLayout() {
   emit('openMainLayout')
+}
+
+function handleOpenLogViewer() {
+  emit('openLogViewer')
 }
 
 function handleToggleAlwaysOnTop() {
@@ -161,6 +167,17 @@ function handleOpenIndexStatus() {
                 :class="props.showMainLayout ? 'i-carbon-chat' : 'i-carbon-settings'"
                 class="w-4 h-4 text-slate-700 dark:text-white"
               />
+            </template>
+          </n-button>
+          <n-button
+            size="small"
+            quaternary
+            circle
+            title="查看日志"
+            @click="handleOpenLogViewer"
+          >
+            <template #icon>
+              <div class="i-carbon-document w-4 h-4 text-slate-700 dark:text-white" />
             </template>
           </n-button>
           <n-button

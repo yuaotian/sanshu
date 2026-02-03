@@ -4,6 +4,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAcemcpSync } from '../composables/useAcemcpSync'
 import { setupExitWarningListener } from '../composables/useExitWarning'
 import { useKeyboard } from '../composables/useKeyboard'
+import { useLogViewer } from '../composables/useLogViewer'
 import { useMcpToolsReactive } from '../composables/useMcpTools'
 import { useVersionCheck } from '../composables/useVersionCheck'
 import UpdateModal from './common/UpdateModal.vue'
@@ -11,6 +12,7 @@ import LayoutWrapper from './layout/LayoutWrapper.vue'
 import McpIndexStatusDrawer from './popup/McpIndexStatusDrawer.vue'
 import McpPopup from './popup/McpPopup.vue'
 import PopupHeader from './popup/PopupHeader.vue'
+import AcemcpLogViewerDrawer from './tools/AcemcpLogViewerDrawer.vue'
 import IconPopupMode from './tools/IconWorkshop/IconPopupMode.vue'
 
 interface AppConfig {
@@ -73,6 +75,8 @@ const showPopupSettings = ref(false)
 const activeTab = ref('intro')
 // MCP 索引详情抽屉显示控制
 const showIndexDrawer = ref(false)
+// 全局日志查看器显示控制（用于“整个弹窗”的日志查看）
+const { show: showLogViewer, open: openLogViewer } = useLogViewer()
 
 // 初始化 Naive UI 消息实例
 const message = useMessage()
@@ -210,6 +214,7 @@ onUnmounted(() => {
           :mcp-last-error="mcpLastError"
           @theme-change="$emit('themeChange', $event)"
           @open-main-layout="togglePopupSettings"
+          @open-log-viewer="openLogViewer"
           @toggle-always-on-top="$emit('toggleAlwaysOnTop')"
           @open-index-status="showIndexDrawer = true"
         />
@@ -365,5 +370,8 @@ onUnmounted(() => {
       v-model:show="showUpdateModal"
       :version-info="versionInfo"
     />
+
+    <!-- 全局日志查看器抽屉：主界面/弹窗模式均可打开 -->
+    <AcemcpLogViewerDrawer v-model:show="showLogViewer" />
   </div>
 </template>

@@ -7,9 +7,9 @@ import { invoke } from '@tauri-apps/api/core'
 import { useMessage } from 'naive-ui'
 import { onMounted, ref, watch } from 'vue'
 import { useAcemcpSync } from '../../composables/useAcemcpSync'
+import { useLogViewer } from '../../composables/useLogViewer'
 import ConfigSection from '../common/ConfigSection.vue'
 import ProjectIndexManager from '../settings/ProjectIndexManager.vue'
-import AcemcpLogViewerDrawer from './AcemcpLogViewerDrawer.vue'
 import ProxySettingsModal from './SouProxySettingsModal.vue'
 
 // Props
@@ -49,7 +49,7 @@ const config = ref({
 
 const loadingConfig = ref(false)
 const showProxyModal = ref(false)
-const showLogViewer = ref(false)
+const { open: openLogViewer } = useLogViewer()
 // 调试状态
 const debugProjectRoot = ref('')
 const debugQuery = ref('')
@@ -635,7 +635,7 @@ defineExpose({ saveConfig })
                   </template>
                   查看日志
                 </n-button>
-                <n-button size="small" secondary @click="showLogViewer = true">
+                <n-button size="small" secondary @click="openLogViewer()">
                   <template #icon>
                     <div class="i-carbon-view" />
                   </template>
@@ -963,8 +963,6 @@ defineExpose({ saveConfig })
       v-model:show="showProxyModal"
       :config="config"
     />
-
-    <AcemcpLogViewerDrawer v-model:show="showLogViewer" />
   </div>
 </template>
 

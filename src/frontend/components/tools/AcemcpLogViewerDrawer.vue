@@ -1,9 +1,9 @@
 <script setup lang="ts">
+import { useVirtualizer } from '@tanstack/vue-virtual'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useMessage } from 'naive-ui'
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { useVirtualizer } from '@tanstack/vue-virtual'
 
 interface Props {
   show: boolean
@@ -416,7 +416,7 @@ onBeforeUnmount(async () => {
     width="92%"
     @update:show="emit('update:show', $event)"
   >
-    <n-drawer-content title="acemcp 实时日志" closable>
+    <n-drawer-content title="应用实时日志" closable>
       <div class="flex flex-col gap-3">
         <div class="flex flex-wrap items-center gap-2">
           <n-input
