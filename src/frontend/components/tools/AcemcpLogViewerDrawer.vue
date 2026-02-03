@@ -21,6 +21,14 @@ interface AcemcpLogStreamEvent {
   error?: string
 }
 
+interface AcemcpLogTargetInfo {
+  target: string
+  label: string
+  exists: boolean
+  size_bytes?: number
+  modified_utc?: string
+}
+
 interface ParsedLogLine {
   raw: string
   timestamp: string
@@ -34,6 +42,9 @@ const emit = defineEmits<Emits>()
 
 const message = useMessage()
 
+const targets = ref<AcemcpLogTargetInfo[]>([])
+const selectedTarget = ref<string>('combined')
+
 const maxLines = ref(5000)
 const autoScroll = ref(true)
 const keyword = ref('')
@@ -41,6 +52,7 @@ const selectedLevels = ref<string[]>(['ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE']
 
 const isLoading = ref(false)
 const isStreaming = ref(false)
+const isExporting = ref(false)
 
 const allItems = ref<ParsedLogLine[]>([])
 let unlistenStream: (() => void) | null = null
@@ -59,6 +71,10 @@ const maxLineOptions = [
   { label: '3000 行', value: 3000 },
   { label: '5000 行', value: 5000 },
 ]
+
+const canStream = computed(() => {
+  return selectedTarget.value === 'combined' || selectedTarget.value === 'current'
+})
 
 const LOG_RE = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \[([A-Z]+)\] \[([^\]]+)\] (.*)$/
 
@@ -150,6 +166,34 @@ const filteredItems = computed(() => {
   })
 })
 
+function formatBytes(bytes?: number) {
+  if (!bytes || bytes <= 0)
+    return ''
+  const KB = 1024
+  const MB = 1024 * 1024
+  const GB = 1024 * 1024 * 1024
+  if (bytes >= GB)
+    return `${(bytes / GB).toFixed(2)}GB`
+  if (bytes >= MB)
+    return `${(bytes / MB).toFixed(2)}MB`
+  if (bytes >= KB)
+    return `${(bytes / KB).toFixed(2)}KB`
+  return `${bytes}B`
+}
+
+const targetOptions = computed(() => {
+  return targets.value.map((t) => {
+    const suffix = t.target === 'combined'
+      ? ''
+      : (t.exists ? (t.size_bytes ? `（${formatBytes(t.size_bytes)}）` : '') : '（不存在）')
+    return {
+      label: `${t.label}${suffix}`,
+      value: t.target,
+      disabled: t.target !== 'combined' && !t.exists,
+    }
+  })
+})
+
 const parentRef = ref<HTMLElement | null>(null)
 const rowVirtualizer = useVirtualizer({
   count: () => filteredItems.value.length,
@@ -182,10 +226,29 @@ function appendLines(lines: string[]) {
   clampBuffer()
 }
 
+async function loadTargets() {
+  try {
+    const list = await invoke('list_acemcp_log_targets') as AcemcpLogTargetInfo[]
+    targets.value = Array.isArray(list) ? list : []
+
+    // 若当前选择项不存在于返回列表，回退到 combined
+    if (!targets.value.some(t => t.target === selectedTarget.value)) {
+      selectedTarget.value = 'combined'
+    }
+  }
+  catch (e: any) {
+    message.error(`加载日志文件列表失败: ${e?.message || String(e)}`)
+    targets.value = [
+      { target: 'combined', label: '合并视图（备份 + 当前）', exists: true },
+      { target: 'current', label: 'acemcp.log', exists: true },
+    ]
+  }
+}
+
 async function loadInitial() {
   isLoading.value = true
   try {
-    const lines = await invoke('read_acemcp_logs', { maxLines: maxLines.value }) as string[]
+    const lines = await invoke('read_acemcp_logs', { maxLines: maxLines.value, target: selectedTarget.value }) as string[]
     allItems.value = (lines || []).map(parseLine)
     clampBuffer()
   }
@@ -199,6 +262,8 @@ async function loadInitial() {
 
 async function startStream() {
   if (isStreaming.value)
+    return
+  if (!canStream.value)
     return
 
   try {
@@ -246,6 +311,7 @@ async function stopStream() {
 }
 
 async function reloadAll() {
+  await loadTargets()
   await loadInitial()
   await scrollToBottom()
 }
@@ -265,16 +331,73 @@ async function copyVisible() {
   }
 }
 
+async function openLogDirectory() {
+  try {
+    const dir = await invoke('get_acemcp_log_directory') as string
+    if (!dir) {
+      message.error('无法获取日志目录')
+      return
+    }
+    await invoke('open_external_url', { url: dir })
+  }
+  catch (e: any) {
+    message.error(`打开日志目录失败: ${e?.message || String(e)}`)
+  }
+}
+
+async function exportLogs(format: 'txt' | 'csv') {
+  if (isExporting.value)
+    return
+
+  isExporting.value = true
+  try {
+    const lines = filteredItems.value.map(i => i.raw)
+    const path = await invoke('export_acemcp_logs', {
+      format,
+      lines,
+      fileNameHint: `acemcp-${selectedTarget.value}`,
+    }) as string
+
+    // 尽量把导出路径复制到剪贴板，方便用户找到文件
+    if (path) {
+      navigator.clipboard.writeText(path).catch(() => {})
+      message.success(`已导出 ${lines.length} 行：${path}`)
+    }
+    else {
+      message.success(`已导出 ${lines.length} 行`)
+    }
+  }
+  catch (e: any) {
+    message.error(`导出失败: ${e?.message || String(e)}`)
+  }
+  finally {
+    isExporting.value = false
+  }
+}
+
 watch(() => props.show, async (show) => {
   if (show) {
     await reloadAll()
-    await startStream()
+    if (canStream.value)
+      await startStream()
     await scrollToBottom()
   }
   else {
     await stopStream()
   }
 }, { immediate: true })
+
+watch(selectedTarget, async () => {
+  if (!props.show)
+    return
+
+  // 切换文件时：先停流，再重载；如允许实时则再启动
+  await stopStream()
+  await loadInitial()
+  await scrollToBottom()
+  if (canStream.value)
+    await startStream()
+})
 
 watch(maxLines, async () => {
   clampBuffer()
@@ -305,6 +428,14 @@ onBeforeUnmount(async () => {
           />
 
           <n-select
+            v-model:value="selectedTarget"
+            size="small"
+            :options="targetOptions"
+            class="w-56"
+            placeholder="日志文件"
+          />
+
+          <n-select
             v-model:value="selectedLevels"
             size="small"
             multiple
@@ -328,6 +459,15 @@ onBeforeUnmount(async () => {
           <n-button size="small" secondary :loading="isLoading" @click="reloadAll">
             刷新
           </n-button>
+          <n-button size="small" secondary @click="openLogDirectory">
+            打开目录
+          </n-button>
+          <n-button size="small" secondary :loading="isExporting" :disabled="isExporting" @click="exportLogs('txt')">
+            导出 TXT
+          </n-button>
+          <n-button size="small" secondary :loading="isExporting" :disabled="isExporting" @click="exportLogs('csv')">
+            导出 CSV
+          </n-button>
           <n-button size="small" secondary @click="copyVisible">
             复制可见
           </n-button>
@@ -335,11 +475,14 @@ onBeforeUnmount(async () => {
             清空显示
           </n-button>
 
-          <n-tag v-if="isStreaming" type="success" size="small">
+          <n-tag v-if="canStream && isStreaming" type="success" size="small">
             实时中
           </n-tag>
-          <n-tag v-else type="warning" size="small">
+          <n-tag v-else-if="canStream" type="warning" size="small">
             已暂停
+          </n-tag>
+          <n-tag v-else type="info" size="small">
+            历史文件
           </n-tag>
         </div>
 

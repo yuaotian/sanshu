@@ -22,6 +22,22 @@ struct AcemcpLogStreamEvent {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AcemcpLogTargetInfo {
+    /// 目标标识：combined | current | backup:1 ...
+    pub target: String,
+    /// 前端展示用标签
+    pub label: String,
+    /// 是否存在（combined 恒为 true）
+    pub exists: bool,
+    /// 文件大小（字节，combined 无值）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    /// 修改时间（UTC ISO8601，combined 无值）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_utc: Option<String>,
+}
+
 static ACEMCP_LOG_STREAM_CANCEL_FLAG: Lazy<Mutex<Option<Arc<AtomicBool>>>> =
     Lazy::new(|| Mutex::new(None));
 
@@ -327,11 +343,94 @@ pub async fn test_acemcp_connection(
     }
 }
 
+#[tauri::command]
+pub async fn get_acemcp_log_directory() -> Result<String, String> {
+    let log_path = get_acemcp_log_path()?;
+    ensure_acemcp_log_dir_exists(&log_path)?;
+
+    let dir = log_path
+        .parent()
+        .ok_or_else(|| format!("日志路径无效: {}", log_path.display()))?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+/// 获取可用的日志目标列表（用于前端下拉切换）
+#[tauri::command]
+pub async fn list_acemcp_log_targets() -> Result<Vec<AcemcpLogTargetInfo>, String> {
+    let log_path = get_acemcp_log_path()?;
+    ensure_acemcp_log_dir_exists(&log_path)?;
+
+    let max_backups: usize = crate::utils::logger::LogRotationConfig::default().max_backup_count as usize;
+
+    let log_dir = log_path
+        .parent()
+        .ok_or_else(|| format!("日志路径无效: {}", log_path.display()))?;
+    let log_name = log_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("acemcp.log");
+
+    let mut out: Vec<AcemcpLogTargetInfo> = Vec::new();
+
+    // 合并视图
+    out.push(AcemcpLogTargetInfo {
+        target: "combined".to_string(),
+        label: "合并视图（备份 + 当前）".to_string(),
+        exists: true,
+        size_bytes: None,
+        modified_utc: None,
+    });
+
+    // 当前文件
+    let current_exists = log_path.exists();
+    let (size_bytes, modified_utc) = if current_exists {
+        let meta = std::fs::metadata(&log_path).ok();
+        let size = meta.as_ref().map(|m| m.len());
+        let modified = meta
+            .and_then(|m| m.modified().ok())
+            .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+        (size, modified)
+    } else {
+        (None, None)
+    };
+    out.push(AcemcpLogTargetInfo {
+        target: "current".to_string(),
+        label: log_name.to_string(),
+        exists: current_exists,
+        size_bytes,
+        modified_utc,
+    });
+
+    // 轮转备份：.1 .. .N（仅返回存在的文件）
+    for i in 1..=max_backups {
+        let path = log_dir.join(format!("{}.{}", log_name, i));
+        if !path.exists() {
+            continue;
+        }
+        let meta = std::fs::metadata(&path).ok();
+        let size_bytes = meta.as_ref().map(|m| m.len());
+        let modified_utc = meta
+            .and_then(|m| m.modified().ok())
+            .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+
+        out.push(AcemcpLogTargetInfo {
+            target: format!("backup:{}", i),
+            label: format!("{}.{}", log_name, i),
+            exists: true,
+            size_bytes,
+            modified_utc,
+        });
+    }
+
+    Ok(out)
+}
+
 /// 读取日志文件内容
 #[tauri::command]
 pub async fn read_acemcp_logs(
     _state: State<'_, AppState>,
     max_lines: Option<usize>,
+    target: Option<String>,
 ) -> Result<Vec<String>, String> {
     let log_path = get_acemcp_log_path()?;
     ensure_acemcp_log_dir_exists(&log_path)?;
@@ -344,6 +443,7 @@ pub async fn read_acemcp_logs(
     // 前端日志查看器默认 5000 行；为了避免误传导致卡顿，这里做上限保护。
     let max_lines: usize = max_lines.unwrap_or(1000).clamp(100, 5000);
     let max_backups: usize = crate::utils::logger::LogRotationConfig::default().max_backup_count as usize;
+    let target = target.unwrap_or_else(|| "combined".to_string());
 
     let log_dir = log_path
         .parent()
@@ -353,13 +453,32 @@ pub async fn read_acemcp_logs(
         .and_then(|n| n.to_str())
         .unwrap_or("acemcp.log");
 
-    let mut candidates = Vec::new();
-    // 从最旧备份到最新：.N ... .1
-    for i in (1..=max_backups).rev() {
-        candidates.push(log_dir.join(format!("{}.{}", log_name, i)));
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    match target.as_str() {
+        "" | "combined" => {
+            // 从最旧备份到最新：.N ... .1
+            for i in (1..=max_backups).rev() {
+                candidates.push(log_dir.join(format!("{}.{}", log_name, i)));
+            }
+            // 最后读取当前文件
+            candidates.push(log_path.clone());
+        }
+        "current" => {
+            candidates.push(log_path.clone());
+        }
+        t if t.starts_with("backup:") => {
+            let idx = t.strip_prefix("backup:").unwrap_or("");
+            let i: usize = idx.parse::<usize>().unwrap_or(0);
+            if i == 0 || i > max_backups {
+                // 无效备份编号：按空处理
+                return Ok(vec![]);
+            }
+            candidates.push(log_dir.join(format!("{}.{}", log_name, i)));
+        }
+        other => {
+            return Err(format!("无效的日志目标: {}", other));
+        }
     }
-    // 最后读取当前文件
-    candidates.push(log_path.clone());
 
     let mut buf: VecDeque<String> = VecDeque::with_capacity(max_lines);
     let mut any_exists = false;
@@ -389,6 +508,113 @@ pub async fn read_acemcp_logs(
     }
 
     Ok(buf.into_iter().collect())
+}
+
+/// 导出日志到文件（写入日志目录，返回导出文件路径）
+///
+/// 中文说明：
+/// - 默认导出“前端传入的 lines”（通常是过滤后的可见日志），最多建议 5000 行
+/// - 支持 txt/csv（csv 会写入 UTF-8 BOM 以兼容 Windows Excel）
+#[tauri::command]
+pub async fn export_acemcp_logs(
+    format: String,
+    lines: Vec<String>,
+    file_name_hint: Option<String>,
+) -> Result<String, String> {
+    use std::io::Write;
+
+    let log_path = get_acemcp_log_path()?;
+    ensure_acemcp_log_dir_exists(&log_path)?;
+
+    let log_dir = log_path
+        .parent()
+        .ok_or_else(|| format!("日志路径无效: {}", log_path.display()))?;
+
+    let format = format.trim().to_lowercase();
+    let ext = match format.as_str() {
+        "txt" => "txt",
+        "csv" => "csv",
+        other => return Err(format!("不支持的导出格式: {}（仅支持 txt/csv）", other)),
+    };
+
+    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+
+    // 中文说明：文件名只做最小化清洗，避免路径注入
+    let safe_hint = file_name_hint
+        .unwrap_or_else(|| "acemcp-export".to_string())
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect::<String>();
+
+    let export_path = log_dir.join(format!("{}-{}.{}", safe_hint, ts, ext));
+    let line_count = lines.len();
+
+    // best-effort：即使没有 lines 也允许导出空文件
+    let file = std::fs::File::create(&export_path)
+        .map_err(|e| format!("创建导出文件失败: {} (路径: {})", e, export_path.display()))?;
+    let mut writer = std::io::BufWriter::new(file);
+
+    if ext == "txt" {
+        for line in lines {
+            writer
+                .write_all(line.as_bytes())
+                .map_err(|e| format!("写入导出文件失败: {}", e))?;
+            writer
+                .write_all(b"\n")
+                .map_err(|e| format!("写入导出文件失败: {}", e))?;
+        }
+        writer.flush().ok();
+        log_important!(
+            info,
+            "[log_export] 导出完成: format=txt, lines={}, path={}",
+            line_count,
+            export_path.display()
+        );
+        return Ok(export_path.to_string_lossy().to_string());
+    }
+
+    // CSV 导出（带 UTF-8 BOM，兼容 Excel）
+    writer
+        .write_all(b"\xEF\xBB\xBF")
+        .map_err(|e| format!("写入 BOM 失败: {}", e))?;
+
+    let mut wtr = csv::WriterBuilder::new()
+        .has_headers(false)
+        .from_writer(writer);
+
+    let re = regex::Regex::new(
+        r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \[([A-Z]+)\] \[([^\]]+)\] (.*)$",
+    )
+    .map_err(|e| format!("构建日志解析正则失败: {}", e))?;
+
+    // 表头
+    wtr.write_record(["timestamp", "level", "module", "message", "raw"])
+        .map_err(|e| format!("写入 CSV 表头失败: {}", e))?;
+
+    for raw in lines {
+        if let Some(caps) = re.captures(&raw) {
+            let ts = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let level = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+            let module = caps.get(3).map(|m| m.as_str()).unwrap_or("");
+            let msg = caps.get(4).map(|m| m.as_str()).unwrap_or("");
+            wtr.write_record([ts, level, module, msg, raw.as_str()])
+                .map_err(|e| format!("写入 CSV 失败: {}", e))?;
+        } else {
+            wtr.write_record(["", "", "", raw.as_str(), raw.as_str()])
+                .map_err(|e| format!("写入 CSV 失败: {}", e))?;
+        }
+    }
+
+    wtr.flush().map_err(|e| format!("写入 CSV 失败: {}", e))?;
+
+    // 写入路径日志（避免泄露内容）
+    log_important!(
+        info,
+        "[log_export] 导出完成: format=csv, path={}",
+        export_path.display()
+    );
+
+    Ok(export_path.to_string_lossy().to_string())
 }
 
 /// 启动 acemcp 日志流（tail -f）

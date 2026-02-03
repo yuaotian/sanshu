@@ -9,8 +9,8 @@ import { onMounted, ref, watch } from 'vue'
 import { useAcemcpSync } from '../../composables/useAcemcpSync'
 import ConfigSection from '../common/ConfigSection.vue'
 import ProjectIndexManager from '../settings/ProjectIndexManager.vue'
-import ProxySettingsModal from './SouProxySettingsModal.vue'
 import AcemcpLogViewerDrawer from './AcemcpLogViewerDrawer.vue'
+import ProxySettingsModal from './SouProxySettingsModal.vue'
 
 // Props
 const props = defineProps<{
