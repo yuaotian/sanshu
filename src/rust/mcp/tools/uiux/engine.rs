@@ -2491,6 +2491,44 @@ fn add_keywords_allow_short(text: &str, set: &mut HashSet<String>) {
 mod tests {
     use super::*;
 
+    fn make_test_index() -> DomainIndex {
+        static OUTPUT_COLS: &[&str] = &["Style Category"];
+
+        let mut rows: Vec<HashMap<String, String>> = Vec::new();
+
+        let mut r1 = HashMap::new();
+        r1.insert("Style Category".to_string(), "Glassmorphism".to_string());
+        r1.insert("Keywords".to_string(), "frosted glass blur".to_string());
+        rows.push(r1);
+
+        let mut r2 = HashMap::new();
+        r2.insert("Style Category".to_string(), "Minimalism".to_string());
+        r2.insert("Keywords".to_string(), "clean minimal elegant".to_string());
+        rows.push(r2);
+
+        let documents: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                format!(
+                    "{} {}",
+                    row.get("Style Category").cloned().unwrap_or_default(),
+                    row.get("Keywords").cloned().unwrap_or_default()
+                )
+            })
+            .collect();
+
+        let mut bm25 = BM25::new(1.5, 0.75);
+        bm25.fit(&documents);
+
+        DomainIndex {
+            file: "test.csv",
+            output_cols: OUTPUT_COLS,
+            rows,
+            bm25,
+            documents,
+        }
+    }
+
     #[test]
     fn tokenize_for_suggest_keeps_uiux_and_mixed_tokens() {
         let t1 = tokenize_for_suggest("UI/UX");
@@ -2507,6 +2545,31 @@ mod tests {
         let extra = collect_query_expansion("科技感 登录");
         assert!(extra.iter().any(|t| t == "futuristic"));
         assert!(extra.iter().any(|t| t == "login"));
+    }
+
+    #[test]
+    fn query_expansion_maps_ui_signal_to_long_tokens() {
+        let extra = collect_query_expansion("UI美化");
+        assert!(extra.iter().any(|t| t == "design"));
+        assert!(extra.iter().any(|t| t == "interface"));
+    }
+
+    #[test]
+    fn detect_domain_uses_zh_hints_first() {
+        assert_eq!(detect_domain("配色方案"), "color");
+        assert_eq!(detect_domain("字体 排版"), "typography");
+        assert_eq!(detect_domain("图标 选择"), "icons");
+    }
+
+    #[test]
+    fn fuzzy_fallback_recovers_from_typo() {
+        let index = make_test_index();
+        let results = index.search("glasomorphism", 1);
+        assert!(!results.is_empty());
+        assert_eq!(
+            results[0].get("Style Category").map(|s| s.as_str()),
+            Some("Glassmorphism")
+        );
     }
 
     #[test]
