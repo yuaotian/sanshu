@@ -51,6 +51,7 @@
 
 html {
   background-color: var(--body-color, #f5f5f5);
+  overflow-x: hidden; /* 防止 Tauri 窗口出现系统级横向滚动条 */
 }
 
 body {
@@ -62,6 +63,33 @@ body {
   background-color: var(--body-color, #f5f5f5);
   color: var(--text-color, #333333);
   min-height: 100vh;
+  overflow-x: hidden; /* 防止内容宽度超出窗口时产生横向滚动条 */
+}
+
+/* 全局滚动条样式（统一应用视觉）
+ * 仅作用于常见滚动容器，避免对所有元素无差别覆盖
+ */
+:where(html, body, #app, .overflow-y-auto, .overflow-auto, .overflow-scroll, .scrollbar-thin, .popup-scrollbar, .custom-scrollbar) {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(120, 130, 150, 0.55) transparent;
+}
+
+:where(html, body, #app, .overflow-y-auto, .overflow-auto, .overflow-scroll, .scrollbar-thin, .popup-scrollbar, .custom-scrollbar)::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+:where(html, body, #app, .overflow-y-auto, .overflow-auto, .overflow-scroll, .scrollbar-thin, .popup-scrollbar, .custom-scrollbar)::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+:where(html, body, #app, .overflow-y-auto, .overflow-auto, .overflow-scroll, .scrollbar-thin, .popup-scrollbar, .custom-scrollbar)::-webkit-scrollbar-thumb {
+  background: rgba(120, 130, 150, 0.55);
+  border-radius: 9999px;
+}
+
+:where(html, body, #app, .overflow-y-auto, .overflow-auto, .overflow-scroll, .scrollbar-thin, .popup-scrollbar, .custom-scrollbar)::-webkit-scrollbar-thumb:hover {
+  background: rgba(120, 130, 150, 0.78);
 }
 
 /* 字体大小工具类 */

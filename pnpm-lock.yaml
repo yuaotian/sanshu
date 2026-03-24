@@ -12,11 +12,11 @@ importers:
         specifier: ^3.13.18
         version: 3.13.18(vue@3.5.16(typescript@5.8.3))
       '@tauri-apps/api':
-        specifier: ^2.5.0
-        version: 2.5.0
+        specifier: ^2.10.1
+        version: 2.10.1
       '@tauri-apps/plugin-shell':
-        specifier: ^2.2.1
-        version: 2.2.1
+        specifier: ^2.3.5
+        version: 2.3.5
       '@types/markdown-it':
         specifier: ^14.1.2
         version: 14.1.2
@@ -619,11 +619,11 @@ packages:
     peerDependencies:
       vue: ^2.7.0 || ^3.0.0
 
-  '@tauri-apps/api@2.5.0':
-    resolution: {integrity: sha512-Ldux4ip+HGAcPUmuLT8EIkk6yafl5vK0P0c0byzAKzxJh7vxelVtdPONjfgTm96PbN24yjZNESY8CKo8qniluA==}
+  '@tauri-apps/api@2.10.1':
+    resolution: {integrity: sha512-hKL/jWf293UDSUN09rR69hrToyIXBb8CjGaWC7gfinvnQrBVvnLr08FeFi38gxtugAVyVcTa5/FD/Xnkb1siBw==}
 
-  '@tauri-apps/plugin-shell@2.2.1':
-    resolution: {integrity: sha512-G1GFYyWe/KlCsymuLiNImUgC8zGY0tI0Y3p8JgBCWduR5IEXlIJS+JuG1qtveitwYXlfJrsExt3enhv5l2/yhA==}
+  '@tauri-apps/plugin-shell@2.3.5':
+    resolution: {integrity: sha512-jewtULhiQ7lI7+owCKAjc8tYLJr92U16bPOeAa472LHJdgaibLP83NcfAF2e+wkEcA53FxKQAZ7byDzs2eeizg==}
 
   '@types/debug@4.1.12':
     resolution: {integrity: sha512-vIChWdVG3LG1SMxEvI/AK+FWJthlrqlTu7fbrlywTkkaONwk/UAGaULXRlf8vkzFBLVm0zkMdCquhL5aOjhXPQ==}
@@ -2662,11 +2662,11 @@ snapshots:
       '@tanstack/virtual-core': 3.13.18
       vue: 3.5.16(typescript@5.8.3)
 
-  '@tauri-apps/api@2.5.0': {}
+  '@tauri-apps/api@2.10.1': {}
 
-  '@tauri-apps/plugin-shell@2.2.1':
+  '@tauri-apps/plugin-shell@2.3.5':
     dependencies:
-      '@tauri-apps/api': 2.5.0
+      '@tauri-apps/api': 2.10.1
 
   '@types/debug@4.1.12':
     dependencies:

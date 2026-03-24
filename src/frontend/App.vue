@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from 'vue'
+import { onMounted, onUnmounted, watch } from 'vue'
 import AppContent from './components/AppContent.vue'
 import { useAppManager } from './composables/useAppManager'
 import { useEventHandlers } from './composables/useEventHandlers'
@@ -21,6 +21,16 @@ const handlers = useEventHandlers(actions)
 
 // 主题应用由useTheme统一管理，移除重复的主题应用逻辑
 
+function setRootScrollLock(locked: boolean) {
+  document.documentElement.style.overflow = locked ? 'hidden' : ''
+  document.body.style.overflow = locked ? 'hidden' : ''
+}
+
+// 仅在三术弹窗模式锁定根滚动，避免双纵向滚动条
+watch(showMcpPopup, (v) => {
+  setRootScrollLock(!!v)
+}, { immediate: true })
+
 // 初始化
 onMounted(async () => {
   try {
@@ -33,12 +43,13 @@ onMounted(async () => {
 
 // 清理
 onUnmounted(() => {
+  setRootScrollLock(false)
   actions.app.cleanup()
 })
 </script>
 
 <template>
-  <div class="min-h-screen bg-surface transition-colors duration-200">
+  <div :class="showMcpPopup ? 'h-screen overflow-hidden bg-surface transition-colors duration-200' : 'min-h-screen bg-surface transition-colors duration-200'">
     <n-config-provider :theme="naiveTheme">
       <n-message-provider>
         <n-notification-provider>

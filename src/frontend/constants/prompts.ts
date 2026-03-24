@@ -297,8 +297,6 @@ export function generateFullPrompt(mcpTools: MCPToolConfig[]): string {
   const toolsWithPrompt: ToolPromptConfig[] = []
 
   for (const tool of mcpTools) {
-    // eslint-disable-next-line ts/ban-ts-comment
-    // @ts-expect-error
     const config = MCP_TOOLS_CONFIG.find(t => t.id === tool.id)
     if (config) {
       toolsWithPrompt.push({

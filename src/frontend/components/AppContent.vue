@@ -197,7 +197,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="min-h-screen bg-black">
+  <div :class="props.showMcpPopup ? 'h-screen overflow-hidden bg-black' : 'min-h-screen bg-black'">
     <!-- 图标搜索弹窗模式 -->
     <IconPopupMode
       v-if="props.isIconMode && props.iconParams"
@@ -210,7 +210,7 @@ onUnmounted(() => {
     <!-- MCP弹窗模式 -->
     <div
       v-else-if="props.showMcpPopup && props.mcpRequest"
-      class="flex flex-col w-full h-screen bg-black text-white select-none"
+      class="flex flex-col w-full h-screen bg-black text-white select-none overflow-hidden"
     >
       <!-- 头部 - 固定在顶部 -->
       <div class="sticky top-0 z-50 flex-shrink-0 bg-black-200 border-b-2 border-black-300">
@@ -261,6 +261,7 @@ onUnmounted(() => {
       <!-- 弹窗内容 -->
       <McpPopup
         v-else
+        class="flex-1 min-h-0"
         :request="props.mcpRequest"
         :app-config="props.appConfig"
         :enhance-enabled="enhanceEnabled"

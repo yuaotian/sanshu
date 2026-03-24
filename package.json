@@ -1,7 +1,7 @@
 {
   "name": "sanshu",
   "type": "module",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "packageManager": "pnpm@10.28.2",
   "author": "煎饼果子(86)",
   "license": "MIT",
@@ -26,8 +26,8 @@
   },
   "dependencies": {
     "@tanstack/vue-virtual": "^3.13.18",
-    "@tauri-apps/api": "^2.5.0",
-    "@tauri-apps/plugin-shell": "^2.2.1",
+    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/plugin-shell": "^2.3.5",
     "@types/markdown-it": "^14.1.2",
     "@vueuse/core": "^13.3.0",
     "@vueuse/integrations": "^13.4.0",
