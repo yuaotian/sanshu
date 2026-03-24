@@ -309,7 +309,7 @@ onUpdated(() => {
 </script>
 
 <template>
-  <div class="text-white">
+  <div class="text-white overflow-x-hidden">
     <!-- 加载状态 -->
     <div v-if="loading" class="flex flex-col items-center justify-center py-8">
       <n-spin size="medium" />

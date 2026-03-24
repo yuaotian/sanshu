@@ -3,8 +3,8 @@ import type { CustomPrompt, McpRequest } from '../../types/popup'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { useSortable } from '@vueuse/integrations/useSortable'
 import { useIntersectionObserver, useStorage } from '@vueuse/core'
+import { useSortable } from '@vueuse/integrations/useSortable'
 import { useMessage } from 'naive-ui'
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useKeyboard } from '../../composables/useKeyboard'
@@ -68,14 +68,18 @@ const { mcpTools, loadMcpTools } = useMcpToolsReactive()
 
 // 检查关联的 MCP 工具是否启用
 function isMcpToolEnabled(toolId?: string): boolean {
-  if (!toolId) return true // 没有关联工具时默认可用
+  if (!toolId) {
+    return true // 没有关联工具时默认可用
+  }
   const tool = mcpTools.value.find(t => t.id === toolId)
   return tool?.enabled ?? false
 }
 
 // 获取 MCP 工具名称（用于提示文案）
 function getMcpToolName(toolId?: string): string {
-  if (!toolId) return ''
+  if (!toolId) {
+    return ''
+  }
   const tool = mcpTools.value.find(t => t.id === toolId)
   return tool?.name ?? toolId
 }
@@ -184,7 +188,7 @@ useIntersectionObserver(
   ([{ isIntersecting }]) => {
     isSticking.value = !isIntersecting
   },
-  { threshold: 0.1 } 
+  { threshold: 0.1 },
 )
 
 function toggleFloating() {
@@ -258,7 +262,9 @@ function handleImagePaste(event: ClipboardEvent) {
 
 // 处理增强入口点击
 function handleEnhanceClick() {
-  if (props.submitting) return
+  if (props.submitting) {
+    return
+  }
   if (props.enhanceEnabled) {
     emit('enhance')
   }
@@ -460,19 +466,6 @@ function generateConditionalContent(): string {
   return conditionalText ? `\n\n${conditionalText}` : ''
 }
 
-// 获取条件性prompt的自适应描述
-function getConditionalDescription(prompt: CustomPrompt): string {
-  const isEnabled = prompt.current_state ?? false
-  const template = isEnabled ? prompt.template_true : prompt.template_false
-
-  // 如果有对应状态的模板，显示模板内容，否则显示原始描述
-  if (template && template.trim()) {
-    return template.trim()
-  }
-
-  return prompt.description || ''
-}
-
 // 移除拖拽排序初始化函数
 
 // 初始化拖拽排序功能
@@ -606,7 +599,7 @@ async function setupWindowMoveListener() {
 onMounted(async () => {
   console.log('组件挂载，开始加载prompt')
   await loadCustomPrompts()
-  
+
   // 加载 MCP 工具配置（用于检查关联工具状态）
   await loadMcpTools()
 
@@ -759,8 +752,8 @@ defineExpose({
       <div ref="sentinelRef" class="w-full h-px opacity-0 pointer-events-none absolute -mt-1" />
 
       <div
+        class="transition-all duration-300 ease-[cubic-bezier(0.25,0.8,0.25,1)]"
         :class="[
-          'transition-all duration-300 ease-[cubic-bezier(0.25,0.8,0.25,1)]',
           isFloating ? 'sticky bottom-0 z-[50]' : 'relative',
           (isFloating && isSticking)
             ? 'bg-surface/85 backdrop-blur-xl shadow-[0_-8px_30px_rgba(0,0,0,0.15)] border-t border-white/10 pb-5 pt-4 px-3 -mx-3 mb-0'
@@ -781,8 +774,8 @@ defineExpose({
           >
             <template #icon>
               <div
+                class="transition-transform duration-300"
                 :class="[
-                  'transition-transform duration-300',
                   isFloating ? 'i-carbon-pin-filled text-primary-500 rotate-0' : 'i-carbon-pin text-on-surface-secondary -rotate-45',
                 ]"
               />
@@ -829,21 +822,18 @@ defineExpose({
             <div class="i-carbon-settings-adjust w-3 h-3 text-primary-500" />
             <span>上下文追加:</span>
           </div>
-          <div class="grid grid-cols-2 gap-2">
+          <div class="grid grid-cols-3 gap-1">
             <div
               v-for="prompt in conditionalPrompts"
               :key="prompt.id"
+              class="flex items-center justify-between p-1.5 bg-container-secondary rounded border border-gray-600 transition-colors text-xs"
               :class="[
-                'flex items-center justify-between p-2 bg-container-secondary rounded border border-gray-600 transition-colors text-xs',
-                isMcpToolEnabled(prompt.linked_mcp_tool) ? 'hover:bg-container-tertiary' : 'opacity-50 cursor-not-allowed'
+                isMcpToolEnabled(prompt.linked_mcp_tool) ? 'hover:bg-container-tertiary' : 'opacity-50 cursor-not-allowed',
               ]"
             >
-              <div class="flex-1 min-w-0 mr-2">
+              <div class="flex-1 min-w-0 mr-1">
                 <div class="text-xs text-on-surface truncate font-medium" :title="prompt.condition_text || prompt.name">
                   {{ prompt.condition_text || prompt.name }}
-                </div>
-                <div v-if="getConditionalDescription(prompt)" class="text-xs text-primary-600 dark:text-primary-400 opacity-50 dark:opacity-60 mt-0.5 truncate leading-tight" :title="getConditionalDescription(prompt)">
-                  {{ getConditionalDescription(prompt) }}
                 </div>
               </div>
               <!-- 使用 n-tooltip 包裹开关，当 MCP 工具未启用时显示提示 -->
