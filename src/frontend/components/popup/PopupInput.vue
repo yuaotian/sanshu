@@ -21,6 +21,8 @@ interface Props {
 interface Emits {
   update: [data: {
     userInput: string
+    rawUserInput: string
+    conditionalContext: string
     selectedOptions: string[]
     draggedImages: string[]
   }]
@@ -156,6 +158,7 @@ const canSubmit = computed(() => {
   }
   return hasInputText || hasImages
 })
+const canEnhance = computed(() => userInput.value.trim().length > 0)
 
 // 工具栏状态文本
 const statusText = computed(() => {
@@ -202,6 +205,8 @@ function emitUpdate() {
 
   emit('update', {
     userInput: finalUserInput,
+    rawUserInput: userInput.value,
+    conditionalContext: conditionalContent,
     selectedOptions: selectedOptions.value,
     draggedImages: uploadedImages.value,
   })
@@ -644,15 +649,27 @@ function updateData(data: { userInput?: string, selectedOptions?: string[], drag
   emitUpdate()
 }
 
+// 中文注释：暴露原始输入与附加上下文，供本地增强链路精确组装提示词
+function getRawUserInput() {
+  return userInput.value
+}
+
+function getConditionalContext() {
+  return generateConditionalContent()
+}
+
 // 移除了文件选择和测试图片功能
 
 // 暴露方法给父组件
 defineExpose({
   reset,
   canSubmit,
+  canEnhance,
   statusText,
   updateData,
   handleQuoteMessage,
+  getRawUserInput,
+  getConditionalContext,
 })
 </script>
 
@@ -846,19 +863,19 @@ defineExpose({
         <div class="flex items-center justify-between text-xs my-2">
           <div class="flex items-center gap-2 text-on-surface-secondary">
             <div class="i-carbon-magic-wand w-3 h-3 text-primary-500" />
-            <span>{{ enhanceEnabled ? '可一键增强当前提示词' : '提示词增强未启用' }}</span>
+            <span>{{ enhanceEnabled ? '将当前文本发送给本地 AI 做结构化增强' : '提示词增强未启用' }}</span>
           </div>
           <n-button
             size="tiny"
             :type="enhanceEnabled ? 'info' : 'warning'"
             secondary
-            :disabled="submitting || (enhanceEnabled && !canSubmit)"
+            :disabled="submitting || (enhanceEnabled && !canEnhance)"
             @click="handleEnhanceClick"
           >
             <template #icon>
               <div :class="enhanceEnabled ? 'i-carbon-magic-wand' : 'i-carbon-launch'" />
             </template>
-            {{ enhanceEnabled ? '增强提示词' : '启用增强' }}
+            {{ enhanceEnabled ? '本地增强' : '启用增强' }}
           </n-button>
         </div>
 

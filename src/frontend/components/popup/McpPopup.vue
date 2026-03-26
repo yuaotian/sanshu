@@ -8,7 +8,6 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAcemcpSync } from '../../composables/useAcemcpSync'
 import { useMcpToolsReactive } from '../../composables/useMcpTools'
 import { getContextPolicyStatus, shouldShowPolicyIndicator } from '../../utils/conditionalContext'
-import EnhanceModal from './EnhanceModal.vue'
 import PopupActions from './PopupActions.vue'
 import PopupContent from './PopupContent.vue'
 import PopupInput from './PopupInput.vue'
@@ -56,6 +55,14 @@ interface Emits {
   openIndexStatus: []
 }
 
+interface PopupInputUpdatePayload {
+  userInput: string
+  rawUserInput: string
+  conditionalContext: string
+  selectedOptions: string[]
+  draggedImages: string[]
+}
+
 const props = withDefaults(defineProps<Props>(), {
   mockMode: false,
   testMode: false,
@@ -98,15 +105,14 @@ const loading = ref(false)
 const submitting = ref(false)
 const selectedOptions = ref<string[]>([])
 const userInput = ref('')
+const rawUserInput = ref('')
+const conditionalContext = ref('')
 const draggedImages = ref<string[]>([])
 const inputRef = ref()
 
 // 继续回复配置
 const continueReplyEnabled = ref(true)
 const continuePrompt = ref('请按照最佳实践继续')
-
-// 增强弹窗状态
-const showEnhanceModal = ref(false)
 
 // 计算属性
 const isVisible = computed(() => !!props.request)
@@ -116,6 +122,15 @@ const canSubmit = computed(() => {
     return selectedOptions.value.length > 0 || userInput.value.trim().length > 0 || draggedImages.value.length > 0
   }
   return userInput.value.trim().length > 0 || draggedImages.value.length > 0
+})
+// 中文注释：本地增强模式始终可用，不再依赖外部 API 配置
+const localEnhanceEnabled = true
+// 中文注释：本地增强只接受用户原始输入，避免把条件性上下文误当成待改写正文
+const canEnhance = computed(() => rawUserInput.value.trim().length > 0)
+const souStatusText = computed(() => {
+  if (mcpTools.value.length === 0)
+    return '未知'
+  return souEnabled.value ? '已启用' : '未启用'
 })
 
 // 获取输入组件的状态文本
@@ -269,6 +284,8 @@ onUnmounted(() => {
 function resetForm() {
   selectedOptions.value = []
   userInput.value = ''
+  rawUserInput.value = ''
+  conditionalContext.value = ''
   draggedImages.value = []
   submitting.value = false
 }
@@ -293,13 +310,12 @@ function buildUserReplySummary() {
 }
 
 // 记录 zhi 历史（不影响主流程）
-async function recordZhiHistory() {
+async function recordZhiHistory(userReplySummary = buildUserReplySummary()) {
   const projectRoot = props.request?.project_root_path
   if (!projectRoot) return
 
   const prompt = props.request?.message || ''
   const requestId = props.request?.id || ''
-  const userReplySummary = buildUserReplySummary()
 
   try {
     await invoke('add_zhi_history', {
@@ -371,8 +387,10 @@ async function handleSubmit() {
 }
 
 // 处理输入更新
-function handleInputUpdate(data: { userInput: string, selectedOptions: string[], draggedImages: string[] }) {
+function handleInputUpdate(data: PopupInputUpdatePayload) {
   userInput.value = data.userInput
+  rawUserInput.value = data.rawUserInput
+  conditionalContext.value = data.conditionalContext
   selectedOptions.value = data.selectedOptions
   draggedImages.value = data.draggedImages
 }
@@ -436,44 +454,52 @@ function handleQuoteMessage(messageContent: string) {
   }
 }
 
-// 处理增强按钮点击 - 打开增强弹窗
-function handleEnhance() {
+// 处理增强按钮点击 - 直接走本地 AI 链路
+async function handleEnhance() {
   if (submitting.value)
     return
 
-  if (!props.enhanceEnabled) {
-    message.warning('提示词增强未启用，请先在 MCP 工具中启用')
-    emit('openMcpToolsTab')
+  const rawInput = rawUserInput.value.trim()
+  if (!rawInput) {
+    message.warning('请先输入要增强的文本')
     return
   }
 
-  // 检查是否有输入内容
-  if (!userInput.value.trim()) {
-    message.warning('请先输入要增强的提示词')
-    return
+  submitting.value = true
+
+  try {
+    // 中文注释：复用发送按钮链路，把增强请求回送给本地 AI 会话
+    const response = {
+      user_input: buildLocalEnhancePrompt(rawInput),
+      selected_options: [],
+      images: [],
+      metadata: {
+        timestamp: new Date().toISOString(),
+        request_id: props.request?.id || null,
+        source: 'popup_local_enhance',
+      },
+    }
+
+    if (props.mockMode) {
+      await new Promise(resolve => setTimeout(resolve, 1000))
+      message.success('本地增强请求发送成功')
+      await recordZhiHistory(buildLocalEnhanceHistorySummary(rawInput))
+    }
+    else {
+      await invoke('send_mcp_response', { response })
+      await recordZhiHistory(buildLocalEnhanceHistorySummary(rawInput))
+      await invoke('exit_app')
+    }
+
+    emit('response', response)
   }
-
-  // 打开增强弹窗
-  showEnhanceModal.value = true
-}
-
-// 处理增强结果确认
-function handleEnhanceConfirm(enhancedPrompt: string) {
-  // 替换输入框内容
-  userInput.value = enhancedPrompt
-  
-  // 同步到 PopupInput 组件
-  if (inputRef.value) {
-    inputRef.value.updateData({ userInput: enhancedPrompt })
+  catch (error) {
+    console.error('发送本地增强请求失败:', error)
+    message.error('本地增强请求失败，请重试')
   }
-  
-  message.success('提示词已增强')
-  showEnhanceModal.value = false
-}
-
-// 处理增强取消
-function handleEnhanceCancel() {
-  showEnhanceModal.value = false
+  finally {
+    submitting.value = false
+  }
 }
 
 // 处理跳转 MCP 工具页
@@ -500,6 +526,67 @@ async function runIndexResync(type: 'incremental' | 'full') {
   finally {
     resyncLoading.value = false
   }
+}
+
+function getCodeAnalysisInstruction() {
+  switch (souStatusText.value) {
+    case '已启用':
+      return '必须先使用 sou 语义搜索定位真实实现，再结合命中文件完成代码确认。'
+    case '未启用':
+      return 'sou 当前未启用，必须改用项目内代码搜索（如 rg）和真实文件阅读完成代码分析。'
+    default:
+      return '优先尝试 sou；若不可用，则必须改用项目内代码搜索（如 rg）和真实文件阅读完成代码分析。'
+  }
+}
+
+function buildLocalEnhancePrompt(rawInput: string) {
+  const projectRoot = props.request?.project_root_path?.trim() || '未提供'
+  const background = conditionalContext.value.trim()
+  const sections = [
+    '# 本地提示词增强请求',
+    '这是一次“本地提示词增强”操作，不是对当前弹窗问题的直接答复。',
+    '你的唯一任务：基于真实代码分析，将“原始口语化输入”改写为结构化、清晰、可执行的高质量提示词。',
+    '## 强制规则',
+    '1. 必须先做真实代码分析，禁止凭空补全或脑补实现。',
+    `2. ${getCodeAnalysisInstruction()}`,
+    '3. 如果没有项目路径、无法检索真实代码、或检索结果不足以支撑结论，必须明确返回失败，不要静默降级。',
+    '4. 只允许改写“原始口语化输入”；附加背景仅供理解，不能直接并入最终增强正文。',
+    '5. 输出语言以中文为主。',
+    '6. 不要解释分析过程，不要回答原弹窗问题，不要输出多余寒暄。',
+    '## 成功输出格式（必须严格遵守）',
+    '### BEGIN RESPONSE ###',
+    '<augment-enhanced-prompt>这里放增强后的结构化提示词</augment-enhanced-prompt>',
+    '### END RESPONSE ###',
+    '## 无法完成时的输出格式（必须严格遵守）',
+    '### BEGIN RESPONSE ###',
+    '无法基于真实代码分析生成增强提示词：请写明具体原因',
+    '### END RESPONSE ###',
+    '## 项目分析条件',
+    `- 项目根路径：${projectRoot}`,
+    `- sou 工具前端检测状态：${souStatusText.value}`,
+  ]
+
+  if (background) {
+    sections.push(
+      '## 附加背景（仅供理解，不得直接复制到最终结果）',
+      `<additional-background>\n${background}\n</additional-background>`,
+    )
+  }
+
+  sections.push(
+    '## 原始口语化输入（这是唯一需要被改写的正文）',
+    `<original-user-input>\n${rawInput}\n</original-user-input>`,
+  )
+
+  return sections.join('\n\n')
+}
+
+function buildLocalEnhanceHistorySummary(rawInput: string) {
+  const parts = [`本地增强请求: ${rawInput}`]
+  if (conditionalContext.value.trim()) {
+    parts.push('附加背景: 已附带条件性上下文')
+  }
+  return parts.join('\n')
 }
 
 // 处理索引重新同步请求
@@ -588,7 +675,7 @@ function handleOpenIndexStatus() {
       <div class="px-4 pb-3 bg-black select-text">
         <PopupInput
           ref="inputRef" :request="request" :loading="loading" :submitting="submitting"
-          :enhance-enabled="props.enhanceEnabled"
+          :enhance-enabled="localEnhanceEnabled"
           @update="handleInputUpdate" @image-add="handleImageAdd" @image-remove="handleImageRemove"
           @enhance="handleEnhance"
           @open-mcp-tools-tab="handleOpenMcpToolsTab"
@@ -600,20 +687,12 @@ function handleOpenIndexStatus() {
     <div class="flex-shrink-0 bg-black-100 border-t-2 border-black-200" data-guide="popup-actions">
       <PopupActions
         :request="request" :loading="loading" :submitting="submitting" :can-submit="canSubmit"
+        :can-enhance="canEnhance"
         :continue-reply-enabled="continueReplyEnabled" :input-status-text="inputStatusText"
-        :enhance-enabled="props.enhanceEnabled"
+        :enhance-enabled="localEnhanceEnabled"
         @submit="handleSubmit" @continue="handleContinue" @enhance="handleEnhance"
         @open-mcp-tools-tab="handleOpenMcpToolsTab"
       />
     </div>
-
-    <!-- 提示词增强弹窗 -->
-    <EnhanceModal
-      v-model:show="showEnhanceModal"
-      :original-prompt="userInput"
-      :project-root-path="request?.project_root_path"
-      @confirm="handleEnhanceConfirm"
-      @cancel="handleEnhanceCancel"
-    />
   </div>
 </template>
