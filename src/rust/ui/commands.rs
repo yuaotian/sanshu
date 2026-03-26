@@ -565,6 +565,48 @@ pub async fn select_image_files() -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+pub fn read_image_file_as_data_url(path: String) -> Result<String, String> {
+    use base64::Engine as _;
+
+    let input_path = std::path::PathBuf::from(&path);
+
+    if !input_path.exists() {
+        return Err(format!("路径不存在: {}", path));
+    }
+
+    let metadata = input_path
+        .metadata()
+        .map_err(|e| format!("读取文件信息失败: {}", e))?;
+
+    if !metadata.is_file() {
+        return Err(format!("仅支持读取普通文件: {}", path));
+    }
+
+    let media_type = match input_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        Some("svg") => "image/svg+xml",
+        Some("ico") => "image/x-icon",
+        Some("avif") => "image/avif",
+        _ => return Err(format!("不支持的图片类型: {}", path)),
+    };
+
+    let bytes = std::fs::read(&input_path)
+        .map_err(|e| format!("读取图片文件失败: {}", e))?;
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:{};base64,{}", media_type, encoded))
+}
+
+#[tauri::command]
 pub async fn open_external_url(url: String) -> Result<(), String> {
     use std::process::Command;
 
@@ -613,6 +655,7 @@ pub fn build_mcp_send_response(
     user_input: Option<String>,
     selected_options: Vec<String>,
     images: Vec<ImageAttachment>,
+    files: Option<Vec<crate::mcp::types::FileReferenceAttachment>>,
     request_id: Option<String>,
     source: String,
 ) -> Result<String, String> {
@@ -620,6 +663,7 @@ pub fn build_mcp_send_response(
         user_input,
         selected_options,
         images,
+        files.unwrap_or_default(),
         request_id,
         &source,
     ))

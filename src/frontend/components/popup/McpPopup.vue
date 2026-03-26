@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import type { McpRequest } from '../../types/popup'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useDialog, useMessage } from 'naive-ui'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import type { FileReferenceAttachment, McpRequest } from '../../types/popup'
 
 import { useAcemcpSync } from '../../composables/useAcemcpSync'
 import { useMcpToolsReactive } from '../../composables/useMcpTools'
@@ -61,6 +61,7 @@ interface PopupInputUpdatePayload {
   conditionalContext: string
   selectedOptions: string[]
   draggedImages: string[]
+  referencedFiles: FileReferenceAttachment[]
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -108,6 +109,7 @@ const userInput = ref('')
 const rawUserInput = ref('')
 const conditionalContext = ref('')
 const draggedImages = ref<string[]>([])
+const referencedFiles = ref<FileReferenceAttachment[]>([])
 const inputRef = ref()
 
 // 继续回复配置
@@ -118,10 +120,13 @@ const continuePrompt = ref('请按照最佳实践继续')
 const isVisible = computed(() => !!props.request)
 const hasOptions = computed(() => (props.request?.predefined_options?.length ?? 0) > 0)
 const canSubmit = computed(() => {
+  const hasInput = userInput.value.trim().length > 0
+  const hasImages = draggedImages.value.length > 0
+  const hasFiles = referencedFiles.value.length > 0
   if (hasOptions.value) {
-    return selectedOptions.value.length > 0 || userInput.value.trim().length > 0 || draggedImages.value.length > 0
+    return selectedOptions.value.length > 0 || hasInput || hasImages || hasFiles
   }
-  return userInput.value.trim().length > 0 || draggedImages.value.length > 0
+  return hasInput || hasImages || hasFiles
 })
 // 中文注释：本地增强模式始终可用，不再依赖外部 API 配置
 const localEnhanceEnabled = true
@@ -287,6 +292,7 @@ function resetForm() {
   rawUserInput.value = ''
   conditionalContext.value = ''
   draggedImages.value = []
+  referencedFiles.value = []
   submitting.value = false
 }
 
@@ -339,15 +345,19 @@ async function handleSubmit() {
   submitting.value = true
 
   try {
-    // 使用新的结构化数据格式
     const response = {
       user_input: userInput.value.trim() || null,
       selected_options: selectedOptions.value,
-      images: draggedImages.value.map(imageData => ({
-        data: imageData.split(',')[1], // 移除 data:image/png;base64, 前缀
-        media_type: 'image/png',
-        filename: null,
-      })),
+      images: draggedImages.value.map((imageData) => {
+        const [header = '', data = ''] = imageData.split(',', 2)
+        const mediaTypeMatch = header.match(/^data:(.*?);base64$/i)
+        return {
+          data,
+          media_type: mediaTypeMatch?.[1] || 'image/png',
+          filename: null,
+        }
+      }),
+      files: referencedFiles.value,
       metadata: {
         timestamp: new Date().toISOString(),
         request_id: props.request?.id || null,
@@ -355,8 +365,7 @@ async function handleSubmit() {
       },
     }
 
-    // 如果没有任何有效内容，设置默认用户输入
-    if (!response.user_input && response.selected_options.length === 0 && response.images.length === 0) {
+    if (!response.user_input && response.selected_options.length === 0 && response.images.length === 0 && response.files.length === 0) {
       response.user_input = '用户确认继续'
     }
 
@@ -393,6 +402,7 @@ function handleInputUpdate(data: PopupInputUpdatePayload) {
   conditionalContext.value = data.conditionalContext
   selectedOptions.value = data.selectedOptions
   draggedImages.value = data.draggedImages
+  referencedFiles.value = data.referencedFiles
 }
 
 // 处理图片添加 - 移除重复逻辑，避免双重添加
@@ -413,11 +423,11 @@ async function handleContinue() {
   submitting.value = true
 
   try {
-    // 使用新的结构化数据格式
     const response = {
       user_input: continuePrompt.value,
-      selected_options: [],
-      images: [],
+      selected_options: [] as string[],
+      images: [] as any[],
+      files: [] as FileReferenceAttachment[],
       metadata: {
         timestamp: new Date().toISOString(),
         request_id: props.request?.id || null,
