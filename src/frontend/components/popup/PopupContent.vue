@@ -309,7 +309,7 @@ onUpdated(() => {
 </script>
 
 <template>
-  <div class="text-white overflow-x-hidden">
+  <div class="text-white">
     <!-- 加载状态 -->
     <div v-if="loading" class="flex flex-col items-center justify-center py-8">
       <n-spin size="medium" />
@@ -360,3 +360,10 @@ onUpdated(() => {
     </n-alert>
   </div>
 </template>
+
+<style scoped>
+:deep(.markdown-content pre) {
+  max-width: 100%;
+  overflow-x: auto;
+}
+</style>

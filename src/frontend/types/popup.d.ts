@@ -68,11 +68,22 @@ export interface ShortcutKey {
   meta: boolean // macOS的Cmd键
 }
 
+// 文件/URL 引用附件
+export interface FileReferenceAttachment {
+  type: 'path' | 'url'
+  path?: string
+  url?: string
+  name: string
+  kind?: 'file' | 'directory'
+  mime_type?: string
+}
+
 // 新的结构化响应格式
 export interface McpResponse {
   user_input: string | null
   selected_options: string[]
   images: ImageAttachment[]
+  files: FileReferenceAttachment[]
   metadata: ResponseMetadata
 }
 
