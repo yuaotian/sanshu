@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import type { CustomPrompt, McpRequest } from '../../types/popup'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
@@ -7,9 +6,43 @@ import { useIntersectionObserver, useStorage } from '@vueuse/core'
 import { useSortable } from '@vueuse/integrations/useSortable'
 import { useMessage } from 'naive-ui'
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
+import { EditorContent, useEditor } from '@tiptap/vue-3'
+import StarterKit from '@tiptap/starter-kit'
 import { useKeyboard } from '../../composables/useKeyboard'
 import { useMcpToolsReactive } from '../../composables/useMcpTools'
+import type { CustomPrompt, FileReferenceAttachment, McpRequest } from '../../types/popup'
 import { buildConditionalContext } from '../../utils/conditionalContext'
+import type { InlineBadgeAttrs } from './extensions/InlineBadge'
+import { InlineBadge } from './extensions/InlineBadge'
+
+// TipTap badge 操作辅助
+function editorInsertBadge(ed: ReturnType<typeof useEditor>['value'], attrs: InlineBadgeAttrs) {
+  if (!ed) return
+  ed.chain().focus().insertContent([
+    { type: 'inlineBadge', attrs },
+    { type: 'text', text: ' ' },
+  ]).run()
+}
+
+function editorRemoveBadge(ed: ReturnType<typeof useEditor>['value'], key: 'identity' | 'imageBadgeId', value: string, all = false) {
+  if (!ed) return
+  ed.chain().command(({ tr, state }) => {
+    const targets: { from: number, to: number }[] = []
+    state.doc.descendants((node, pos) => {
+      if (node.type.name === 'inlineBadge' && node.attrs[key] === value) {
+        const end = pos + node.nodeSize
+        const after = state.doc.nodeAt(end)
+        const deleteEnd = (after?.isText && /^[\s\u00a0]/.test(after.text || '')) ? end + 1 : end
+        targets.push({ from: pos, to: deleteEnd })
+        if (!all) return false
+      }
+    })
+    for (let i = targets.length - 1; i >= 0; i--) {
+      tr.delete(targets[i].from, targets[i].to)
+    }
+    return targets.length > 0
+  }).run()
+}
 
 interface Props {
   request: McpRequest | null
@@ -21,8 +54,11 @@ interface Props {
 interface Emits {
   update: [data: {
     userInput: string
+    rawUserInput: string
+    conditionalContext: string
     selectedOptions: string[]
     draggedImages: string[]
+    referencedFiles: FileReferenceAttachment[]
   }]
   imageAdd: [image: string]
   imageRemove: [index: number]
@@ -42,8 +78,8 @@ const emit = defineEmits<Emits>()
 const userInput = ref('')
 const selectedOptions = ref<string[]>([])
 const uploadedImages = ref<string[]>([])
-const textareaRef = ref<any | null>(null)
-
+const referencedFiles = ref<FileReferenceAttachment[]>([])
+const isDragOver = ref(false)
 // 自定义prompt相关状态
 const customPrompts = ref<CustomPrompt[]>([])
 const customPromptEnabled = ref(true)
@@ -150,18 +186,20 @@ const canSubmit = computed(() => {
   const hasOptionsSelected = selectedOptions.value.length > 0
   const hasInputText = userInput.value.trim().length > 0
   const hasImages = uploadedImages.value.length > 0
+  const hasFiles = referencedFiles.value.length > 0
 
   if (hasOptions.value) {
-    return hasOptionsSelected || hasInputText || hasImages
+    return hasOptionsSelected || hasInputText || hasImages || hasFiles
   }
-  return hasInputText || hasImages
+  return hasInputText || hasImages || hasFiles
 })
+const canEnhance = computed(() => userInput.value.trim().length > 0)
 
 // 工具栏状态文本
 const statusText = computed(() => {
-  // 检查是否有任何输入内容
   const hasInput = selectedOptions.value.length > 0
     || uploadedImages.value.length > 0
+    || referencedFiles.value.length > 0
     || userInput.value.trim().length > 0
 
   // 如果有任何输入内容，返回空字符串让 PopupActions 显示快捷键
@@ -194,16 +232,16 @@ function toggleFloating() {
 
 // 发送更新事件
 function emitUpdate() {
-  // 获取条件性prompt的追加内容
   const conditionalContent = generateConditionalContent()
-
-  // 将条件性内容追加到用户输入
   const finalUserInput = userInput.value + conditionalContent
 
   emit('update', {
     userInput: finalUserInput,
-    selectedOptions: selectedOptions.value,
-    draggedImages: uploadedImages.value,
+    rawUserInput: userInput.value,
+    conditionalContext: conditionalContent,
+    selectedOptions: [...selectedOptions.value],
+    draggedImages: [...uploadedImages.value],
+    referencedFiles: [...referencedFiles.value],
   })
 }
 
@@ -232,27 +270,344 @@ function handleOptionToggle(option: string) {
   emitUpdate()
 }
 
-// 移除了所有拖拽和上传组件相关的代码
+// ============ TipTap 编辑器辅助 ============
 
-function handleImagePaste(event: ClipboardEvent) {
-  const items = event.clipboardData?.items
-  let hasImage = false
+const URL_PATTERN = /^https?:\/\/\S+$/i
+const PATH_PATTERN = /^(?:[a-zA-Z]:[\\\/]|[\/]).+/
 
-  if (items) {
+function getReferenceIdentity(ref: FileReferenceAttachment): string {
+  return ref.type === 'url'
+    ? (ref.url || '').trim().toLowerCase()
+    : (ref.path || '').trim().toLowerCase()
+}
+
+function getSerializedReferenceText(ref: FileReferenceAttachment): string {
+  return ref.type === 'url' ? (ref.url || '') : (ref.path || '')
+}
+
+function getReferenceKindLabel(ref: FileReferenceAttachment): string {
+  if (ref.type === 'url') return 'URL'
+  if (ref.kind === 'directory') return '目录'
+  return '文件'
+}
+
+function getReferenceDisplayLabel(ref: FileReferenceAttachment): string {
+  if (ref.type === 'url') {
+    const url = ref.url || ''
+    return url.replace(/^https?:\/\//, '').replace(/\/+$/, '')
+  }
+  const filePath = ref.path || ''
+  return filePath.split(/[/\\]/).pop() || filePath
+}
+
+function addFileReference(file: FileReferenceAttachment): boolean {
+  const identity = getReferenceIdentity(file)
+  if (!referencedFiles.value.some(item => getReferenceIdentity(item) === identity)) {
+    referencedFiles.value.push(file)
+  }
+  return true
+}
+
+// ---- TipTap JSON 序列化 ----
+
+function serializeNode(node: any): string {
+  if (node.type === 'text') return node.text || ''
+  if (node.type === 'inlineBadge') return node.attrs?.serialized || ''
+  if (node.type === 'hardBreak') return '\n'
+  if (node.type === 'paragraph') {
+    const inner = (node.content || []).map(serializeNode).join('')
+    return `${inner}\n`
+  }
+  return (node.content || []).map(serializeNode).join('')
+}
+
+function serializeEditorContent(): string {
+  if (!editor.value) return ''
+  const json = editor.value.getJSON()
+  return serializeNode(json).replace(/\n$/, '')
+}
+
+function walkNodes(node: any, callback: (node: any) => void) {
+  callback(node)
+  if (node.content) {
+    for (const child of node.content) {
+      walkNodes(child, callback)
+    }
+  }
+}
+
+// ---- 数据同步 ----
+
+function syncDataWithEditor() {
+  if (!editor.value) return
+  const json = editor.value.getJSON()
+  const presentRefIds = new Set<string>()
+  const presentImgIds = new Set<string>()
+
+  walkNodes(json, (node: any) => {
+    if (node.type === 'inlineBadge') {
+      const attrs = node.attrs
+      if (attrs?.badgeType === 'image' && attrs?.imageBadgeId) {
+        const imgId = attrs.imageBadgeId
+        presentImgIds.add(imgId)
+        if (!imageBadgeMap.has(imgId) && imageBadgeArchive.has(imgId)) {
+          const archivedUrl = imageBadgeArchive.get(imgId)!
+          imageBadgeMap.set(imgId, archivedUrl)
+          if (!uploadedImages.value.includes(archivedUrl)) {
+            uploadedImages.value.push(archivedUrl)
+          }
+        }
+      }
+      else if (attrs?.identity) {
+        presentRefIds.add(attrs.identity)
+        if (!referencedFiles.value.some(ref => getReferenceIdentity(ref) === attrs.identity) && attrs.referenceData) {
+          try { referencedFiles.value.push(JSON.parse(attrs.referenceData)) }
+          catch {}
+        }
+      }
+    }
+  })
+
+  referencedFiles.value = referencedFiles.value.filter(ref => presentRefIds.has(getReferenceIdentity(ref)))
+
+  for (const [id, dataUrl] of [...imageBadgeMap]) {
+    if (!presentImgIds.has(id)) {
+      imageBadgeMap.delete(id)
+      const idx = uploadedImages.value.indexOf(dataUrl)
+      if (idx > -1) {
+        uploadedImages.value.splice(idx, 1)
+        emit('imageRemove', idx)
+      }
+    }
+  }
+}
+
+function syncFromEditor() {
+  if (!editor.value) return
+  userInput.value = serializeEditorContent()
+  syncDataWithEditor()
+  emitUpdate()
+}
+
+// ---- Badge 插入 ----
+
+function buildRefBadgeAttrs(ref: FileReferenceAttachment): InlineBadgeAttrs {
+  return {
+    badgeType: ref.type,
+    identity: getReferenceIdentity(ref),
+    label: getReferenceDisplayLabel(ref),
+    kind: getReferenceKindLabel(ref),
+    serialized: getSerializedReferenceText(ref),
+    referenceData: JSON.stringify(ref),
+    imageBadgeId: null,
+    title: ref.type === 'url' ? (ref.url || '') : (ref.path || ''),
+  }
+}
+
+function insertReferenceBadge(ref: FileReferenceAttachment) {
+  editorInsertBadge(editor.value, buildRefBadgeAttrs(ref))
+  userInput.value = serializeEditorContent()
+}
+
+// ---- Badge 删除 ----
+
+function removeReferenceByIdentity(identity: string) {
+  const idx = referencedFiles.value.findIndex(item => getReferenceIdentity(item) === identity)
+  if (idx > -1) referencedFiles.value.splice(idx, 1)
+  editorRemoveBadge(editor.value, 'identity', identity)
+  userInput.value = serializeEditorContent()
+  emitUpdate()
+}
+
+// ---- 引用粘贴检测 ----
+
+function tryParsePasteAsReference(text: string): boolean {
+  const trimmed = text.trim()
+
+  if (URL_PATTERN.test(trimmed)) {
+    let name = trimmed
+    try { name = new URL(trimmed).hostname + new URL(trimmed).pathname } catch {}
+    const ref: FileReferenceAttachment = { type: 'url', url: trimmed, name }
+    if (addFileReference(ref)) {
+      insertReferenceBadge(ref)
+      emitUpdate()
+      return true
+    }
+    return false
+  }
+
+  if (PATH_PATTERN.test(trimmed)) {
+    const ref: FileReferenceAttachment = {
+      type: 'path',
+      path: trimmed,
+      name: trimmed.split(/[/\\]/).pop() || trimmed,
+      kind: /\.[^/\\]+$/.test(trimmed) ? 'file' : 'directory',
+    }
+    if (addFileReference(ref)) {
+      insertReferenceBadge(ref)
+      emitUpdate()
+      return true
+    }
+    return false
+  }
+
+  return false
+}
+
+// ============ 图片 Badge ============
+
+let nextImageBadgeId = 0
+const imageBadgeMap = new Map<string, string>()
+const imageBadgeArchive = new Map<string, string>()
+
+function addImageWithBadge(dataUrl: string, name: string): boolean {
+  uploadedImages.value.push(dataUrl)
+  const badgeId = `img-${nextImageBadgeId++}`
+  imageBadgeMap.set(badgeId, dataUrl)
+  imageBadgeArchive.set(badgeId, dataUrl)
+
+  editorInsertBadge(editor.value, {
+    badgeType: 'image',
+    identity: '',
+    label: name,
+    kind: '图片',
+    serialized: name,
+    referenceData: '',
+    imageBadgeId: badgeId,
+    title: name,
+  })
+
+  userInput.value = serializeEditorContent()
+  return true
+}
+
+function removeImageByBadgeId(badgeId: string) {
+  const dataUrl = imageBadgeMap.get(badgeId)
+  imageBadgeMap.delete(badgeId)
+
+  if (dataUrl) {
+    const idx = uploadedImages.value.indexOf(dataUrl)
+    if (idx > -1) {
+      uploadedImages.value.splice(idx, 1)
+      emit('imageRemove', idx)
+    }
+  }
+
+  editorRemoveBadge(editor.value, 'imageBadgeId', badgeId)
+  userInput.value = serializeEditorContent()
+  emitUpdate()
+}
+
+function removeImageBadgeByDataUrl(dataUrl: string) {
+  for (const [id, url] of imageBadgeMap) {
+    if (url === dataUrl) {
+      imageBadgeMap.delete(id)
+      editorRemoveBadge(editor.value, 'imageBadgeId', id)
+      break
+    }
+  }
+  userInput.value = serializeEditorContent()
+}
+
+// ============ 拖拽 & 粘贴 ============
+
+function isImagePath(path: string): boolean {
+  return /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?)$/i.test(path)
+}
+
+async function setupDragDropListener() {
+  try {
+    const webview = getCurrentWebviewWindow()
+    unlistenDragDrop = await webview.onDragDropEvent(async (event) => {
+      switch (event.payload.type) {
+        case 'enter':
+        case 'over':
+          isDragOver.value = true
+          break
+        case 'drop':
+          isDragOver.value = false
+          await handleDroppedPaths(event.payload.paths)
+          break
+        case 'leave':
+          isDragOver.value = false
+          break
+      }
+    })
+  }
+  catch (error) {
+    console.error('设置文件拖放监听器失败:', error)
+  }
+}
+
+async function handleDroppedPaths(paths: string[]) {
+  let hasChanges = false
+  for (const rawPath of paths) {
+    if (isImagePath(rawPath)) {
+      try {
+        const dataUrl: string = await invoke('read_image_file_as_data_url', { path: rawPath })
+        const name = rawPath.split(/[/\\]/).pop() || 'image'
+        if (addImageWithBadge(dataUrl, name)) {
+          message.success(`图片 ${name} 已添加`)
+          hasChanges = true
+        }
+      }
+      catch (error) {
+        console.error('读取图片失败:', error)
+        message.error(`图片读取失败: ${error}`)
+      }
+      continue
+    }
+
+    const hasExtension = /\.[^/\\]+$/.test(rawPath)
+    const ref: FileReferenceAttachment = {
+      type: 'path',
+      path: rawPath,
+      name: rawPath.split(/[/\\]/).pop() || rawPath,
+      kind: hasExtension ? 'file' : 'directory',
+    }
+
+    if (addFileReference(ref)) {
+      insertReferenceBadge(ref)
+      hasChanges = true
+    }
+  }
+  if (hasChanges) emitUpdate()
+}
+
+let _shiftHeld = false
+function _onGlobalKeyDown(e: KeyboardEvent) { if (e.key === 'Shift') _shiftHeld = true }
+function _onGlobalKeyUp(e: KeyboardEvent) { if (e.key === 'Shift') _shiftHeld = false }
+
+function handleEditorPaste(event: ClipboardEvent): boolean {
+  const clipboardData = event.clipboardData
+  if (!clipboardData) return false
+
+  const forcePlainText = _shiftHeld
+
+  if (!forcePlainText) {
+    let hasImage = false
+    const items = Array.from(clipboardData.items)
     for (const item of items) {
       if (item.type.includes('image')) {
         hasImage = true
         const file = item.getAsFile()
-        if (file) {
-          handleImageFiles([file])
-        }
+        if (file) handleImageFiles([file])
       }
     }
+    if (hasImage) return true
   }
 
-  if (hasImage) {
-    event.preventDefault()
+  const plainText = clipboardData.getData('text/plain') || ''
+
+  if (!forcePlainText && tryParsePasteAsReference(plainText)) return true
+
+  if (plainText && editor.value) {
+    const { state, view } = editor.value
+    view.dispatch(state.tr.insertText(plainText))
+    return true
   }
+
+  return false
 }
 
 // 处理增强入口点击
@@ -269,42 +624,22 @@ function handleEnhanceClick() {
 }
 
 async function handleImageFiles(files: FileList | File[]): Promise<void> {
-  console.log('=== 处理图片文件 ===')
-  console.log('文件数量:', files.length)
-
   for (const file of files) {
-    console.log('处理文件:', file.name, '类型:', file.type, '大小:', file.size)
+    if (!file.type.startsWith('image/')) continue
 
-    if (file.type.startsWith('image/')) {
-      try {
-        console.log('开始转换为 Base64...')
-        const base64 = await fileToBase64(file)
-        console.log('Base64转换成功，长度:', base64.length)
-
-        // 检查是否已存在相同图片，避免重复添加
-        if (!uploadedImages.value.includes(base64)) {
-          uploadedImages.value.push(base64)
-          console.log('图片已添加到数组，当前数量:', uploadedImages.value.length)
-          message.success(`图片 ${file.name} 已添加`)
-          emitUpdate()
-        }
-        else {
-          console.log('图片已存在，跳过:', file.name)
-          message.warning(`图片 ${file.name} 已存在`)
-        }
-      }
-      catch (error) {
-        console.error('图片处理失败:', error)
-        message.error(`图片 ${file.name} 处理失败`)
-        throw error
+    try {
+      const base64 = await fileToBase64(file)
+      const name = file.name || `粘贴图片-${uploadedImages.value.length + 1}`
+      if (addImageWithBadge(base64, name)) {
+        message.success(`图片 ${name} 已添加`)
+        emitUpdate()
       }
     }
-    else {
-      console.log('跳过非图片文件:', file.type)
+    catch (error) {
+      console.error('图片处理失败:', error)
+      message.error(`图片 ${file.name} 处理失败`)
     }
   }
-
-  console.log('=== 图片文件处理完成 ===')
 }
 
 function fileToBase64(file: File): Promise<string> {
@@ -317,7 +652,9 @@ function fileToBase64(file: File): Promise<string> {
 }
 
 function removeImage(index: number) {
+  const dataUrl = uploadedImages.value[index]
   uploadedImages.value.splice(index, 1)
+  if (dataUrl) removeImageBadgeByDataUrl(dataUrl)
   emit('imageRemove', index)
   emitUpdate()
 }
@@ -393,31 +730,24 @@ function handleQuoteMessage(messageContent: string) {
 
 // 插入prompt内容
 function insertPromptContent(content: string, mode: 'replace' | 'append' = 'replace') {
+  if (!editor.value) return
+
   if (mode === 'replace') {
-    userInput.value = content
+    editor.value.commands.clearContent()
+    referencedFiles.value = []
+    uploadedImages.value = []
+    imageBadgeMap.clear()
   }
   else {
-    userInput.value = userInput.value.trim() + (userInput.value.trim() ? '\n\n' : '') + content
+    editor.value.commands.focus('end')
+    const currentText = serializeEditorContent().trim()
+    if (currentText) editor.value.commands.insertContent('\n\n')
   }
 
-  // 聚焦到输入框
-  setTimeout(() => {
-    if (textareaRef.value) {
-      textareaRef.value.focus()
-      // 尝试将光标移到末尾（对于Naive UI组件）
-      try {
-        const inputElement = textareaRef.value.$el?.querySelector('textarea') || textareaRef.value.inputElRef
-        if (inputElement && typeof inputElement.setSelectionRange === 'function') {
-          inputElement.setSelectionRange(inputElement.value.length, inputElement.value.length)
-        }
-      }
-      catch (error) {
-        console.log('设置光标位置失败:', error)
-      }
-    }
-  }, 100)
-
+  editor.value.commands.insertContent(content)
+  userInput.value = serializeEditorContent()
   emitUpdate()
+  setTimeout(() => editor.value?.commands.focus(), 100)
 }
 
 // 处理插入模式选择
@@ -543,34 +873,18 @@ async function savePromptOrder() {
   }
 }
 
-// 监听用户输入变化
-watch(userInput, () => {
-  emitUpdate()
-})
-
-// 移除拖拽相关的监听器
+// userInput 由 TipTap onUpdate 回调驱动，各入口已显式调用 emitUpdate
 
 // 事件监听器引用
 let unlistenCustomPromptUpdate: (() => void) | null = null
 let unlistenWindowMove: (() => void) | null = null
+let unlistenDragDrop: (() => void) | null = null
 
-// 修复输入法候选框位置的函数
 function fixIMEPosition() {
-  if (textareaRef.value) {
-    try {
-      // 获取实际的 textarea 元素（Naive UI 的 n-input）
-      const inputElement = (textareaRef.value as any).$el?.querySelector('textarea') || (textareaRef.value as any).inputElRef
-      if (inputElement && document.activeElement === inputElement) {
-        // 先失焦再聚焦，让输入法重新计算位置
-        inputElement.blur()
-        setTimeout(() => {
-          inputElement.focus()
-        }, 10)
-      }
-    }
-    catch (error) {
-      console.debug('修复IME位置失败:', error)
-    }
+  const el = editor.value?.view.dom
+  if (el && document.activeElement === el) {
+    el.blur()
+    setTimeout(() => editor.value?.commands.focus(), 10)
   }
 }
 
@@ -590,6 +904,52 @@ async function setupWindowMoveListener() {
   }
 }
 
+// ============ TipTap Editor ============
+
+const editor = useEditor({
+  extensions: [
+    StarterKit.configure({
+      heading: false,
+      blockquote: false,
+      codeBlock: false,
+      bulletList: false,
+      orderedList: false,
+      listItem: false,
+      horizontalRule: false,
+      bold: false,
+      italic: false,
+      strike: false,
+      code: false,
+    }),
+    InlineBadge,
+  ],
+  content: '',
+  editable: !props.submitting,
+  editorProps: {
+    attributes: {
+      'data-guide': 'popup-input',
+    },
+    handlePaste: (_view, event) => {
+      return handleEditorPaste(event)
+    },
+  },
+  onUpdate: () => {
+    syncFromEditor()
+  },
+})
+
+const isEditorEmpty = computed(() => !editor.value || editor.value.isEmpty)
+
+const placeholderText = computed(() => {
+  return hasOptions.value
+    ? `您可以在这里添加补充说明... (支持粘贴图片 ${pasteShortcut.value}、拖拽文件/文件夹、粘贴路径或 URL)`
+    : `请输入您的回复... (支持粘贴图片 ${pasteShortcut.value}、拖拽文件/文件夹、粘贴路径或 URL)`
+})
+
+watch(() => props.submitting, (val) => {
+  editor.value?.setEditable(!val)
+})
+
 // 组件挂载时加载自定义prompt
 onMounted(async () => {
   console.log('组件挂载，开始加载prompt')
@@ -605,6 +965,11 @@ onMounted(async () => {
   })
   // 设置窗口移动监听器
   setupWindowMoveListener()
+  // 设置文件拖放监听器（Tauri 原生）
+  setupDragDropListener()
+
+  window.addEventListener('keydown', _onGlobalKeyDown, true)
+  window.addEventListener('keyup', _onGlobalKeyUp, true)
 })
 
 onUnmounted(() => {
@@ -616,22 +981,33 @@ onUnmounted(() => {
   if (unlistenWindowMove) {
     unlistenWindowMove()
   }
+  // 清理文件拖放监听器
+  if (unlistenDragDrop) {
+    unlistenDragDrop()
+  }
 
   // 停止拖拽功能
   stop()
+
+  window.removeEventListener('keydown', _onGlobalKeyDown, true)
+  window.removeEventListener('keyup', _onGlobalKeyUp, true)
 })
 
-// 重置数据
 function reset() {
+  editor.value?.commands.clearContent()
   userInput.value = ''
   selectedOptions.value = []
   uploadedImages.value = []
+  referencedFiles.value = []
+  imageBadgeMap.clear()
+  imageBadgeArchive.clear()
+  nextImageBadgeId = 0
   emitUpdate()
 }
 
-// 更新数据（用于外部同步）
-function updateData(data: { userInput?: string, selectedOptions?: string[], draggedImages?: string[] }) {
-  if (data.userInput !== undefined) {
+function updateData(data: { userInput?: string, selectedOptions?: string[], draggedImages?: string[], referencedFiles?: FileReferenceAttachment[] }) {
+  if (data.userInput !== undefined && editor.value) {
+    editor.value.commands.setContent(data.userInput)
     userInput.value = data.userInput
   }
   if (data.selectedOptions !== undefined) {
@@ -640,8 +1016,25 @@ function updateData(data: { userInput?: string, selectedOptions?: string[], drag
   if (data.draggedImages !== undefined) {
     uploadedImages.value = data.draggedImages
   }
+  if (data.referencedFiles !== undefined) {
+    referencedFiles.value = data.referencedFiles
+    if (editor.value && data.referencedFiles.length > 0) {
+      for (const ref of data.referencedFiles) {
+        insertReferenceBadge(ref)
+      }
+    }
+  }
 
   emitUpdate()
+}
+
+// 中文注释：暴露原始输入与附加上下文，供本地增强链路精确组装提示词
+function getRawUserInput() {
+  return userInput.value
+}
+
+function getConditionalContext() {
+  return generateConditionalContent()
 }
 
 // 移除了文件选择和测试图片功能
@@ -650,9 +1043,12 @@ function updateData(data: { userInput?: string, selectedOptions?: string[], drag
 defineExpose({
   reset,
   canSubmit,
+  canEnhance,
   statusText,
   updateData,
   handleQuoteMessage,
+  getRawUserInput,
+  getConditionalContext,
 })
 </script>
 
@@ -835,46 +1231,44 @@ defineExpose({
           </div>
         </div>
 
-        <!-- 图片提示区域 -->
-        <div v-if="uploadedImages.length === 0" class="text-center">
-          <div class="text-xs text-on-surface-secondary">
-            💡 提示：可以在输入框中粘贴图片 ({{ pasteShortcut }})
-          </div>
-        </div>
-
         <!-- 提示词增强入口 -->
         <div class="flex items-center justify-between text-xs my-2">
           <div class="flex items-center gap-2 text-on-surface-secondary">
             <div class="i-carbon-magic-wand w-3 h-3 text-primary-500" />
-            <span>{{ enhanceEnabled ? '可一键增强当前提示词' : '提示词增强未启用' }}</span>
+            <span>{{ enhanceEnabled ? '将当前文本发送给本地 AI 做结构化增强' : '提示词增强未启用' }}</span>
           </div>
           <n-button
             size="tiny"
             :type="enhanceEnabled ? 'info' : 'warning'"
             secondary
-            :disabled="submitting || (enhanceEnabled && !canSubmit)"
+            :disabled="submitting || (enhanceEnabled && !canEnhance)"
             @click="handleEnhanceClick"
           >
             <template #icon>
               <div :class="enhanceEnabled ? 'i-carbon-magic-wand' : 'i-carbon-launch'" />
             </template>
-            {{ enhanceEnabled ? '增强提示词' : '启用增强' }}
+            {{ enhanceEnabled ? '本地增强' : '启用增强' }}
           </n-button>
         </div>
 
-        <!-- 文本输入框 -->
-        <n-input
-          ref="textareaRef"
-          v-model:value="userInput"
-          type="textarea"
-          size="small"
-          :placeholder="hasOptions ? `您可以在这里添加补充说明... (支持粘贴图片 ${pasteShortcut})` : `请输入您的回复... (支持粘贴图片 ${pasteShortcut})`"
-          :disabled="submitting"
-          :autosize="{ minRows: 3, maxRows: 6 }"
-          data-guide="popup-input"
-          class="shadow-sm"
-          @paste="handleImagePaste"
-        />
+        <!-- TipTap 输入框 -->
+        <div
+          class="popup-input-shell"
+          :class="{ 'popup-input-shell-dragover': isDragOver }"
+        >
+          <!-- 拖拽悬停提示 -->
+          <div v-if="isDragOver" class="popup-drag-overlay">
+            <div class="i-carbon-upload w-6 h-6 text-primary-400" />
+            <span class="text-xs text-primary-400">释放以添加引用</span>
+          </div>
+
+          <!-- placeholder 覆盖层 -->
+          <div v-if="isEditorEmpty" class="popup-placeholder">
+            {{ placeholderText }}
+          </div>
+
+          <EditorContent :editor="editor" />
+        </div>
       </div>
     </div>
 
@@ -925,5 +1319,209 @@ defineExpose({
 .sortable-drag {
   opacity: 0.8;
   transform: rotate(5deg);
+}
+
+/* TipTap 输入框 - 还原 n-input 视觉 */
+.popup-input-shell {
+  position: relative;
+  border: 1px solid var(--color-surface-300, #374151);
+  border-radius: 3px;
+  overflow: hidden;
+  background-color: var(--color-surface-100, #1f1f23);
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  transition: border-color 0.3s;
+}
+
+.popup-input-shell:hover {
+  border-color: var(--color-surface-400, #4b5563);
+}
+
+.popup-input-shell:focus-within {
+  border-color: #14b8a6;
+  background-color: rgba(20, 184, 166, 0.06);
+}
+
+.popup-input-shell-dragover {
+  border-color: #14b8a6;
+  background-color: rgba(20, 184, 166, 0.04);
+}
+
+.popup-drag-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  background: rgba(20, 184, 166, 0.08);
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.popup-placeholder {
+  position: absolute;
+  top: 4px;
+  left: 10px;
+  right: 10px;
+  color: var(--color-surface-500, #6b7280);
+  pointer-events: none;
+  font-size: 14px;
+  line-height: 1.6;
+  z-index: 1;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+:deep(.tiptap) {
+  width: 100%;
+  min-height: 80px;
+  max-height: 180px;
+  padding: 4px 10px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  outline: none;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--color-on-surface, #e5e7eb);
+  background: transparent;
+  border: none;
+  box-sizing: border-box;
+  word-break: break-word;
+  white-space: pre-wrap;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(120, 130, 150, 0.55) transparent;
+}
+
+:deep(.tiptap:focus) {
+  outline: none;
+}
+
+:deep(.tiptap p) {
+  margin: 0;
+}
+
+:deep(.tiptap ::selection) {
+  background: rgba(20, 184, 166, 0.3);
+}
+
+/* 内联引用 badge */
+:deep(.popup-inline-reference) {
+  display: inline-flex;
+  max-width: 15rem;
+  position: relative;
+  align-items: center;
+  gap: 0.25rem;
+  margin: 0 0.15rem;
+  padding: 0.1rem 0.35rem;
+  border: 1px solid var(--color-surface-300, #374151);
+  border-radius: 4px;
+  background: var(--color-surface-200, #27272a);
+  color: var(--color-on-surface, #e5e7eb);
+  vertical-align: middle;
+  user-select: none;
+  cursor: default;
+  font-size: 12px;
+  line-height: 1.2;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+:deep(.popup-inline-reference:hover) {
+  border-color: var(--color-surface-400, #4b5563);
+  background: var(--color-surface-300, #374151);
+}
+
+:deep(.popup-inline-reference-icon-slot) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  position: relative;
+}
+
+:deep(.popup-inline-reference-kind) {
+  width: 12px;
+  height: 12px;
+  color: var(--color-on-surface-secondary, #d1d5db);
+  transition: opacity 0.15s;
+}
+
+:deep(.popup-inline-reference-delete) {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  cursor: pointer;
+  pointer-events: auto;
+  color: var(--color-on-surface-secondary, #d1d5db);
+  transition: opacity 0.15s, color 0.15s;
+}
+
+:deep(.popup-inline-reference:hover .popup-inline-reference-kind) {
+  opacity: 0;
+}
+
+:deep(.popup-inline-reference:hover .popup-inline-reference-delete) {
+  opacity: 1;
+}
+
+:deep(.popup-inline-reference-delete:hover) {
+  color: #ef4444;
+}
+
+:deep(.popup-inline-reference-label) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+:deep(.popup-inline-reference-label.cursor-pointer:hover) {
+  text-decoration: underline;
+}
+
+:deep(.badge-popover) {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  padding: 2px;
+  border-radius: 6px;
+  border: 1px solid var(--color-surface-300, #374151);
+  background: var(--color-surface-200, #1e1e2e);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 100;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+:deep(.badge-popover-item) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--color-on-surface, #e5e7eb);
+  transition: background 0.15s;
+}
+
+:deep(.badge-popover-item:hover) {
+  background: var(--color-surface-300, #374151);
+}
+
+:deep(.badge-popover-divider) {
+  width: 1px;
+  height: 14px;
+  background: var(--color-surface-300, #374151);
+  flex-shrink: 0;
 }
 </style>

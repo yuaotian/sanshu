@@ -8,6 +8,7 @@ interface Props {
   loading?: boolean
   submitting?: boolean
   canSubmit?: boolean
+  canEnhance?: boolean
   connectionStatus?: string
   continueReplyEnabled?: boolean
   inputStatusText?: string
@@ -25,6 +26,7 @@ const props = withDefaults(defineProps<Props>(), {
   loading: false,
   submitting: false,
   canSubmit: false,
+  canEnhance: false,
   connectionStatus: '已连接',
   continueReplyEnabled: true,
   inputStatusText: '',
@@ -72,7 +74,7 @@ useQuickSubmitShortcut(() => {
 })
 
 useEnhanceShortcut(() => {
-  if (!props.submitting) {
+  if (!props.submitting && props.canEnhance) {
     handleEnhance()
   }
 })
@@ -97,7 +99,7 @@ function handleContinue() {
 
 function handleEnhance() {
   if (!props.submitting) {
-    if (props.enhanceEnabled) {
+    if (props.enhanceEnabled && props.canEnhance) {
       emit('enhance')
     }
     else {
@@ -132,7 +134,7 @@ onMounted(() => {
           <n-tooltip v-if="enhanceEnabled" trigger="hover" placement="top">
             <template #trigger>
               <n-button
-                :disabled="!canSubmit || submitting"
+                :disabled="!canEnhance || submitting"
                 size="medium"
                 type="info"
                 data-guide="enhance-button"
@@ -141,10 +143,10 @@ onMounted(() => {
                 <template #icon>
                   <div class="i-carbon-magic-wand w-4 h-4" />
                 </template>
-                增强提示词
+                本地增强
               </n-button>
             </template>
-            {{ enhanceShortcutText }}
+            {{ canEnhance ? enhanceShortcutText : '请先输入要增强的文本' }}
           </n-tooltip>
           <n-tooltip v-else trigger="hover" placement="top">
             <template #trigger>

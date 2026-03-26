@@ -286,7 +286,8 @@ async fn handle_send_pressed(
     let response = build_send_response(
         user_input_option,
         selected_list.clone(),
-        vec![], // 无GUI模式下没有图片
+        vec![],
+        vec![],
         Some(request.id.clone()),
         "telegram",
     );

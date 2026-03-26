@@ -152,7 +152,6 @@ pub struct McpConfig {
     pub icon_cache_expiry_minutes: Option<u64>,
 }
 
-
 // 自定义prompt结构
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CustomPrompt {
@@ -553,8 +552,6 @@ pub fn default_prompt_state() -> bool {
     false
 }
 
-
-
 // 自定义prompt默认值函数
 pub fn default_custom_prompts() -> Vec<CustomPrompt> {
     vec![
@@ -739,36 +736,6 @@ pub fn default_custom_prompts() -> Vec<CustomPrompt> {
             current_state: true, // 默认开启（与 TOOL_CONTEXT7 默认状态保持一致）
             linked_mcp_tool: Some("context7".to_string()), // 关联到 context7 MCP 工具
         },
-        CustomPrompt {
-            id: "default_13".to_string(),
-            name: "是否使用 zhi 工具交互".to_string(),
-            content: "".to_string(),
-            description: Some("提醒 AI 使用 zhi 工具进行所有关键决策和交互".to_string()),
-            sort_order: 13,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            updated_at: chrono::Utc::now().to_rfc3339(),
-            r#type: "conditional".to_string(),
-            condition_text: Some("是否使用 zhi 工具交互".to_string()),
-            template_true: Some("✔️请记住，使用 zhi（三术）工具进行所有关键决策和交互".to_string()),
-            template_false: Some("".to_string()),
-            current_state: true, // 默认开启
-            linked_mcp_tool: None,
-        },
-        CustomPrompt {
-            id: "default_14".to_string(),
-            name: "是否遵循 rules/instructions".to_string(),
-            content: "".to_string(),
-            description: Some("提醒 AI 遵循 sanshu rules/instructions，未获用户明确结束指令前禁止收手".to_string()),
-            sort_order: 14,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            updated_at: chrono::Utc::now().to_rfc3339(),
-            r#type: "conditional".to_string(),
-            condition_text: Some("是否遵循 rules/instructions".to_string()),
-            template_true: Some("✔️请记住，遵循 sanshu rules/instructions，未获用户明确结束指令前禁止收手".to_string()),
-            template_false: Some("".to_string()),
-            current_state: true, // 默认开启
-            linked_mcp_tool: None,
-        },
     ]
 }
 
@@ -879,4 +846,3 @@ pub fn default_proxy_port() -> u16 {
 pub fn default_proxy_only_for_cn() -> bool {
     true // 默认仅在中国大陆地区使用代理
 }
-
