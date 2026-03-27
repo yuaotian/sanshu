@@ -8,5 +8,5 @@ pub mod commands;
 
 pub use geo::detect_geo_location;
 pub use proxy::{ProxyDetector, ProxyInfo};
-pub use client::{create_http_client, create_update_client, create_download_client};
+pub use client::create_http_client;
 

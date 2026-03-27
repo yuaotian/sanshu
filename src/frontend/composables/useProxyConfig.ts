@@ -37,6 +37,7 @@ export function useProxyConfig() {
 
   const isLoading = ref(false)
   const isTesting = ref(false)
+  const isDetecting = ref(false)
 
   /**
    * 获取代理配置
@@ -106,7 +107,7 @@ export function useProxyConfig() {
    */
   async function detectAvailableProxy(): Promise<ProxyInfo | null> {
     try {
-      isTesting.value = true
+      isDetecting.value = true
       const result = await invoke<ProxyInfo | null>('detect_available_proxy')
       return result
     }
@@ -115,7 +116,7 @@ export function useProxyConfig() {
       return null
     }
     finally {
-      isTesting.value = false
+      isDetecting.value = false
     }
   }
 
@@ -134,6 +135,7 @@ export function useProxyConfig() {
     proxyConfig,
     isLoading,
     isTesting,
+    isDetecting,
     getProxyConfig,
     saveProxyConfig,
     testProxyConnection,

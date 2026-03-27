@@ -13,7 +13,7 @@ body = """
 ### {{ group }}
 
 {% for commit in commits -%}
-* {{ commit.message | split(pat=":") | last | trim | upper_first }} by [@{{ commit.author.name }}](https://github.com/{{ commit.author.name }}) in [{{ commit.id | truncate(length=7, end="") }}](https://github.com/yuaotian/sanshu/commit/{{ commit.id }})
+* {{ commit.message | split(pat=":") | last | trim | upper_first }} by [@{{ commit.author.name }}](https://github.com/{{ commit.author.name }}) in [{{ commit.id | truncate(length=7, end="") }}](https://github.com/yueby/sanshu/commit/{{ commit.id }})
 {% endfor %}
 {% endfor -%}
 """
@@ -62,7 +62,7 @@ commit_preprocessors = [
 
 # 链接解析器 - 自动识别 issue 和 PR 链接
 link_parsers = [
-  { pattern = "#(\\d+)", href = "https://github.com/yuaotian/sanshu/issues/$1" },
+  { pattern = "#(\\d+)", href = "https://github.com/yueby/sanshu/issues/$1" },
   { pattern = "\\[([^\\]]+)\\]\\(([^)]+)\\)", text = "$1", href = "$2" },
 ]
 
@@ -82,5 +82,5 @@ topo_order = false
 sort_commits = "newest"
 
 [remote.github]
-owner = "yuaotian"
+owner = "yueby"
 repo = "sanshu"

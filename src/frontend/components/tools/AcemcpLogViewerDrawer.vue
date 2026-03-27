@@ -195,12 +195,12 @@ const targetOptions = computed(() => {
 })
 
 const parentRef = ref<HTMLElement | null>(null)
-const rowVirtualizer = useVirtualizer({
-  count: () => filteredItems.value.length,
+const rowVirtualizer = useVirtualizer(computed(() => ({
+  count: filteredItems.value.length,
   getScrollElement: () => parentRef.value,
   estimateSize: () => 24,
   overscan: 24,
-})
+})))
 
 const virtualRows = computed(() => rowVirtualizer.value.getVirtualItems())
 const totalSize = computed(() => rowVirtualizer.value.getTotalSize())
@@ -504,7 +504,7 @@ onBeforeUnmount(async () => {
           <div class="relative w-full" :style="{ height: `${totalSize}px` }">
             <div
               v-for="v in virtualRows"
-              :key="v.key"
+              :key="v.key as string | number"
               class="absolute left-0 w-full"
               :style="{ transform: `translateY(${v.start}px)` }"
             >

@@ -1,64 +1,28 @@
 <script setup lang="ts">
+import { invoke } from '@tauri-apps/api/core'
 import { NSpace, NTag, useMessage } from 'naive-ui'
-import { computed, onMounted } from 'vue'
-import { useVersionCheck } from '../../composables/useVersionCheck'
+import { onMounted, ref } from 'vue'
 
 const message = useMessage()
-const { versionInfo, manualCheckUpdate, safeOpenUrl, lastCheckTime, isChecking, getVersionInfo } = useVersionCheck()
+const currentVersion = ref('')
 
-// 格式化最后检查时间
-const formattedLastCheckTime = computed(() => {
-  return lastCheckTime.value ? lastCheckTime.value.toLocaleString('zh-CN') : ''
-})
-
-// 安全打开GitHub链接
 async function openGitHub() {
   try {
-    await safeOpenUrl('https://github.com/yuaotian/sanshu')
+    await invoke('open_external_url', { url: 'https://github.com/yueby/sanshu' })
     message.success('正在打开GitHub页面...')
   }
   catch (error) {
-    const errorMsg = error instanceof Error ? error.message : '打开GitHub失败，请手动访问'
-    if (errorMsg.includes('已复制到剪贴板')) {
-      message.warning(errorMsg)
-    }
-    else {
-      message.error(errorMsg)
-    }
+    message.error(error instanceof Error ? error.message : '打开GitHub失败')
   }
 }
 
-// 安全打开GitHub Star页面
 async function openGitHubStars() {
   try {
-    await safeOpenUrl('https://github.com/yuaotian/sanshu/stargazers')
+    await invoke('open_external_url', { url: 'https://github.com/yueby/sanshu/stargazers' })
     message.success('正在打开Star页面...')
   }
   catch (error) {
-    const errorMsg = error instanceof Error ? error.message : '打开Star页面失败，请手动访问'
-    if (errorMsg.includes('已复制到剪贴板')) {
-      message.warning(errorMsg)
-    }
-    else {
-      message.error(errorMsg)
-    }
-  }
-}
-
-// 检查版本更新
-async function checkVersion() {
-  try {
-    const info = await manualCheckUpdate()
-    if (info?.hasUpdate) {
-      message.info(`发现新版本 v${info.latest}！`)
-    }
-    else {
-      message.success('当前已是最新版本')
-    }
-  }
-  catch (error) {
-    console.error('检查版本失败:', error)
-    message.error('检查版本失败，请稍后重试')
+    message.error(error instanceof Error ? error.message : '打开Star页面失败')
   }
 }
 
@@ -96,14 +60,12 @@ const features = [
   },
 ]
 
-// 组件挂载时初始化版本信息
 onMounted(async () => {
   try {
-    await getVersionInfo()
+    const version = await invoke('get_current_version') as string
+    if (version) currentVersion.value = version
   }
-  catch (error) {
-    console.error('初始化版本信息失败:', error)
-  }
+  catch { /* use default */ }
 })
 </script>
 
@@ -121,7 +83,7 @@ onMounted(async () => {
         </div>
         <div>
           <h3 class="font-semibold text-gray-900 dark:text-white text-sm">
-            三术 {{ versionInfo ? `v${versionInfo.current}` : 'v0.2.0' }}
+            三术 {{ currentVersion ? `v${currentVersion}` : '' }}
           </h3>
           <p class="text-xs text-gray-500 dark:text-gray-400">
             智能代码审查工具，支持MCP协议集成
@@ -129,28 +91,6 @@ onMounted(async () => {
         </div>
       </div>
 
-      <!-- 右侧：版本检查区域 -->
-      <div class="flex flex-col items-end gap-1">
-        <n-button
-          size="medium"
-          secondary
-          :loading="isChecking"
-          @click="checkVersion"
-        >
-          <template #icon>
-            <div class="i-carbon-renew text-green-600 dark:text-green-400" />
-          </template>
-          检查更新
-        </n-button>
-
-        <!-- 最后检查时间 -->
-        <div
-          v-if="formattedLastCheckTime"
-          class="text-xs text-gray-400 dark:text-gray-500"
-        >
-          最后检查: {{ formattedLastCheckTime }}
-        </div>
-      </div>
     </div>
 
     <!-- 功能亮点标签云 -->
@@ -177,7 +117,7 @@ onMounted(async () => {
     <div class="flex items-center justify-between border-t border-gray-100 dark:border-gray-700 pt-2">
       <div class="flex items-center gap-1">
         <n-button
-          size="medium"
+          size="small"
           type="primary"
           @click="openGitHub"
         >
@@ -188,7 +128,7 @@ onMounted(async () => {
         </n-button>
 
         <n-button
-          size="medium"
+          size="small"
           secondary
           @click="openGitHubStars"
         >

@@ -1,10 +1,10 @@
 import {
-  defineConfig,
-  presetAttributify,
-  presetIcons,
-  presetTypography,
-  presetWebFonts,
-  presetWind3,
+    defineConfig,
+    presetAttributify,
+    presetIcons,
+    presetTypography,
+    presetWebFonts,
+    presetWind3,
 } from 'unocss'
 import { semanticColors } from './src/frontend/theme/colors'
 
@@ -57,6 +57,16 @@ export default defineConfig({
       ...semanticColors,
       // 添加表面色的直接映射
       surface: 'var(--color-surface)',
+      // 语义化文字/容器色 - 通过 CSS 变量适配主题
+      'on-surface': {
+        DEFAULT: 'var(--color-on-surface)',
+        secondary: 'var(--color-on-surface-secondary)',
+        muted: 'var(--color-on-surface-muted)',
+      },
+      'container': {
+        DEFAULT: 'var(--color-container)',
+        secondary: 'var(--color-container-secondary)',
+      },
     },
     fontSize: {
       'xs': 'var(--font-size-xs, 0.75rem)',

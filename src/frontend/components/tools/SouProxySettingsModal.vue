@@ -10,6 +10,8 @@ import { listen } from '@tauri-apps/api/event';
 import { useDialog, useMessage } from 'naive-ui';
 import { computed, onUnmounted, ref } from 'vue';
 
+import AppModal from '../common/AppModal.vue';
+
 // Props
 const props = defineProps<{
   show: boolean
@@ -702,15 +704,26 @@ function calcDiff(proxyMs: number | null, directMs: number | null): string {
   return '0%'
 }
 
-// 获取差异颜色类名（主题适配）
-function getDiffColorClass(proxyMs: number | null, directMs: number | null): string {
+function getDiffTagType(proxyMs: number | null, directMs: number | null): 'default' | 'success' | 'error' {
   if (proxyMs === null || directMs === null)
-    return 'bg-gray-100 dark:bg-gray-800 text-gray-500'
+    return 'default'
+  if (directMs === 0)
+    return 'default'
   if (proxyMs < directMs)
-    return 'bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400'
+    return 'success'
   if (proxyMs > directMs)
-    return 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400'
-  return 'bg-gray-100 dark:bg-gray-800 text-gray-500'
+    return 'error'
+  return 'default'
+}
+
+function proxyResponseTagType(ms: number | null | undefined): 'success' | 'warning' | 'default' {
+  if (ms == null || ms < 0)
+    return 'default'
+  if (ms < 100)
+    return 'success'
+  if (ms < 300)
+    return 'warning'
+  return 'default'
 }
 
 // 获取进度步骤状态（用于步骤指示器）
@@ -779,154 +792,169 @@ function formatRelativeTime(timeStr: string | null): string {
 </script>
 
 <template>
-  <n-modal
+  <AppModal
     v-model:show="showModal"
-    class="custom-modal"
-    preset="card"
     title="代理设置与网络诊断"
-    :style="{ width: '900px', maxWidth: '95vw' }"
-    :bordered="false"
-    size="medium"
+    width="760px"
+    body-overflow="hidden"
     role="dialog"
     aria-modal="true"
   >
-    <div class="modal-content-wrapper">
-      <!-- 顶部状态栏 -->
-      <div class="mb-5 p-4 rounded-xl bg-gradient-to-r from-slate-50 to-slate-100 dark:from-slate-800 dark:to-slate-900/50 border border-slate-200 dark:border-slate-700 flex items-center justify-between">
-        <div class="flex items-center gap-4">
-          <div class="p-2 rounded-lg bg-blue-500/10 text-blue-600 dark:text-blue-400">
-            <div class="i-fa6-solid-network-wired text-2xl" />
-          </div>
-          <div>
-            <div class="font-medium text-base mb-1">
-              启用代理服务
-            </div>
-            <div class="text-xs text-gray-500 text-gray-400">
-              启用后，所有 ACE API 请求将通过此代理。
-              <div v-if="!config.proxy_enabled" class="inline-block mt-1 px-1.5 py-0.5 rounded bg-orange-50 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400 text-[10px]">
-                当前直接连接
+    <div class="max-h-[calc(85vh-120px)] overflow-y-auto">
+      <n-card size="small" class="mb-5">
+        <div class="flex items-center justify-between gap-4">
+          <div class="flex items-center gap-4 min-w-0">
+            <div class="i-fa6-solid-network-wired text-2xl text-primary flex-shrink-0" />
+            <div class="min-w-0">
+              <div class="font-medium text-base mb-1 text-on-surface">
+                启用代理服务
               </div>
-              <div v-else class="inline-block mt-1 px-1.5 py-0.5 rounded bg-green-50 dark:bg-green-900/30 text-green-600 dark:text-green-400 text-[10px]">
-                代理已启用 ({{ config.proxy_type.toUpperCase() }}://{{ config.proxy_host }}:{{ config.proxy_port }})
+              <div class="text-xs text-on-surface-muted flex flex-col gap-1">
+                <span>启用后，所有 ACE API 请求将通过此代理。</span>
+                <n-tag v-if="!config.proxy_enabled" size="small" type="warning">
+                  当前直接连接
+                </n-tag>
+                <n-tag v-else size="small" type="success">
+                  代理已启用 ({{ config.proxy_type.toUpperCase() }}://{{ config.proxy_host }}:{{ config.proxy_port }})
+                </n-tag>
               </div>
             </div>
           </div>
+          <n-switch v-model:value="config.proxy_enabled" size="small" class="flex-shrink-0">
+            <template #checked>
+              开启
+            </template>
+            <template #unchecked>
+              关闭
+            </template>
+          </n-switch>
         </div>
-        <n-switch v-model:value="config.proxy_enabled" size="large">
-          <template #checked>
-            开启
-          </template>
-          <template #unchecked>
-            关闭
-          </template>
-        </n-switch>
-      </div>
+      </n-card>
 
       <n-tabs type="segment" animated>
         <!-- Tab 1: 代理配置 -->
         <n-tab-pane name="config" tab="配置参数">
-          <n-space vertical size="large" class="pt-2">
+          <n-space vertical size="medium" class="pt-2">
             <!-- 代理表单 -->
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
               <!-- 基础信息 -->
               <div class="md:col-span-2">
-                <div class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
+                <div class="text-xs font-semibold text-on-surface-muted uppercase tracking-wider mb-2">
                   基础连接
                 </div>
                 <div class="grid grid-cols-12 gap-3">
                   <div class="col-span-12 md:col-span-5">
-                    <n-form-item label="Host (地址)" size="small">
-                      <n-input v-model:value="config.proxy_host" placeholder="127.0.0.1" clearable />
-                    </n-form-item>
+                    <div>
+                      <div class="text-xs text-on-surface-secondary mb-1">
+                        Host (地址)
+                      </div>
+                      <n-input v-model:value="config.proxy_host" size="small" placeholder="127.0.0.1" clearable />
+                    </div>
                   </div>
                   <div class="col-span-12 md:col-span-3">
-                    <n-form-item label="Port (端口)" size="small">
-                      <n-input-number v-model:value="config.proxy_port" :min="1" :max="65535" class="w-full" :show-button="false" />
-                    </n-form-item>
+                    <div>
+                      <div class="text-xs text-on-surface-secondary mb-1">
+                        Port (端口)
+                      </div>
+                      <n-input-number v-model:value="config.proxy_port" size="small" :min="1" :max="65535" class="w-full" :show-button="false" />
+                    </div>
                   </div>
                   <div class="col-span-12 md:col-span-4">
-                    <n-form-item label="Type (类型)" size="small">
-                      <n-select v-model:value="config.proxy_type" :options="[{ label: 'HTTP', value: 'http' }, { label: 'HTTPS', value: 'https' }, { label: 'SOCKS5', value: 'socks5' }]" />
-                    </n-form-item>
+                    <div>
+                      <div class="text-xs text-on-surface-secondary mb-1">
+                        Type (类型)
+                      </div>
+                      <n-select v-model:value="config.proxy_type" size="small" :options="[{ label: 'HTTP', value: 'http' }, { label: 'HTTPS', value: 'https' }, { label: 'SOCKS5', value: 'socks5' }]" />
+                    </div>
                   </div>
                 </div>
               </div>
 
               <!-- 认证信息 -->
               <div class="md:col-span-2">
-                <div class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2 mt-2">
+                <div class="text-xs font-semibold text-on-surface-muted uppercase tracking-wider mb-2 mt-2">
                   身份认证 (可选)
                 </div>
                 <div class="grid grid-cols-12 gap-3">
                   <div class="col-span-12 md:col-span-6">
-                    <n-form-item label="用户名" size="small">
-                      <n-input v-model:value="config.proxy_username" placeholder="无" clearable />
-                    </n-form-item>
+                    <div>
+                      <div class="text-xs text-on-surface-secondary mb-1">
+                        用户名
+                      </div>
+                      <n-input v-model:value="config.proxy_username" size="small" placeholder="无" clearable />
+                    </div>
                   </div>
                   <div class="col-span-12 md:col-span-6">
-                    <n-form-item label="密码" size="small">
-                      <n-input v-model:value="config.proxy_password" type="password" show-password-on="click" placeholder="无" clearable />
-                    </n-form-item>
+                    <div>
+                      <div class="text-xs text-on-surface-secondary mb-1">
+                        密码
+                      </div>
+                      <n-input v-model:value="config.proxy_password" size="small" type="password" show-password-on="click" placeholder="无" clearable />
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
 
-            <!-- 检测区域 -->
-            <div class="p-4 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/30">
-              <div class="flex items-center justify-between mb-3">
-                <div class="flex flex-col">
-                  <div class="text-sm font-medium">
-                    自动检测本地代理
+            <n-card size="small">
+              <template #header>
+                <div class="flex items-center justify-between gap-3 w-full">
+                  <div class="min-w-0">
+                    <div class="text-sm font-medium text-on-surface">
+                      自动检测本地代理
+                    </div>
+                    <div class="text-xs text-on-surface-muted">
+                      自动扫描常用端口和进程
+                    </div>
                   </div>
-                  <div class="text-xs text-gray-500">
-                    自动扫描常用端口和进程
-                  </div>
+                  <n-button secondary size="small" :loading="proxyDetecting" class="flex-shrink-0" @click="detectProxy">
+                    <template #icon>
+                      <div class="i-fa6-solid-satellite-dish" />
+                    </template>
+                    开始检测
+                  </n-button>
                 </div>
-                <n-button secondary size="small" :loading="proxyDetecting" @click="detectProxy">
-                  <template #icon>
-                    <div class="i-fa6-solid-satellite-dish" />
-                  </template>
-                  开始检测
-                </n-button>
+              </template>
+              <div>
+                <div class="text-xs text-on-surface-secondary mb-1">
+                  额外扫描端口 (可选)
+                </div>
+                <n-input v-model:value="extraDetectPortsText" size="small" placeholder="8888, 8081" class="max-w-[300px]" />
               </div>
-
-              <n-form-item label="额外扫描端口 (可选)" label-placement="left" size="small" :show-feedback="false">
-                <n-input v-model:value="extraDetectPortsText" placeholder="8888, 8081" class="max-w-[300px]" />
-              </n-form-item>
-
-              <!-- 检测结果展示 -->
               <n-collapse-transition :show="detectedProxies.length > 0">
-                <div class="mt-3 flex flex-wrap gap-2">
-                  <div
-                    v-for="(p, idx) in detectedProxies" :key="idx"
-                    class="px-3 py-1.5 rounded-full text-xs font-mono cursor-pointer border transition-colors flex items-center gap-2"
-                    :class="config.proxy_port === p.port ? 'bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-900/40 dark:text-blue-300 dark:border-blue-700' : 'bg-slate-50 text-gray-600 border-slate-200 hover:bg-slate-100 dark:bg-slate-800 text-gray-300 dark:border-slate-700'"
+                <n-space class="mt-3" size="small" wrap>
+                  <n-tag
+                    v-for="(p, idx) in detectedProxies"
+                    :key="idx"
+                    size="small"
+                    :type="config.proxy_port === p.port ? 'primary' : 'default'"
+                    class="font-mono cursor-pointer"
                     @click="applyProxy(p)"
                   >
-                    <span>{{ p.host }}:{{ p.port }}</span>
-                    <span class="opacity-70">{{ p.proxy_type.toUpperCase() }}</span>
-                    <span v-if="p.response_time_ms" class="px-1 rounded bg-black/10 dark:bg-white/20">{{ p.response_time_ms }}ms</span>
-                  </div>
-                </div>
+                    {{ p.host }}:{{ p.port }}
+                    <span class="opacity-70 ml-1">{{ p.proxy_type.toUpperCase() }}</span>
+                    <span v-if="p.response_time_ms" class="ml-1">{{ p.response_time_ms }}ms</span>
+                  </n-tag>
+                </n-space>
               </n-collapse-transition>
-            </div>
+            </n-card>
           </n-space>
         </n-tab-pane>
 
         <!-- Tab 2: 测速与诊断 - 左右分栏布局 -->
         <n-tab-pane name="speedtest" tab="网络测速与诊断">
-          <div class="grid grid-cols-12 gap-5 pt-2 min-h-[400px]">
+          <div class="grid grid-cols-12 gap-5 pt-2">
             <!-- 左侧：测试控制区 (40%) -->
             <div class="col-span-12 lg:col-span-5 space-y-5">
               <!-- 测试模式选择 -->
               <div class="space-y-2">
-                <div class="text-xs font-semibold text-gray-500 dropdown-label flex items-center gap-1">
+                <div class="text-xs font-semibold text-on-surface-muted dropdown-label flex items-center gap-1">
                   <div class="i-fa6-solid-gauge-high" />
                   测试模式
                 </div>
                 <n-select
                   v-model:value="speedTestMode"
+                  size="small"
                   :options="[
                     { label: '🔥 对比测试 (代理 vs 直连)', value: 'compare' },
                     { label: '🛡️ 仅代理模式', value: 'proxy' },
@@ -937,7 +965,7 @@ function formatRelativeTime(timeStr: string | null): string {
 
               <!-- 测试项目选择 (卡片式) -->
               <div class="space-y-2">
-                <div class="text-xs font-semibold text-gray-500 dropdown-label flex items-center justify-between">
+                <div class="text-xs font-semibold text-on-surface-muted dropdown-label flex items-center justify-between">
                   <div class="flex items-center gap-1">
                     <div class="i-fa6-solid-folder-tree" />
                     测试目标项目
@@ -947,57 +975,56 @@ function formatRelativeTime(timeStr: string | null): string {
                   </n-button>
                 </div>
 
-                <!-- 已选择状态 -->
-                <div
+                <n-card
                   v-if="currentProjectInfo"
-                  class="group relative overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-4 cursor-pointer transition-all hover:border-primary-400 hover:shadow-md"
+                  size="small"
+                  hoverable
+                  class="cursor-pointer"
                   @click="openProjectPicker"
                 >
-                  <div class="absolute top-0 right-0 p-2 opacity-10 group-hover:opacity-20 transition-opacity">
-                    <div class="i-fa6-solid-folder-open text-6xl text-primary-500" />
-                  </div>
-
-                  <div class="relative z-10 flex items-start gap-3">
-                    <div class="w-10 h-10 rounded-lg bg-primary-100 dark:bg-primary-900/40 flex items-center justify-center flex-shrink-0 text-primary-600 dark:text-primary-400">
-                      <div class="i-fa6-solid-code" />
-                    </div>
+                  <div class="flex items-start gap-3">
+                    <div class="i-fa6-solid-code text-xl text-primary flex-shrink-0 mt-0.5" />
                     <div class="flex-1 min-w-0">
-                      <div class="font-medium text-base text-gray-800 text-gray-100 truncate">
+                      <div class="font-medium text-base text-on-surface truncate">
                         {{ getProjectName(currentProjectInfo.project_root) }}
                       </div>
-                      <div class="text-xs text-gray-500 truncate font-mono mt-0.5" :title="currentProjectInfo.project_root">
+                      <div class="text-xs text-on-surface-muted truncate font-mono mt-0.5" :title="currentProjectInfo.project_root">
                         {{ normalizePathForDisplay(currentProjectInfo.project_root) }}
                       </div>
-                      <div class="flex items-center gap-3 mt-2 text-xs text-gray-400">
-                        <span class="flex items-center gap-1 bg-slate-100 dark:bg-slate-700/50 px-1.5 py-0.5 rounded">
-                          <div class="i-fa6-solid-file-lines text-[10px]" />
-                          {{ currentProjectInfo.total_files }} 文件
-                        </span>
-                        <span v-if="currentProjectInfo.last_success_time" class="flex items-center gap-1">
+                      <div class="flex items-center gap-3 mt-2 text-xs text-on-surface-muted flex-wrap">
+                        <n-tag size="tiny" :bordered="false">
+                          <span class="inline-flex items-center gap-1">
+                            <div class="i-fa6-solid-file-lines text-[10px]" />
+                            {{ currentProjectInfo.total_files }} 文件
+                          </span>
+                        </n-tag>
+                        <span v-if="currentProjectInfo.last_success_time" class="inline-flex items-center gap-1">
                           <div class="i-fa6-regular-clock text-[10px]" />
                           {{ formatRelativeTime(currentProjectInfo.last_success_time) }}
                         </span>
                       </div>
                     </div>
                   </div>
-                </div>
+                </n-card>
 
-                <!-- 未选择状态 -->
-                <div
+                <n-card
                   v-else
-                  class="border-2 border-dashed border-slate-300 dark:border-slate-600 hover:border-primary-400 dark:hover:border-primary-500 hover:bg-slate-50 dark:hover:bg-slate-800/50 rounded-xl p-6 flex flex-col items-center justify-center cursor-pointer transition-all text-gray-400 hover:text-primary-500 group"
+                  size="small"
+                  hoverable
+                  class="cursor-pointer"
                   @click="openProjectPicker"
                 >
-                  <div class="i-fa6-solid-folder-plus text-3xl mb-2 group-hover:scale-110 transition-transform" />
-                  <div class="text-sm font-medium">
-                    点击选择测试项目
-                  </div>
-                </div>
+                  <n-empty size="small" description="点击选择测试项目">
+                    <template #icon>
+                      <div class="i-fa6-solid-folder-plus text-3xl text-on-surface-muted" />
+                    </template>
+                  </n-empty>
+                </n-card>
               </div>
 
               <!-- 查询语句 -->
               <div class="space-y-2">
-                <div class="flex items-center justify-between text-xs font-semibold text-gray-500 dropdown-label">
+                <div class="flex items-center justify-between text-xs font-semibold text-on-surface-muted dropdown-label">
                   <div class="flex items-center gap-1">
                     <div class="i-fa6-solid-magnifying-glass" />
                     测试查询语句
@@ -1006,6 +1033,7 @@ function formatRelativeTime(timeStr: string | null): string {
                 </div>
                 <n-input
                   v-model:value="speedTestQuery"
+                  size="small"
                   type="textarea"
                   :rows="3"
                   placeholder="输入语义查询，如：'查找数据库连接配置'..."
@@ -1019,10 +1047,10 @@ function formatRelativeTime(timeStr: string | null): string {
                   <n-button
                     type="primary"
                     block
-                    size="large"
+                    size="small"
                     :loading="proxyTesting"
                     :disabled="speedTestDisabled"
-                    class="h-12 text-base font-medium shadow-lg shadow-primary-500/20"
+                    class="h-12 text-base font-medium"
                     @click="runSpeedTest"
                   >
                     <template #icon>
@@ -1037,8 +1065,8 @@ function formatRelativeTime(timeStr: string | null): string {
               <div v-if="proxyTesting" class="space-y-3">
                 <!-- 进度头部 -->
                 <div class="flex justify-between items-center text-xs">
-                  <span class="text-gray-500 font-medium">诊断进度</span>
-                  <span class="font-mono text-primary-600 text-primary-400">
+                  <span class="text-on-surface-muted font-medium">诊断进度</span>
+                  <span class="font-mono text-primary">
                     {{ speedTestProgressData?.percentage ?? 0 }}%
                   </span>
                 </div>
@@ -1053,48 +1081,49 @@ function formatRelativeTime(timeStr: string | null): string {
                   class="h-2"
                 />
                 
-                <!-- 当前阶段信息 -->
-                <div class="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3 space-y-1">
-                <div class="flex items-center gap-2 text-sm">
-                    <span 
-                      v-if="speedTestProgressData?.status === 'Running'" 
-                      class="i-fa6-solid-spinner animate-spin text-primary-500"
-                    />
-                    <span 
-                      v-else-if="speedTestProgressData?.status === 'Completed'" 
-                      class="i-fa6-solid-circle-check text-green-500"
-                    />
-                    <span 
-                      v-else-if="speedTestProgressData?.status === 'Failed'" 
-                      class="i-fa6-solid-circle-xmark text-red-500"
-                    />
-                    <span v-else class="i-fa6-regular-clock text-gray-400 dark:text-gray-500" />
-                    
-                    <span class="font-medium text-gray-700 text-gray-200">
-                      {{ speedTestProgressData?.stage_name ?? '初始化' }}
-                    </span>
-                    <span v-if="speedTestProgressData?.sub_step" class="text-gray-400">
-                      - {{ speedTestProgressData.sub_step }}
-                    </span>
+                <n-card size="small" embedded>
+                  <div class="space-y-1">
+                    <div class="flex items-center gap-2 text-sm">
+                      <span
+                        v-if="speedTestProgressData?.status === 'Running'"
+                        class="i-fa6-solid-spinner animate-spin text-primary"
+                      />
+                      <span
+                        v-else-if="speedTestProgressData?.status === 'Completed'"
+                        class="i-fa6-solid-circle-check text-success"
+                      />
+                      <span
+                        v-else-if="speedTestProgressData?.status === 'Failed'"
+                        class="i-fa6-solid-circle-xmark text-error"
+                      />
+                      <span v-else class="i-fa6-regular-clock text-on-surface-muted" />
+
+                      <span class="font-medium text-on-surface">
+                        {{ speedTestProgressData?.stage_name ?? '初始化' }}
+                      </span>
+                      <span v-if="speedTestProgressData?.sub_step" class="text-on-surface-muted">
+                        - {{ speedTestProgressData.sub_step }}
+                      </span>
+                    </div>
+
+                    <div v-if="speedTestProgressData?.detail" class="text-xs text-on-surface-muted pl-6">
+                      {{ speedTestProgressData.detail }}
+                    </div>
                   </div>
-                  
-                  <div v-if="speedTestProgressData?.detail" class="text-xs text-gray-500 dark:text-gray-400 pl-6">
-                    {{ speedTestProgressData.detail }}
-                  </div>
-                </div>
+                </n-card>
                 
                 <!-- 进度步骤指示器 -->
                 <div class="flex justify-between px-1">
-                  <div v-for="step in ['初始化', 'Ping', '搜索', '单文件', '项目', '报告']" :key="step" class="flex flex-col items-center">
-                    <div 
-                      :class="[
-                        'w-2 h-2 rounded-full transition-all',
-                        getStepStatus(step) === 'completed' ? 'bg-green-500 scale-125' :
-                        getStepStatus(step) === 'current' ? 'bg-primary-500 animate-pulse scale-110' :
-                        'bg-gray-300 dark:bg-gray-600'
-                      ]"
+                  <div v-for="step in ['初始化', 'Ping', '搜索', '单文件', '项目', '报告']" :key="step" class="flex flex-col items-center gap-1">
+                    <div
+                      class="i-fa6-solid-circle text-[8px] transition-all"
+                      :class="getStepStatus(step) === 'completed'
+                        ? 'text-success scale-125'
+                        : getStepStatus(step) === 'current'
+                          ? 'text-primary animate-pulse scale-110'
+                          : 'text-on-surface-muted opacity-40'"
                     />
-                    <span class="text-[10px] text-gray-400 mt-1">{{ step }}</span>
+                    <span class="text-[10px] text-on-surface-muted">{{ step }}</span>
                   </div>
                 </div>
               </div>
@@ -1102,161 +1131,159 @@ function formatRelativeTime(timeStr: string | null): string {
 
             <!-- 右侧：测试结果区 (60%) -->
             <div class="col-span-12 lg:col-span-7 h-full flex flex-col">
-              <!-- 无结果时的占位状态 -->
-              <div
+              <n-card
                 v-if="!speedTestResult && !proxyTesting"
-                class="flex-1 flex flex-col items-center justify-center p-8 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/20"
+                size="small"
+                class="flex-1 flex flex-col"
               >
-                <div class="relative mb-6">
-                  <div class="absolute inset-0 bg-blue-500/20 blur-xl rounded-full" />
-                  <div class="relative i-fa6-solid-chart-simple text-6xl text-slate-300 dark:text-slate-600" />
-                </div>
-                <div class="text-center max-w-xs">
-                  <div class="text-base font-medium text-slate-500 dark:text-slate-400 mb-2">
-                    准备就绪
-                  </div>
-                  <div class="text-xs text-slate-400">
-                    请在左侧配置测试参数，点击「开始网络诊断」获取详细的延迟与连通性分析报告。
-                  </div>
-                </div>
-              </div>
-
-              <!-- 加载骨架屏 -->
-              <div v-else-if="proxyTesting && !speedTestResult" class="space-y-4 p-4">
-                <div class="flex items-center gap-4 mb-6">
-                  <n-skeleton circle width="48px" height="48px" />
-                  <div class="flex-1 space-y-2">
-                    <n-skeleton height="20px" width="60%" />
-                    <n-skeleton height="14px" width="40%" />
-                  </div>
-                </div>
-                <div class="grid grid-cols-2 gap-4">
-                  <n-skeleton height="120px" :sharp="false" class="rounded-xl" />
-                  <n-skeleton height="120px" :sharp="false" class="rounded-xl" />
-                </div>
-                <n-skeleton height="200px" :sharp="false" class="rounded-xl mt-4" />
-              </div>
-
-              <!-- 测试结果展示 -->
-              <div v-if="speedTestResult" class="flex-1 flex flex-col bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl overflow-hidden shadow-sm">
-                <!-- 结果头部 Banner -->
-                <div class="relative overflow-hidden p-5 flex items-center justify-between border-b border-slate-100 dark:border-slate-700/50">
-                  <!-- 背景装饰 -->
-                  <div
-                    class="absolute inset-0 opacity-10 pointer-events-none"
-                    :class="speedTestResult.success ? 'bg-green-500' : 'bg-amber-500'"
-                  />
-
-                  <div class="relative flex items-center gap-4">
-                    <div
-                      class="w-12 h-12 rounded-full flex items-center justify-center shadow-sm text-2xl"
-                      :class="speedTestResult.success
-                        ? 'bg-green-100 dark:bg-green-500/20 text-green-600 dark:text-green-400'
-                        : 'bg-amber-100 dark:bg-amber-500/20 text-amber-600 dark:text-amber-400'"
-                    >
-                      <div :class="speedTestResult.success ? 'i-fa6-solid-check' : 'i-fa6-solid-triangle-exclamation'" />
-                    </div>
-                    <div>
-                      <div class="font-bold text-lg leading-none mb-1">
-                        {{ speedTestResult.success ? '测试通过' : '发现问题' }}
+                <div class="flex flex-col items-center justify-center py-8 px-4 flex-1">
+                  <n-empty>
+                    <template #icon>
+                      <div class="i-fa6-solid-chart-simple text-6xl text-on-surface-muted" />
+                    </template>
+                    <template #default>
+                      <div class="text-base font-medium text-on-surface-secondary mb-2">
+                        准备就绪
                       </div>
-                      <div class="text-xs text-gray-500 font-mono">
-                        TIME: {{ formatSpeedTestTime(speedTestResult.timestamp) }}
+                      <div class="text-xs text-on-surface-muted max-w-xs text-center">
+                        请在左侧配置测试参数，点击「开始网络诊断」获取详细的延迟与连通性分析报告。
                       </div>
+                    </template>
+                  </n-empty>
+                </div>
+              </n-card>
+
+              <n-card v-else-if="proxyTesting && !speedTestResult" size="small" class="flex-1">
+                <div class="space-y-4">
+                  <div class="flex items-center gap-4">
+                    <n-skeleton circle width="48px" height="48px" />
+                    <div class="flex-1 space-y-2">
+                      <n-skeleton height="20px" width="60%" />
+                      <n-skeleton height="14px" width="40%" />
                     </div>
                   </div>
-
-                  <div class="relative flex gap-2">
-                    <n-button size="small" secondary @click="copySpeedTestReport">
-                      复制报告
-                    </n-button>
-                    <n-button size="small" secondary @click="downloadSpeedTestReport">
-                      <template #icon>
-                        <div class="i-fa6-solid-download" />
-                      </template>
-                    </n-button>
+                  <div class="grid grid-cols-2 gap-4">
+                    <n-skeleton height="120px" :sharp="false" />
+                    <n-skeleton height="120px" :sharp="false" />
                   </div>
+                  <n-skeleton height="200px" :sharp="false" class="mt-4" />
                 </div>
+              </n-card>
 
-                <!-- Tabs 内容区 - 优化背景确保文字可读 -->
-                <n-tabs type="line" animated class="flex-1 flex flex-col results-tabs" pane-class="flex-1 p-4 overflow-y-auto max-h-[500px] bg-slate-50 dark:bg-slate-900/50">
+              <n-card v-if="speedTestResult" size="small" class="speed-test-tabs-host flex-1 flex flex-col overflow-hidden">
+                <template #header>
+                  <div class="flex items-center justify-between gap-3 w-full">
+                    <div class="flex items-center gap-4 min-w-0">
+                      <div
+                        class="text-2xl flex-shrink-0"
+                        :class="speedTestResult.success ? 'i-fa6-solid-check text-success' : 'i-fa6-solid-triangle-exclamation text-warning'"
+                      />
+                      <div class="min-w-0">
+                        <div class="font-bold text-lg leading-none mb-1 text-on-surface">
+                          {{ speedTestResult.success ? '测试通过' : '发现问题' }}
+                        </div>
+                        <div class="text-xs text-on-surface-muted font-mono">
+                          TIME: {{ formatSpeedTestTime(speedTestResult.timestamp) }}
+                        </div>
+                      </div>
+                    </div>
+                    <n-space class="flex-shrink-0" size="small">
+                      <n-button size="small" secondary @click="copySpeedTestReport">
+                        复制报告
+                      </n-button>
+                      <n-button size="small" secondary @click="downloadSpeedTestReport">
+                        <template #icon>
+                          <div class="i-fa6-solid-download" />
+                        </template>
+                      </n-button>
+                    </n-space>
+                  </div>
+                </template>
+
+                <n-tabs type="line" animated class="flex-1 flex flex-col results-tabs" pane-class="flex-1 p-4 overflow-y-auto max-h-[500px]">
                   <!-- Tab 1: 核心指标 -->
                   <n-tab-pane name="overview" tab="📊 核心指标">
                     <div class="space-y-4">
-                      <!-- 建议 Box -->
-                      <div v-if="speedTestResult.recommendation" class="flex gap-3 p-4 rounded-xl bg-slate-50 dark:bg-slate-700/30 border border-slate-100 dark:border-slate-700">
-                        <div class="i-fa6-solid-wand-magic-sparkles text-purple-500 mt-1" />
-                        <div class="text-sm text-gray-700 text-gray-200">
-                          <span class="font-bold block mb-1">智能诊断建议</span>
-                          {{ speedTestResult.recommendation }}
-                        </div>
-                      </div>
+                      <n-alert
+                        v-if="speedTestResult.recommendation"
+                        type="info"
+                        title="智能诊断建议"
+                        :show-icon="true"
+                      >
+                        <template #icon>
+                          <div class="i-fa6-solid-wand-magic-sparkles text-primary" />
+                        </template>
+                        {{ speedTestResult.recommendation }}
+                      </n-alert>
 
-                      <!-- 指标卡片网格 -->
                       <div class="grid grid-cols-2 gap-4">
-                        <div
+                        <n-card
                           v-for="(metric, idx) in speedTestMetricsForDisplay"
                           :key="idx"
-                          class="group relative p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-blue-400 transition-all duration-200 shadow-sm"
+                          size="small"
+                          hoverable
                         >
-                          <!-- 标题 - 使用高对比度颜色确保文字清晰 -->
                           <div class="flex justify-between items-start mb-4">
-                            <span class="font-semibold text-sm text-gray-800 text-gray-100">{{ metric.name }}</span>
-                            <div v-if="metric.success" class="i-fa6-solid-circle-check text-green-500" />
-                            <div v-else class="i-fa6-solid-circle-xmark text-red-500" />
+                            <span class="font-semibold text-sm text-on-surface">{{ metric.name }}</span>
+                            <div v-if="metric.success" class="i-fa6-solid-circle-check text-success" />
+                            <div v-else class="i-fa6-solid-circle-xmark text-error" />
                           </div>
 
-                          <!-- 数据 -->
                           <div class="flex items-end justify-between font-mono text-sm">
                             <div v-if="speedTestResult.mode !== 'direct'" class="flex-1">
-                              <div class="text-xs text-gray-400 mb-1">
+                              <div class="text-xs text-on-surface-muted mb-1">
                                 Proxy
                               </div>
-                              <div class="text-xl font-bold" :class="metric.proxy_time_ms ? 'text-blue-600 dark:text-blue-400' : 'text-gray-300'">
-                                {{ metric.proxy_time_ms ?? '-' }}<span class="text-xs font-normal text-gray-400">ms</span>
+                              <div class="text-xl font-bold" :class="metric.proxy_time_ms ? 'text-info' : 'text-on-surface-muted'">
+                                {{ metric.proxy_time_ms ?? '-' }}<span class="text-xs font-normal text-on-surface-muted">ms</span>
                               </div>
                             </div>
 
                             <div v-if="speedTestResult.mode === 'compare'" class="px-2 pb-1">
-                              <div class="text-xs font-bold px-2 py-0.5 rounded-full" :class="getDiffColorClass(metric.proxy_time_ms, metric.direct_time_ms)">
+                              <n-tag size="small" :type="getDiffTagType(metric.proxy_time_ms, metric.direct_time_ms)">
                                 {{ calcDiff(metric.proxy_time_ms, metric.direct_time_ms) }}
-                              </div>
+                              </n-tag>
                             </div>
 
                             <div v-if="speedTestResult.mode !== 'proxy'" class="flex-1 text-right">
-                              <div class="text-xs text-gray-400 mb-1">
+                              <div class="text-xs text-on-surface-muted mb-1">
                                 Direct
                               </div>
-                              <div class="text-xl font-bold" :class="metric.direct_time_ms ? 'text-purple-600 dark:text-purple-400' : 'text-gray-300'">
-                                {{ metric.direct_time_ms ?? '-' }}<span class="text-xs font-normal text-gray-400">ms</span>
+                              <div class="text-xl font-bold" :class="metric.direct_time_ms ? 'text-primary' : 'text-on-surface-muted'">
+                                {{ metric.direct_time_ms ?? '-' }}<span class="text-xs font-normal text-on-surface-muted">ms</span>
                               </div>
                             </div>
                           </div>
 
-                          <!-- 错误提示 -->
-                          <div v-if="metric.error" class="mt-3 text-xs text-red-500 bg-red-50 dark:bg-red-900/10 p-2 rounded">
+                          <n-alert v-if="metric.error" type="error" class="mt-3">
                             {{ metric.error }}
-                          </div>
-                        </div>
+                          </n-alert>
+                        </n-card>
                       </div>
 
-                      <!-- 搜索详情列表 -->
                       <div v-if="multiQuerySearchSummary" class="mt-4">
-                        <div class="text-xs font-semibold text-gray-500 mb-2 uppercase tracking-wider">
+                        <div class="text-xs font-semibold text-on-surface-muted mb-2 uppercase tracking-wider">
                           Search Queries
                         </div>
-                        <div class="space-y-2">
-                          <div v-for="(d, i) in multiQuerySearchDetails" :key="i" class="flex items-center justify-between p-3 rounded-lg bg-slate-50 dark:bg-slate-700/30 border border-slate-100 dark:border-slate-700">
-                            <div class="flex items-center gap-2 truncate flex-1">
-                              <div class="i-fa6-solid-terminal text-gray-400 text-xs" />
-                              <span class="text-xs font-mono truncate" :title="d.query">{{ d.query }}</span>
+                        <n-space vertical size="small">
+                          <n-card
+                            v-for="(d, i) in multiQuerySearchDetails"
+                            :key="i"
+                            size="small"
+                            embedded
+                          >
+                            <div class="flex items-center justify-between gap-3">
+                              <div class="flex items-center gap-2 truncate flex-1 min-w-0">
+                                <div class="i-fa6-solid-terminal text-on-surface-muted text-xs flex-shrink-0" />
+                                <span class="text-xs font-mono truncate" :title="d.query">{{ d.query }}</span>
+                              </div>
+                              <div class="flex gap-3 text-xs font-mono flex-shrink-0">
+                                <span v-if="d.proxy_time_ms" class="text-info">{{ d.proxy_time_ms }}ms</span>
+                                <span v-if="d.direct_time_ms" class="text-primary">{{ d.direct_time_ms }}ms</span>
+                              </div>
                             </div>
-                            <div class="flex gap-3 text-xs font-mono ml-4">
-                              <span v-if="d.proxy_time_ms" class="text-blue-600">{{ d.proxy_time_ms }}ms</span>
-                              <span v-if="d.direct_time_ms" class="text-purple-600">{{ d.direct_time_ms }}ms</span>
-                            </div>
-                          </div>
-                        </div>
+                          </n-card>
+                        </n-space>
                       </div>
                     </div>
                   </n-tab-pane>
@@ -1270,40 +1297,36 @@ function formatRelativeTime(timeStr: string | null): string {
 
                       <div>
                         <div class="flex items-center justify-between mb-2">
-                          <span class="text-xs font-bold text-gray-500">REQUEST CONTEXT</span>
+                          <span class="text-xs font-bold text-on-surface-muted">REQUEST CONTEXT</span>
                           <n-tag size="tiny">
                             JSON
                           </n-tag>
                         </div>
-                        <div class="bg-slate-50 dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 p-1">
-                          <n-code
-                            :code="JSON.stringify({
-                              mode: speedTestMode,
-                              query: speedTestQuery,
-                              project: currentProjectInfo ? { root: currentProjectInfo.project_root, files: currentProjectInfo.total_files } : null,
-                              timestamp: new Date().toISOString(),
-                            }, null, 2)"
-                            language="json"
-                            class="text-xs font-mono"
-                            style="max-height: 200px; overflow: auto;"
-                          />
-                        </div>
+                        <n-code
+                          :code="JSON.stringify({
+                            mode: speedTestMode,
+                            query: speedTestQuery,
+                            project: currentProjectInfo ? { root: currentProjectInfo.project_root, files: currentProjectInfo.total_files } : null,
+                            timestamp: new Date().toISOString(),
+                          }, null, 2)"
+                          language="json"
+                          class="text-xs font-mono"
+                          style="max-height: 200px; overflow: auto;"
+                        />
                       </div>
 
                       <div>
                         <div class="flex items-center justify-between mb-2">
-                          <span class="text-xs font-bold text-gray-500">RESPONSE METRICS (RAW)</span>
+                          <span class="text-xs font-bold text-on-surface-muted">RESPONSE METRICS (RAW)</span>
                           <n-button size="tiny" text type="primary" @click="copySpeedTestReport">
                             复制完整JSON
                           </n-button>
                         </div>
-                        <div class="bg-slate-50 dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 p-1">
-                          <n-code
-                            :code="JSON.stringify(speedTestResult, null, 2)"
-                            language="json"
-                            class="text-xs font-mono"
-                          />
-                        </div>
+                        <n-code
+                          :code="JSON.stringify(speedTestResult, null, 2)"
+                          language="json"
+                          class="text-xs font-mono"
+                        />
                       </div>
                     </div>
                   </n-tab-pane>
@@ -1312,62 +1335,75 @@ function formatRelativeTime(timeStr: string | null): string {
                   <n-tab-pane name="search-data" tab="🔍 搜索数据">
                     <div class="space-y-4">
                       <!-- 搜索结果预览卡片 -->
-                      <template v-for="(metric, idx) in speedTestResult.metrics.filter(m => m.metric_type === 'search' && m.search_result_preview)" :key="idx">
-                        <div class="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 overflow-hidden">
-                          <!-- 搜索指标头部 -->
-                          <div class="px-4 py-3 border-b border-slate-100 dark:border-slate-700/50 bg-slate-50 dark:bg-slate-800/50 flex items-center justify-between">
-                            <div class="flex items-center gap-2">
-                              <div class="i-fa6-solid-magnifying-glass text-blue-500" />
-                              <span class="font-medium text-sm text-gray-800 text-gray-100">{{ metric.name }}</span>
+                      <n-card
+                        v-for="(metric, idx) in speedTestResult.metrics.filter(m => m.metric_type === 'search' && m.search_result_preview)"
+                        :key="idx"
+                        size="small"
+                      >
+                        <template #header>
+                          <div class="flex items-center justify-between gap-3 w-full">
+                            <div class="flex items-center gap-2 min-w-0">
+                              <div class="i-fa6-solid-magnifying-glass text-info flex-shrink-0" />
+                              <span class="font-medium text-sm text-on-surface truncate">{{ metric.name }}</span>
                             </div>
-                            <div class="flex items-center gap-3 text-xs font-mono">
-                              <span class="text-gray-400">匹配: {{ metric.search_result_preview?.total_matches || 0 }}</span>
-                              <span class="text-gray-400">响应: {{ formatBytes(metric.search_result_preview?.response_length || 0) }}</span>
-                            </div>
-                          </div>
-                          
-                          <!-- 搜索结果片段列表 -->
-                          <div class="divide-y divide-slate-100 dark:divide-slate-700/50">
-                            <template v-if="metric.search_result_preview?.snippets?.length">
-                              <div 
-                                v-for="(snippet, i) in metric.search_result_preview.snippets" 
-                                :key="i"
-                                class="p-4 hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors"
-                              >
-                                <!-- 文件路径 -->
-                                <div class="flex items-center gap-2 mb-2">
-                                  <div class="i-fa6-solid-file-code text-xs text-gray-400" />
-                                  <span class="text-xs font-mono text-blue-600 dark:text-blue-400 truncate" :title="snippet.file_path">
-                                    {{ snippet.file_path }}
-                                  </span>
-                                  <span v-if="snippet.line_number" class="text-[10px] text-gray-400 bg-slate-100 dark:bg-slate-700 px-1.5 py-0.5 rounded">
-                                    L{{ snippet.line_number }}
-                                  </span>
-                                </div>
-                                <!-- 代码片段 -->
-                                <div class="bg-slate-900 dark:bg-slate-950 rounded-lg p-3 overflow-x-auto">
-                                  <pre class="text-xs font-mono text-slate-300 whitespace-pre-wrap break-all">{{ snippet.snippet }}</pre>
-                                </div>
-                              </div>
-                            </template>
-                            <div v-else class="p-8 text-center text-gray-400">
-                              <div class="i-fa6-solid-inbox text-3xl mb-2 opacity-50" />
-                              <div class="text-sm">未获取到搜索结果预览</div>
+                            <div class="flex items-center gap-3 text-xs font-mono flex-shrink-0">
+                              <span class="text-on-surface-muted">匹配: {{ metric.search_result_preview?.total_matches || 0 }}</span>
+                              <span class="text-on-surface-muted">响应: {{ formatBytes(metric.search_result_preview?.response_length || 0) }}</span>
                             </div>
                           </div>
-                        </div>
-                      </template>
+                        </template>
 
-                      <!-- 无搜索指标时的占位 -->
-                      <div v-if="!speedTestResult.metrics.some(m => m.metric_type === 'search' && m.search_result_preview)" class="py-12 text-center text-gray-400">
-                        <div class="i-fa6-solid-search text-4xl mb-3 opacity-30" />
-                        <div class="text-sm font-medium mb-1">暂无搜索数据</div>
-                        <div class="text-xs opacity-70">运行包含语义搜索的测试后，将在此处展示搜索结果预览</div>
-                      </div>
+                        <template v-if="metric.search_result_preview?.snippets?.length">
+                          <div
+                            v-for="(snippet, i) in metric.search_result_preview.snippets"
+                            :key="i"
+                            class="py-3"
+                          >
+                            <n-divider v-if="i > 0" class="!my-3" />
+                            <div class="flex items-center gap-2 mb-2 flex-wrap">
+                              <div class="i-fa6-solid-file-code text-xs text-on-surface-muted flex-shrink-0" />
+                              <span class="text-xs font-mono text-info truncate min-w-0" :title="snippet.file_path">
+                                {{ snippet.file_path }}
+                              </span>
+                              <n-tag v-if="snippet.line_number" size="tiny" :bordered="false">
+                                L{{ snippet.line_number }}
+                              </n-tag>
+                            </div>
+                            <n-code
+                              :code="snippet.snippet"
+                              language="text"
+                              class="text-xs font-mono"
+                            />
+                          </div>
+                        </template>
+                        <n-empty
+                          v-else
+                          size="small"
+                          description="未获取到搜索结果预览"
+                        >
+                          <template #icon>
+                            <div class="i-fa6-solid-inbox text-3xl text-on-surface-muted opacity-50" />
+                          </template>
+                        </n-empty>
+                      </n-card>
+
+                      <n-empty v-if="!speedTestResult.metrics.some(m => m.metric_type === 'search' && m.search_result_preview)">
+                        <template #icon>
+                          <div class="i-fa6-solid-search text-4xl text-on-surface-muted opacity-30" />
+                        </template>
+                        <template #default>
+                          <div class="text-sm font-medium text-on-surface-secondary mb-1">
+                            暂无搜索数据
+                          </div>
+                          <div class="text-xs text-on-surface-muted opacity-70">
+                            运行包含语义搜索的测试后，将在此处展示搜索结果预览
+                          </div>
+                        </template>
+                      </n-empty>
                     </div>
                   </n-tab-pane>
                 </n-tabs>
-              </div>
+              </n-card>
             </div>
           </div>
         </n-tab-pane>
@@ -1375,75 +1411,65 @@ function formatRelativeTime(timeStr: string | null): string {
     </div>
 
     <!-- 子弹窗：多代理选择 -->
-    <n-modal v-model:show="proxyPickerVisible" preset="card" style="width: 480px" size="small" :bordered="false">
+    <AppModal
+      v-model:show="proxyPickerVisible"
+      width="480px"
+      max-height="80vh"
+    >
       <template #header>
-        <div class="flex items-center gap-3">
-          <div class="w-10 h-10 rounded-xl bg-primary-100 dark:bg-primary-900/30 flex items-center justify-center">
-            <div class="i-fa6-solid-network-wired text-primary-600 dark:text-primary-400 text-lg" />
-          </div>
-          <div>
-            <div class="font-semibold text-base">
+        <div class="flex items-center gap-3 min-w-0">
+          <div class="i-fa6-solid-network-wired text-primary text-xl flex-shrink-0" />
+          <div class="min-w-0">
+            <div class="font-semibold text-base text-on-surface">
               选择代理服务器
             </div>
-            <div class="text-xs text-gray-500">
+            <div class="text-xs text-on-surface-muted">
               已检测到 {{ detectedProxies.length }} 个可用代理
             </div>
           </div>
         </div>
       </template>
 
-      <div class="space-y-2 max-h-[300px] overflow-y-auto pr-1">
-        <div
-          v-for="(p, idx) in detectedProxies"
-          :key="idx"
-          class="group p-4 rounded-xl border-2 cursor-pointer transition-all duration-200"
-          :class="selectedProxyIndex === idx
-            ? 'border-primary-500 bg-primary-50 dark:bg-primary-900/20'
-            : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 hover:border-primary-300 dark:hover:border-primary-600'"
-          @click="selectedProxyIndex = idx"
-        >
-          <div class="flex items-center justify-between">
-            <div class="flex items-center gap-3">
-              <!-- 选中指示器 -->
-              <div
-                class="w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors"
-                :class="selectedProxyIndex === idx
-                  ? 'border-primary-500 bg-primary-500'
-                  : 'border-slate-300 dark:border-slate-600'"
-              >
-                <div v-if="selectedProxyIndex === idx" class="i-fa6-solid-check text-white text-xs" />
-              </div>
-              <div>
-                <div class="font-mono font-medium text-sm text-gray-800 text-gray-200">
-                  {{ p.host }}:{{ p.port }}
-                </div>
-                <div class="text-xs text-gray-500 mt-0.5">
-                  {{ p.proxy_type.toUpperCase() }} 代理
-                </div>
-              </div>
-            </div>
-            <!-- 响应时间徽章 -->
-            <div
-              class="px-2.5 py-1 rounded-full text-xs font-medium"
-              :class="p.response_time_ms && p.response_time_ms < 100
-                ? 'bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400'
-                : p.response_time_ms && p.response_time_ms < 300
-                  ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400'
-                  : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300'"
+      <n-radio-group v-model:value="selectedProxyIndex" class="max-h-[300px] overflow-y-auto pr-1">
+        <n-space vertical size="small" class="w-full">
+          <n-radio
+            v-for="(p, idx) in detectedProxies"
+            :key="idx"
+            :value="idx"
+            class="w-full"
+          >
+            <n-card
+              size="small"
+              embedded
+              class="w-full mt-1"
             >
-              <div class="i-fa6-solid-bolt inline-block mr-1" />
-              {{ p.response_time_ms ?? '-' }}ms
-            </div>
-          </div>
-        </div>
-      </div>
+              <div class="flex items-center justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="font-mono font-medium text-sm text-on-surface truncate">
+                    {{ p.host }}:{{ p.port }}
+                  </div>
+                  <div class="text-xs text-on-surface-muted mt-0.5">
+                    {{ p.proxy_type.toUpperCase() }} 代理
+                  </div>
+                </div>
+                <n-tag size="small" :type="proxyResponseTagType(p.response_time_ms)">
+                  <span class="inline-flex items-center gap-1">
+                    <span class="i-fa6-solid-bolt" />
+                    {{ p.response_time_ms ?? '-' }}ms
+                  </span>
+                </n-tag>
+              </div>
+            </n-card>
+          </n-radio>
+        </n-space>
+      </n-radio-group>
 
       <template #footer>
         <div class="flex justify-end gap-3">
-          <n-button secondary @click="proxyPickerVisible = false">
+          <n-button secondary size="small" @click="proxyPickerVisible = false">
             取消
           </n-button>
-          <n-button type="primary" @click="confirmProxySelection">
+          <n-button type="primary" size="small" @click="confirmProxySelection">
             <template #icon>
               <div class="i-fa6-solid-check" />
             </template>
@@ -1451,107 +1477,115 @@ function formatRelativeTime(timeStr: string | null): string {
           </n-button>
         </div>
       </template>
-    </n-modal>
+    </AppModal>
 
     <!-- 子弹窗：项目选择器 -->
-    <n-modal v-model:show="projectPickerVisible" preset="card" style="width: 700px" size="medium" :bordered="false" class="custom-picker-modal">
+    <AppModal
+      v-model:show="projectPickerVisible"
+      width="600px"
+    >
       <template #header>
-        <div class="flex items-center gap-3">
-          <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/30">
-            <div class="i-fa6-solid-folder-tree text-white text-lg" />
-          </div>
-          <div>
-            <div class="font-bold text-lg leading-tight">
+        <div class="flex items-center gap-3 min-w-0">
+          <div class="i-fa6-solid-folder-tree text-primary text-xl flex-shrink-0" />
+          <div class="min-w-0">
+            <div class="font-bold text-lg leading-tight text-on-surface">
               选择测试项目
             </div>
-            <div class="text-xs text-gray-500 mt-1">
+            <div class="text-xs text-on-surface-muted mt-1">
               请选择一个已索引的代码库进行网络延迟测试
             </div>
           </div>
         </div>
       </template>
 
-      <!-- 加载状态 -->
-      <div v-if="projectPickerLoading" class="grid grid-cols-1 md:grid-cols-2 gap-4 py-4">
-        <n-skeleton height="100px" :sharp="false" class="rounded-xl" />
-        <n-skeleton height="100px" :sharp="false" class="rounded-xl" />
-        <n-skeleton height="100px" :sharp="false" class="rounded-xl" />
-        <n-skeleton height="100px" :sharp="false" class="rounded-xl" />
+      <n-card v-if="projectPickerLoading" size="small">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 py-2">
+          <n-skeleton height="100px" :sharp="false" />
+          <n-skeleton height="100px" :sharp="false" />
+          <n-skeleton height="100px" :sharp="false" />
+          <n-skeleton height="100px" :sharp="false" />
+        </div>
+      </n-card>
+
+      <div v-else-if="indexedProjects.length === 0" class="py-6">
+        <n-empty>
+          <template #icon>
+            <div class="i-fa6-solid-folder-open text-5xl text-on-surface-muted" />
+          </template>
+          <template #default>
+            <div class="text-base font-medium text-on-surface-secondary">
+              暂无可用项目
+            </div>
+            <div class="text-xs text-on-surface-muted mt-2">
+              请先添加项目并建立索引
+            </div>
+          </template>
+        </n-empty>
       </div>
 
-      <!-- 项目列表 Grid -->
-      <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[450px] overflow-y-auto p-1">
-        <div
+      <n-radio-group
+        v-else
+        v-model:value="projectPickerSelected"
+        class="grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[450px] overflow-y-auto p-1"
+      >
+        <n-radio
           v-for="p in indexedProjects"
           :key="p.project_root"
-          class="group relative overflow-hidden rounded-xl border-2 transition-all duration-300 cursor-pointer p-4 flex flex-col gap-2"
-          :class="projectPickerSelected === p.project_root
-            ? 'border-primary-500 bg-primary-50 dark:bg-slate-800 ring-2 ring-primary-200 dark:ring-primary-900'
-            : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-primary-300 dark:hover:border-primary-600 hover:shadow-md'"
-          @click="projectPickerSelected = p.project_root"
+          :value="p.project_root"
+          class="project-picker-radio w-full"
         >
-          <!-- 选中时的扫描线动画 -->
-          <div v-if="projectPickerSelected === p.project_root" class="absolute inset-0 bg-gradient-to-r from-transparent via-primary-500/10 to-transparent skew-x-12 translate-x-[-150%] animate-[shimmer_2s_infinite]" />
-
-          <div class="flex justify-between items-start z-10">
-            <div class="flex items-center gap-2 mr-2 min-w-0">
-              <!-- 图标：使用高亮颜色增强视觉效果 -->
-              <div class="i-fa6-solid-code-branch text-primary-500 dark:text-primary-400 group-hover:text-primary-600 dark:group-hover:text-primary-300 transition-colors" />
-              <!-- 标题文字：使用高对比度颜色确保清晰可读 -->
-              <div class="font-bold text-sm truncate text-gray-800 text-gray-100" :title="getProjectName(p.project_root)">
-                {{ getProjectName(p.project_root) }}
+          <n-card
+            size="small"
+            hoverable
+            embedded
+            class="w-full mt-1"
+            @click="projectPickerSelected = p.project_root"
+          >
+            <div class="flex justify-between items-start gap-2">
+              <div class="flex items-center gap-2 min-w-0 flex-1">
+                <div class="i-fa6-solid-code-branch text-primary flex-shrink-0" />
+                <div class="font-bold text-sm truncate text-on-surface" :title="getProjectName(p.project_root)">
+                  {{ getProjectName(p.project_root) }}
+                </div>
               </div>
+              <n-tag v-if="projectPickerSelected === p.project_root" type="primary" size="tiny">
+                已选
+              </n-tag>
             </div>
-            <!-- Checkbox 样式的选择指示器 -->
-            <div
-              class="w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all"
-              :class="projectPickerSelected === p.project_root ? 'bg-primary-500 border-primary-500 scale-110' : 'border-gray-300 dark:border-gray-600'"
-            >
-              <div v-if="projectPickerSelected === p.project_root" class="i-fa6-solid-check text-white text-[10px]" />
+
+            <div class="text-xs text-on-surface-muted font-mono truncate mt-2" :title="p.project_root">
+              {{ normalizePathForDisplay(p.project_root) }}
             </div>
-          </div>
 
-          <div class="text-xs text-gray-400 font-mono truncate z-10" :title="p.project_root">
-            {{ normalizePathForDisplay(p.project_root) }}
-          </div>
-
-          <div class="mt-auto pt-3 flex items-center justify-between text-xs z-10">
-            <span class="flex items-center gap-1.5 px-2 py-1 rounded bg-slate-100 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300">
-              <div class="i-fa6-solid-file" />
-              {{ p.total_files }}
-            </span>
-            <span class="text-gray-400 flex items-center gap-1">
-              <div class="i-fa6-regular-clock" />
-              {{ formatRelativeTime(p.last_success_time) }}
-            </span>
-          </div>
-        </div>
-
-        <!-- 空状态 -->
-        <div v-if="indexedProjects.length === 0" class="col-span-full py-12 text-center flex flex-col items-center justify-center opacity-60">
-          <div class="i-fa6-solid-folder-open text-5xl text-slate-300 mb-4" />
-          <div class="text-base font-medium">
-            暂无可用项目
-          </div>
-          <div class="text-xs mt-2">
-            请先添加项目并建立索引
-          </div>
-        </div>
-      </div>
+            <div class="mt-3 flex items-center justify-between text-xs flex-wrap gap-2">
+              <n-tag size="tiny" :bordered="false">
+                <span class="inline-flex items-center gap-1">
+                  <span class="i-fa6-solid-file" />
+                  {{ p.total_files }}
+                </span>
+              </n-tag>
+              <span class="text-on-surface-muted inline-flex items-center gap-1">
+                <div class="i-fa6-regular-clock" />
+                {{ formatRelativeTime(p.last_success_time) }}
+              </span>
+            </div>
+          </n-card>
+        </n-radio>
+      </n-radio-group>
 
       <template #action>
         <div class="flex justify-between items-center w-full">
-          <n-button secondary @click="addProjectVisible = true">
+          <n-button secondary size="small" @click="addProjectVisible = true">
             <template #icon>
               <div class="i-fa6-solid-plus" />
             </template>
             添加新项目
           </n-button>
           <div class="flex gap-3">
-            <n-button secondary @click="projectPickerVisible = false">
+            <n-button secondary size="small" @click="projectPickerVisible = false">
               取消
             </n-button>
-            <n-button type="primary" :disabled="!projectPickerSelected" @click="confirmProjectSelectionAndRun">
+            <n-button type="primary" size="small" :disabled="!projectPickerSelected" @click="confirmProjectSelectionAndRun">
               <template #icon>
                 <div class="i-fa6-solid-play" />
               </template>
@@ -1560,20 +1594,22 @@ function formatRelativeTime(timeStr: string | null): string {
           </div>
         </div>
       </template>
-    </n-modal>
+    </AppModal>
 
     <!-- 子弹窗：添加项目 -->
-    <n-modal v-model:show="addProjectVisible" preset="card" style="width: 480px" size="small" :bordered="false">
+    <AppModal
+      v-model:show="addProjectVisible"
+      width="480px"
+      max-height="80vh"
+    >
       <template #header>
-        <div class="flex items-center gap-3">
-          <div class="w-10 h-10 rounded-xl bg-green-100 dark:bg-green-900/30 flex items-center justify-center">
-            <div class="i-fa6-solid-folder-plus text-green-600 dark:text-green-400 text-lg" />
-          </div>
-          <div>
-            <div class="font-semibold text-base">
+        <div class="flex items-center gap-3 min-w-0">
+          <div class="i-fa6-solid-folder-plus text-success text-xl flex-shrink-0" />
+          <div class="min-w-0">
+            <div class="font-semibold text-base text-on-surface">
               添加新项目
             </div>
-            <div class="text-xs text-gray-500">
+            <div class="text-xs text-on-surface-muted">
               输入项目根目录路径进行索引
             </div>
           </div>
@@ -1581,34 +1617,36 @@ function formatRelativeTime(timeStr: string | null): string {
       </template>
 
       <div class="space-y-4">
-        <n-form-item label="项目路径" :show-feedback="false">
+        <div>
+          <div class="text-xs text-on-surface-secondary mb-1">
+            项目路径
+          </div>
           <n-input
             v-model:value="addProjectPath"
+            size="small"
             placeholder="例如：C:\Projects\my-app 或 /home/user/projects/my-app"
             clearable
           >
             <template #prefix>
-              <div class="i-fa6-solid-folder text-gray-400" />
+              <div class="i-fa6-solid-folder text-on-surface-muted" />
             </template>
           </n-input>
-        </n-form-item>
-
-        <div class="p-3 rounded-lg bg-blue-50 dark:bg-blue-900/10 border border-blue-100 dark:border-blue-800/30 text-xs text-blue-700 dark:text-blue-300">
-          <div class="flex items-start gap-2">
-            <div class="i-fa6-solid-circle-info mt-0.5 flex-shrink-0" />
-            <div>
-              添加后将自动创建索引，完成后可用于测速。请确保路径为项目根目录且包含代码文件。
-            </div>
-          </div>
         </div>
+
+        <n-alert type="info" :show-icon="true" :bordered="false">
+          <template #icon>
+            <div class="i-fa6-solid-circle-info text-info" />
+          </template>
+          添加后将自动创建索引，完成后可用于测速。请确保路径为项目根目录且包含代码文件。
+        </n-alert>
       </div>
 
       <template #footer>
         <div class="flex justify-end gap-3">
-          <n-button secondary @click="addProjectVisible = false">
+          <n-button secondary size="small" @click="addProjectVisible = false">
             取消
           </n-button>
-          <n-button type="primary" :loading="addProjectIndexing" :disabled="!addProjectPath.trim()" @click="addProjectAndIndexAndRun">
+          <n-button type="primary" size="small" :loading="addProjectIndexing" :disabled="!addProjectPath.trim()" @click="addProjectAndIndexAndRun">
             <template #icon>
               <div class="i-fa6-solid-database" />
             </template>
@@ -1616,8 +1654,8 @@ function formatRelativeTime(timeStr: string | null): string {
           </n-button>
         </div>
       </template>
-    </n-modal>
-  </n-modal>
+    </AppModal>
+  </AppModal>
 </template>
 
 <style scoped>
@@ -1625,21 +1663,13 @@ function formatRelativeTime(timeStr: string | null): string {
 :deep(.n-tabs-nav) {
   padding-left: 4px;
 }
-:deep(.n-card__content) {
+.speed-test-tabs-host :deep(> .n-card__content) {
   padding: 0 !important;
 }
 
 /* 优化结果区 Tabs 内容区样式 - 确保文字清晰可读 */
 .results-tabs :deep(.n-tab-pane) {
-  /* 添加内边框增强层次感 */
-  border-top: 1px solid rgba(148, 163, 184, 0.1);
-}
-
-/* 暗色模式下优化指标卡片文字对比度 */
-:deep(.dark) .results-tabs,
-.dark .results-tabs {
-  --text-primary: #f1f5f9;
-  --text-secondary: #cbd5e1;
+  border-top: 1px solid var(--color-border);
 }
 
 /* 优化代码块在暗色模式下的可读性 */
@@ -1647,4 +1677,5 @@ function formatRelativeTime(timeStr: string | null): string {
   max-height: 300px;
   overflow: auto;
 }
+
 </style>

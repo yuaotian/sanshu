@@ -120,7 +120,7 @@ const continuePrompt = ref('请按照最佳实践继续')
 const isVisible = computed(() => !!props.request)
 const hasOptions = computed(() => (props.request?.predefined_options?.length ?? 0) > 0)
 const canSubmit = computed(() => {
-  const hasInput = userInput.value.trim().length > 0
+  const hasInput = rawUserInput.value.trim().length > 0
   const hasImages = draggedImages.value.length > 0
   const hasFiles = referencedFiles.value.length > 0
   if (hasOptions.value) {
@@ -294,6 +294,7 @@ function resetForm() {
   draggedImages.value = []
   referencedFiles.value = []
   submitting.value = false
+  inputRef.value?.reset()
 }
 
 // 构建用户回复摘要（不包含图片原始数据）
@@ -658,7 +659,7 @@ function handleOpenIndexStatus() {
             <!-- 全局提示时始终展示原因，避免默认策略被误解 -->
             <div
               class="text-[11px] leading-4"
-              :class="policyStatus.allowed ? 'text-white/65' : 'text-yellow-200/80'"
+              :class="policyStatus.allowed ? 'text-white/65' : 'text-warning'"
             >
               {{ policyStatus.reason }}
             </div>
@@ -682,7 +683,7 @@ function handleOpenIndexStatus() {
       </div>
 
       <!-- 输入和选项 - 允许选中 -->
-      <div class="px-4 pb-3 bg-black select-text">
+      <div class="px-3 pb-2 bg-black select-text">
         <PopupInput
           ref="inputRef" :request="request" :loading="loading" :submitting="submitting"
           :enhance-enabled="localEnhanceEnabled"
@@ -692,6 +693,9 @@ function handleOpenIndexStatus() {
         />
       </div>
     </div>
+
+    <!-- 悬浮输入区域的 Teleport 目标 -->
+    <div id="floating-input-target" class="flex-shrink-0 bg-black" />
 
     <!-- 底部操作栏 - 固定在底部 -->
     <div class="flex-shrink-0 bg-black-100 border-t-2 border-black-200" data-guide="popup-actions">

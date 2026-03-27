@@ -360,207 +360,173 @@ onMounted(() => {
 </script>
 
 <template>
-  <!-- 仅当有项目路径时显示面板 -->
-  <div v-if="shouldShow" class="zhi-index-panel">
-    <!-- ==================== 引导模式：sou 未启用 ==================== -->
-    <div
-      v-if="displayMode === 'guide-sou'"
-      class="panel-guide"
-    >
-      <div class="guide-icon">
-        <div class="i-carbon-search text-lg text-gray-400/80" />
+  <n-card v-if="shouldShow" size="small" class="m-2" embedded>
+    <template v-if="displayMode === 'guide-sou'">
+      <div class="flex items-center gap-3">
+        <div class="i-carbon-search text-lg text-on-surface-muted" />
+        <div class="flex-1 flex items-center justify-between gap-2">
+          <n-text depth="3" class="text-xs">启用代码搜索以使用智能索引</n-text>
+          <n-button text type="primary" size="tiny" @click="handleOpenSettings">
+            前往设置
+            <template #icon>
+              <div class="i-carbon-arrow-right" />
+            </template>
+          </n-button>
+        </div>
       </div>
-      <div class="guide-content">
-        <span class="guide-text">启用代码搜索以使用智能索引</span>
-        <n-button text type="primary" size="tiny" @click="handleOpenSettings">
-          前往设置
-          <template #icon>
-            <div class="i-carbon-arrow-right" />
-          </template>
-        </n-button>
-      </div>
-    </div>
+    </template>
 
-    <!-- ==================== 引导模式：ACE 未配置 ==================== -->
-    <div
-      v-else-if="displayMode === 'guide-ace'"
-      class="panel-guide"
-    >
-      <div class="guide-icon guide-icon--warning">
-        <div class="i-carbon-api text-lg text-amber-400/80" />
+    <template v-else-if="displayMode === 'guide-ace'">
+      <div class="flex items-center gap-3">
+        <div class="i-carbon-api text-lg text-warning" />
+        <div class="flex-1 flex items-center justify-between gap-2">
+          <n-text depth="3" class="text-xs">配置 API 密钥以启用代码索引</n-text>
+          <n-button text type="primary" size="tiny" @click="handleOpenSettings">
+            前往配置
+            <template #icon>
+              <div class="i-carbon-arrow-right" />
+            </template>
+          </n-button>
+        </div>
       </div>
-      <div class="guide-content">
-        <span class="guide-text">配置 API 密钥以启用代码索引</span>
-        <n-button text type="primary" size="tiny" @click="handleOpenSettings">
-          前往配置
-          <template #icon>
-            <div class="i-carbon-arrow-right" />
-          </template>
-        </n-button>
-      </div>
-    </div>
+    </template>
 
-    <!-- ==================== 正常模式：索引状态面板 ==================== -->
-    <div v-else class="panel-normal">
-      <!-- 收起状态条 -->
-      <div class="panel-header" @click="toggleExpand">
-        <div class="header-left">
-          <!-- 状态图标 -->
-          <div :class="statusIcon" class="status-icon" />
-          <!-- 状态文案 -->
-          <span class="status-text">{{ statusText }}</span>
-          <!-- 分隔符 -->
-          <span class="status-divider">·</span>
-          <!-- 文件数（显示嵌套项目数量提示） -->
-          <span class="status-files">
+    <template v-else>
+      <div class="flex items-center justify-between cursor-pointer" @click="toggleExpand">
+        <div class="flex items-center flex-wrap gap-1.5 text-xs">
+          <div :class="statusIcon" class="w-3.5 h-3.5 shrink-0" />
+          <n-text class="text-xs font-medium">{{ statusText }}</n-text>
+          <n-text depth="3" class="text-xs">·</n-text>
+          <n-text depth="3" class="text-xs">
             已索引 {{ indexedFiles }}/{{ totalFiles }} 个文件
-            <span v-if="hasNestedProjects" class="nested-badge">
+            <n-tag v-if="hasNestedProjects" size="tiny" :bordered="false" type="success" class="ml-1">
               含 {{ nestedProjects.length }} 个子项目
-            </span>
-          </span>
-          <!-- 最后同步时间（如有） -->
+            </n-tag>
+          </n-text>
           <template v-if="lastSyncTime">
-            <span class="status-divider">·</span>
-            <span class="status-time">上次同步 {{ lastSyncTime }}</span>
+            <n-text depth="3" class="text-xs">·</n-text>
+            <n-text depth="3" class="text-[11px]">上次同步 {{ lastSyncTime }}</n-text>
           </template>
         </div>
-        <div class="header-right flex items-center gap-2">
-          <!-- 最近索引文件信息（响应式隐藏） -->
+        <div class="flex items-center gap-2">
           <n-tooltip v-if="recentFilesText" trigger="hover" :delay="300">
             <template #trigger>
-              <div class="hidden md:flex items-center gap-1 text-white/50 text-[11px] max-w-[100px]">
-                <div class="i-carbon-document shrink-0 text-white/40 text-xs" />
-                <span class="truncate">{{ recentFilesText }}</span>
+              <div class="hidden md:flex items-center gap-1 text-[11px] max-w-[100px]">
+                <div class="i-carbon-document shrink-0 text-xs" />
+                <n-text depth="3" class="truncate text-[11px]">{{ recentFilesText }}</n-text>
               </div>
             </template>
             <div class="flex flex-col gap-1 max-w-[280px]">
               <div v-for="(file, idx) in recentIndexedFiles.slice(0, 5)" :key="idx" class="text-xs truncate">
                 {{ file }}
               </div>
-              <div class="text-[10px] text-white/40 mt-1 pt-1 border-t border-white/10">
+              <n-text depth="3" class="text-[10px] mt-1 pt-1 border-t border-border block">
                 {{ recentIndexedFiles.length > 5
                   ? `共 ${recentIndexedFiles.length} 个文件，仅显示最近 5 个`
                   : '最近增量索引的文件' }}
-              </div>
+              </n-text>
             </div>
           </n-tooltip>
-          <!-- 分隔符 -->
-          <span v-if="recentFilesText && projectName" class="text-white/25 text-xs hidden md:inline">·</span>
-          <!-- 项目根目录名称 -->
+          <n-text v-if="recentFilesText && projectName" depth="3" class="text-xs hidden md:inline">·</n-text>
           <n-tooltip v-if="projectName" trigger="hover" :delay="300">
             <template #trigger>
-              <div class="flex items-center gap-1.5 text-white/55 text-xs max-w-[120px]">
-                <div class="i-carbon-folder shrink-0 text-white/40 text-sm" />
-                <span class="truncate">{{ projectName }}</span>
+              <div class="flex items-center gap-1.5 text-xs max-w-[120px]">
+                <div class="i-carbon-folder shrink-0 text-sm" />
+                <n-text depth="3" class="truncate text-xs">{{ projectName }}</n-text>
               </div>
             </template>
             <span class="text-xs">{{ props.projectRoot }}</span>
           </n-tooltip>
-          <!-- 分隔符 -->
-          <span v-if="projectName" class="text-white/25 text-xs">·</span>
-          <!-- 展开/收起图标 -->
+          <n-text v-if="projectName" depth="3" class="text-xs">·</n-text>
           <div
-            class="expand-icon"
+            class="w-3.5 h-3.5 transition-transform duration-200"
             :class="isExpanded ? 'i-carbon-chevron-up' : 'i-carbon-chevron-down'"
           />
         </div>
       </div>
 
-      <!-- 展开内容区域 -->
       <n-collapse-transition :show="isExpanded">
-        <div class="panel-content">
-          <div v-if="isAuthFailure" class="auth-failure-alert">
-            <div class="auth-failure-alert__icon">
-              <div class="i-carbon-warning-alt-filled" />
-            </div>
-            <div class="auth-failure-alert__content">
-              <div class="auth-failure-alert__title">
-                ACE Token 已失效，请更新配置
-              </div>
-              <div class="auth-failure-alert__desc">
-                {{ authFailureMessage }}
-              </div>
-              <div class="auth-failure-alert__hint">
-                {{ authFailureHint }}
-              </div>
-            </div>
-            <n-button
-              size="tiny"
-              type="error"
-              secondary
-              @click.stop="handleOpenSettings('sou')"
-            >
-              <template #icon>
-                <div class="i-carbon-settings-adjust" />
-              </template>
-              前往设置更新 Token
-            </n-button>
-          </div>
+        <div class="pt-3 mt-3 border-t border-border">
+          <n-alert v-if="isAuthFailure" type="error" :bordered="false" class="mb-3">
+            <template #header>
+              ACE Token 已失效，请更新配置
+            </template>
+            <div class="text-xs">{{ authFailureMessage }}</div>
+            <div v-if="authFailureHint" class="text-xs mt-1 opacity-80">{{ authFailureHint }}</div>
+            <template #action>
+              <n-button
+                size="tiny"
+                type="error"
+                secondary
+                @click.stop="handleOpenSettings('sou')"
+              >
+                <template #icon>
+                  <div class="i-carbon-settings-adjust" />
+                </template>
+                前往设置更新 Token
+              </n-button>
+            </template>
+          </n-alert>
 
-          <!-- 嵌套项目区域（如果有） -->
-          <div v-if="hasNestedProjects || nestedError" class="nested-projects-section">
-            <div class="section-header">
-              <div class="i-carbon-folder-parent section-icon" />
-              <span class="section-title">Git 子项目</span>
-            </div>
-            <!-- 骨架屏 -->
-            <div v-if="loadingNested" class="nested-skeleton">
-              <div v-for="i in 3" :key="i" class="skeleton-item">
-                <div class="skeleton-icon" />
-                <div class="skeleton-text" />
+          <n-card v-if="hasNestedProjects || nestedError" size="small" class="mb-3" embedded>
+            <template #header>
+              <div class="flex items-center gap-1.5 text-xs">
+                <div class="i-carbon-folder-parent text-success w-3.5 h-3.5" />
+                <span class="text-[11px] font-medium text-success uppercase tracking-wider">Git 子项目</span>
               </div>
+            </template>
+            <div v-if="loadingNested">
+              <n-skeleton v-for="i in 3" :key="i" text class="mb-2" />
             </div>
-            <!-- 错误提示 -->
-            <div v-else-if="nestedError" class="nested-error">
-              <div class="i-carbon-warning-alt" />
-              <span>{{ nestedError }}</span>
-            </div>
-            <!-- 嵌套项目列表 -->
-            <div v-else class="nested-list">
+            <n-alert v-else-if="nestedError" type="error" :bordered="false">
+              {{ nestedError }}
+            </n-alert>
+            <div v-else class="flex flex-col gap-1">
               <div
                 v-for="np in nestedProjects"
                 :key="np.absolute_path"
-                class="nested-item"
+                class="flex items-center justify-between py-1.5 px-2 rounded hover:bg-container-secondary transition-colors"
               >
-                <div class="nested-item__left">
-                  <div class="i-carbon-folder-details nested-item__folder-icon" />
-                  <span class="nested-item__name">{{ np.relative_path }}</span>
+                <div class="flex items-center gap-2">
+                  <div class="i-carbon-folder-details w-3.5 h-3.5 text-success" />
+                  <n-text class="text-xs font-medium">{{ np.relative_path }}</n-text>
                 </div>
-                <div class="nested-item__right">
-                  <span class="nested-item__stats">{{ getNestedStatusText(np) }}</span>
-                  <div :class="getNestedStatusIcon(np)" class="nested-item__status-icon" />
+                <div class="flex items-center gap-1.5">
+                  <n-text depth="3" class="text-[11px] font-mono">{{ getNestedStatusText(np) }}</n-text>
+                  <div :class="getNestedStatusIcon(np)" class="w-3 h-3" />
                 </div>
               </div>
             </div>
-          </div>
+          </n-card>
 
-          <!-- 统计卡片网格 -->
-          <div class="stats-grid">
-            <!-- 总文件数 -->
-            <div class="stat-card">
-              <div class="stat-value">{{ totalFiles }}</div>
-              <div class="stat-label">总文件</div>
-            </div>
-            <!-- 已索引 -->
-            <div class="stat-card stat-card--success">
-              <div class="stat-value">{{ indexedFiles }}</div>
-              <div class="stat-label">已索引</div>
-            </div>
-            <!-- 待处理 -->
-            <div class="stat-card stat-card--info">
-              <div class="stat-value">{{ pendingFiles }}</div>
-              <div class="stat-label">待处理</div>
-            </div>
-            <!-- 失败 -->
-            <div class="stat-card stat-card--error">
-              <div class="stat-value">{{ failedFiles }}</div>
-              <div class="stat-label">失败</div>
-            </div>
-          </div>
+          <n-grid :cols="4" :x-gap="8" class="mb-3">
+            <n-grid-item>
+              <n-card size="small" embedded class="text-center">
+                <div class="text-base font-semibold">{{ totalFiles }}</div>
+                <n-text depth="3" class="text-[10px]">总文件</n-text>
+              </n-card>
+            </n-grid-item>
+            <n-grid-item>
+              <n-card size="small" embedded class="text-center">
+                <div class="text-base font-semibold text-success">{{ indexedFiles }}</div>
+                <n-text depth="3" class="text-[10px]">已索引</n-text>
+              </n-card>
+            </n-grid-item>
+            <n-grid-item>
+              <n-card size="small" embedded class="text-center">
+                <div class="text-base font-semibold text-info">{{ pendingFiles }}</div>
+                <n-text depth="3" class="text-[10px]">待处理</n-text>
+              </n-card>
+            </n-grid-item>
+            <n-grid-item>
+              <n-card size="small" embedded class="text-center">
+                <div class="text-base font-semibold text-error">{{ failedFiles }}</div>
+                <n-text depth="3" class="text-[10px]">失败</n-text>
+              </n-card>
+            </n-grid-item>
+          </n-grid>
 
-          <!-- 操作按钮区域 -->
-          <div class="actions-row">
-            <!-- 同步按钮（带下拉菜单） -->
+          <div class="flex items-center justify-between pt-3 border-t border-border">
             <n-dropdown
               :show="showSyncMenu"
               trigger="click"
@@ -585,8 +551,6 @@ onMounted(() => {
                 <div class="i-carbon-chevron-down ml-1 text-xs" />
               </n-button>
             </n-dropdown>
-
-            <!-- 查看详情按钮 -->
             <n-button text size="small" @click="handleOpenDetail">
               <template #icon>
                 <div class="i-carbon-document-view" />
@@ -596,375 +560,7 @@ onMounted(() => {
           </div>
         </div>
       </n-collapse-transition>
-    </div>
-  </div>
+    </template>
+  </n-card>
 </template>
 
-<style scoped>
-/* ==================== 面板容器 ==================== */
-.zhi-index-panel {
-  margin: 8px;
-  border-radius: 12px;
-  overflow: hidden;
-  background: linear-gradient(135deg, rgba(30, 30, 30, 0.7) 0%, rgba(25, 25, 25, 0.8) 100%);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  backdrop-filter: blur(12px);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-}
-
-/* ==================== 引导模式样式 ==================== */
-.panel-guide {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
-}
-
-.guide-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0.02) 100%);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-}
-
-.guide-icon--warning {
-  background: linear-gradient(135deg, rgba(251, 191, 36, 0.08) 0%, rgba(251, 191, 36, 0.04) 100%);
-  border-color: rgba(251, 191, 36, 0.15);
-}
-
-.guide-content {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.guide-text {
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.65);
-}
-
-.auth-failure-alert {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 14px;
-  margin-bottom: 12px;
-  border-radius: 12px;
-  border: 1px solid rgba(251, 113, 133, 0.25);
-  background: linear-gradient(135deg, rgba(127, 29, 29, 0.36) 0%, rgba(69, 10, 10, 0.2) 100%);
-}
-
-.auth-failure-alert__icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  flex-shrink: 0;
-  border-radius: 10px;
-  color: rgb(251 113 133);
-  background: rgba(127, 29, 29, 0.35);
-}
-
-.auth-failure-alert__content {
-  min-width: 0;
-  flex: 1;
-}
-
-.auth-failure-alert__title {
-  font-size: 12px;
-  font-weight: 600;
-  color: rgba(255, 228, 230, 0.96);
-}
-
-.auth-failure-alert__desc {
-  margin-top: 3px;
-  font-size: 11px;
-  line-height: 1.45;
-  color: rgba(255, 228, 230, 0.8);
-  word-break: break-word;
-}
-
-.auth-failure-alert__hint {
-  margin-top: 5px;
-  font-size: 11px;
-  line-height: 1.4;
-  color: rgba(254, 205, 211, 0.88);
-}
-
-/* ==================== 正常模式 - 头部状态条 ==================== */
-.panel-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-  min-height: 44px;
-  cursor: pointer;
-  transition: background 0.2s ease;
-}
-
-.panel-header:hover {
-  background: rgba(255, 255, 255, 0.02);
-}
-
-.header-left {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  row-gap: 4px;
-  font-size: 12px;
-}
-
-.status-icon {
-  width: 14px;
-  height: 14px;
-  flex-shrink: 0;
-}
-
-.status-text {
-  color: rgba(255, 255, 255, 0.9);
-  font-weight: 500;
-}
-
-.status-divider {
-  color: rgba(255, 255, 255, 0.25);
-}
-
-.status-files {
-  color: rgba(255, 255, 255, 0.65);
-}
-
-.nested-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 6px;
-  margin-left: 4px;
-  border-radius: 4px;
-  font-size: 10px;
-  background: linear-gradient(135deg, rgba(52, 211, 153, 0.15) 0%, rgba(52, 211, 153, 0.08) 100%);
-  color: rgba(52, 211, 153, 0.9);
-  border: 1px solid rgba(52, 211, 153, 0.2);
-}
-
-.status-time {
-  color: rgba(255, 255, 255, 0.45);
-}
-
-.header-right {
-  display: flex;
-  align-items: center;
-}
-
-.expand-icon {
-  width: 14px;
-  height: 14px;
-  color: rgba(255, 255, 255, 0.4);
-  transition: transform 0.2s ease;
-}
-
-/* ==================== 正常模式 - 展开内容 ==================== */
-.panel-content {
-  padding: 0 16px 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.04);
-}
-
-/* ==================== 嵌套项目区域 ==================== */
-.nested-projects-section {
-  margin-top: 12px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: linear-gradient(135deg, rgba(52, 211, 153, 0.04) 0%, rgba(52, 211, 153, 0.02) 100%);
-  border: 1px solid rgba(52, 211, 153, 0.1);
-}
-
-.section-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 10px;
-}
-
-.section-icon {
-  width: 14px;
-  height: 14px;
-  color: rgba(52, 211, 153, 0.7);
-}
-
-.section-title {
-  font-size: 11px;
-  font-weight: 500;
-  color: rgba(52, 211, 153, 0.9);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-/* 骨架屏 */
-.nested-skeleton {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-/* 嵌套项目错误提示 */
-.nested-error {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: rgba(248, 113, 113, 0.08);
-  color: rgba(248, 113, 113, 0.9);
-  font-size: 12px;
-}
-
-.skeleton-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 0;
-}
-
-.skeleton-icon {
-  width: 14px;
-  height: 14px;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.08);
-  animation: skeleton-pulse 1.5s ease-in-out infinite;
-}
-
-.skeleton-text {
-  height: 12px;
-  width: 80px;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.08);
-  animation: skeleton-pulse 1.5s ease-in-out infinite;
-}
-
-@keyframes skeleton-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
-}
-
-/* 嵌套项目列表 */
-.nested-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.nested-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.02);
-  transition: background 0.2s ease;
-}
-
-.nested-item:hover {
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.nested-item__left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.nested-item__folder-icon {
-  width: 14px;
-  height: 14px;
-  color: rgba(52, 211, 153, 0.6);
-}
-
-.nested-item__name {
-  font-size: 12px;
-  font-weight: 500;
-  color: rgba(255, 255, 255, 0.85);
-}
-
-.nested-item__right {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.nested-item__stats {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.5);
-  font-family: ui-monospace, monospace;
-}
-
-.nested-item__status-icon {
-  width: 12px;
-  height: 12px;
-}
-
-/* ==================== 统计卡片网格 ==================== */
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 12px;
-}
-
-.stat-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 10px 8px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0.02) 100%);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  transition: all 0.2s ease;
-}
-
-.stat-card:hover {
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0.03) 100%);
-  border-color: rgba(255, 255, 255, 0.08);
-}
-
-.stat-card--success .stat-value {
-  color: #86efac;
-}
-
-.stat-card--info .stat-value {
-  color: #93c5fd;
-}
-
-.stat-card--error .stat-value {
-  color: #fca5a5;
-}
-
-.stat-value {
-  font-size: 16px;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.9);
-  line-height: 1.2;
-}
-
-.stat-label {
-  font-size: 10px;
-  color: rgba(255, 255, 255, 0.45);
-  margin-top: 2px;
-}
-
-/* ==================== 操作按钮区域 ==================== */
-.actions-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.04);
-}
-</style>

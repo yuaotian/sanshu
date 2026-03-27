@@ -116,6 +116,34 @@ pub async fn load_config_and_apply_window_settings(
         if let Err(_e) = window.set_size(LogicalSize::new(target_width, target_height)) {
             // 静默处理窗口大小设置失败
         }
+
+        // 恢复到上次所在显示器（多显示器支持）
+        let positioned = if let (Some(x), Some(y)) = (window_config.position_x, window_config.position_y) {
+            let physical_x = x as i32;
+            let physical_y = y as i32;
+            log::info!("📍 恢复窗口位置: 物理坐标 ({}, {})", physical_x, physical_y);
+
+            if crate::ui::window::center_on_monitor_containing(
+                &window, physical_x, physical_y, target_width, target_height,
+            ) {
+                true
+            } else {
+                log::info!("⚠️ 上次所在显示器不可用，使用主显示器居中");
+                let _ = window.center();
+                false
+            }
+        } else {
+            let _ = window.center();
+            false
+        };
+
+        // 所有设置完成后再显示窗口，避免在主显示器上闪烁
+        if let Err(e) = window.show() {
+            log::warn!("显示窗口失败: {}", e);
+        }
+        if positioned {
+            log::info!("✅ 窗口已在上次所在显示器上居中显示");
+        }
     }
 
     Ok(())
@@ -149,13 +177,9 @@ pub fn load_standalone_telegram_config() -> Result<super::settings::TelegramConf
 
 /// 获取独立配置文件路径（不依赖Tauri）
 fn get_standalone_config_path() -> Result<PathBuf> {
-    // 使用标准的配置目录
     let config_dir = dirs::config_dir()
         .ok_or_else(|| anyhow::anyhow!("无法获取配置目录"))?
         .join("sanshu");
-
-    // 确保目录存在
-    fs::create_dir_all(&config_dir)?;
 
     Ok(config_dir.join("config.json"))
 }

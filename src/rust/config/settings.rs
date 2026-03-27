@@ -40,6 +40,10 @@ pub struct UiConfig {
     // 置顶设置
     #[serde(default = "default_always_on_top")]
     pub always_on_top: bool,
+
+    // 图片压缩
+    #[serde(default = "default_image_compression_enabled")]
+    pub image_compression_enabled: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -86,6 +90,12 @@ pub struct WindowConfig {
     pub free_width: f64,
     #[serde(default = "default_free_height")]
     pub free_height: f64,
+
+    // 窗口位置记忆（多显示器支持）
+    #[serde(default)]
+    pub position_x: Option<f64>,
+    #[serde(default)]
+    pub position_y: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -300,6 +310,7 @@ pub fn default_ui_config() -> UiConfig {
         font_config: default_font_config(),
         window_config: default_window_config(),
         always_on_top: default_always_on_top(),
+        image_compression_enabled: default_image_compression_enabled(),
     }
 }
 
@@ -366,6 +377,10 @@ pub fn default_always_on_top() -> bool {
     window::DEFAULT_ALWAYS_ON_TOP
 }
 
+pub fn default_image_compression_enabled() -> bool {
+    true
+}
+
 pub fn default_audio_notification_enabled() -> bool {
     audio::DEFAULT_NOTIFICATION_ENABLED
 }
@@ -390,6 +405,8 @@ pub fn default_window_config() -> WindowConfig {
         fixed_height: window::DEFAULT_HEIGHT,
         free_width: window::DEFAULT_WIDTH,
         free_height: window::DEFAULT_HEIGHT,
+        position_x: None,
+        position_y: None,
     }
 }
 

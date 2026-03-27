@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import type { McpRequest } from '../../types/popup'
 import hljs from 'highlight.js'
 import MarkdownIt from 'markdown-it'
 import { useMessage } from 'naive-ui'
 import { nextTick, onMounted, onUpdated, watch } from 'vue'
+import { functionalColors, primaryColors } from '../../theme/colors'
+import type { McpRequest } from '../../types/popup'
+import { sanitizeHtml } from '../../utils/sanitize'
 
 const props = withDefaults(defineProps<Props>(), {
   loading: false,
@@ -136,14 +138,13 @@ md.renderer.rules.autolink_open = function (tokens, idx, options, env, renderer)
   return renderer.renderToken(tokens, idx, options)
 }
 
-// Markdown 渲染函数
 function renderMarkdown(content: string) {
   try {
-    return md.render(content)
+    return sanitizeHtml(md.render(content))
   }
   catch (error) {
     console.error('Markdown 渲染失败:', error)
-    return content
+    return sanitizeHtml(content)
   }
 }
 
@@ -178,14 +179,14 @@ function createCopyButton(preEl: Element) {
       justify-content: center;
       width: 100%;
       height: 100%;
-      color: #9ca3af;
+      color: var(--color-on-surface-muted);
       transition: color 0.2s ease;
       border: none;
       background: none;
       cursor: pointer;
       padding: 0;
       margin: 0;
-    " onmouseover="this.style.color='#14b8a6'" onmouseout="this.style.color='#9ca3af'">
+    " onmouseover="this.style.color='${primaryColors[500]}'" onmouseout="this.style.color='var(--color-on-surface-muted)'">
       <div class="i-carbon-copy" style="width: 16px; height: 16px; display: block;"></div>
     </button>
   `
@@ -202,7 +203,7 @@ function createCopyButton(preEl: Element) {
       // 更新为成功状态
       const icon = button.querySelector('div')!
       icon.className = 'i-carbon-checkmark'
-      icon.style.cssText = 'width: 16px; height: 16px; color: #22c55e; display: block;'
+      icon.style.cssText = `width: 16px; height: 16px; color: ${functionalColors.success}; display: block;`
 
       setTimeout(() => {
         icon.className = 'i-carbon-copy'
@@ -339,16 +340,20 @@ onUpdated(() => {
         {{ request.message }}
       </div>
 
-      <!-- 引用原文按钮 - 位于右下角 -->
+      <!-- 引用原文按钮 -->
       <div class="flex justify-end mt-4 pt-3 border-t border-gray-600/30" data-guide="quote-message">
-        <div
+        <n-button
+          size="small"
+          secondary
+          type="info"
           title="点击将AI的消息内容引用到输入框中"
-          class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-blue-500/20 hover:bg-blue-500/30 text-white rounded-md transition-all duration-200 cursor-pointer border border-blue-500/50 hover:border-blue-500/70 shadow-sm hover:shadow-md"
           @click="quoteMessage"
         >
-          <div class="i-carbon-quotes w-3.5 h-3.5" />
-          <span>引用原文</span>
-        </div>
+          <template #icon>
+            <div class="i-carbon-quotes w-3.5 h-3.5" />
+          </template>
+          引用原文
+        </n-button>
       </div>
     </div>
 

@@ -166,8 +166,7 @@ onMounted(async () => {
 
 <template>
   <!-- 设置内容 -->
-  <div class="space-y-6">
-    <n-space vertical size="large">
+  <n-space vertical size="large">
       <!-- 字体系列设置 -->
       <div>
         <div class="flex items-center justify-between mb-3">
@@ -315,9 +314,9 @@ onMounted(async () => {
             </div>
           </div>
         </div>
-        <div
-          class="bg-black-200 rounded p-4 border border-black-300 transition-all duration-200"
-          :style="{
+        <n-card
+          size="small"
+          :content-style="{
             fontFamily: currentFontFamily,
             fontSize: `${currentFontScale}rem`,
           }"
@@ -340,11 +339,10 @@ onMounted(async () => {
           <div class="text-sm opacity-60">
             0123456789 !@#$%^&amp;*()_+-=[]{}|;:&apos;&quot;,./?
           </div>
-        </div>
+        </n-card>
         <div class="text-xs opacity-50 mt-2 space-y-1">
           <div>当前字体: {{ currentFontFamily }}</div>
         </div>
       </div>
-    </n-space>
-  </div>
+  </n-space>
 </template>

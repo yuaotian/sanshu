@@ -1,5 +1,6 @@
-import { resolve } from 'node:path'
+/// <reference types="node" />
 import vue from '@vitejs/plugin-vue'
+import { resolve } from 'node:path'
 import UnoCSS from 'unocss/vite'
 import { defineConfig } from 'vite'
 

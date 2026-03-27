@@ -1,14 +1,15 @@
 use anyhow::Result;
 use rmcp::model::{ErrorData as McpError, Content};
 
-use crate::mcp::types::{FileReferenceAttachment, ImageAttachment, McpResponse, McpResponseContent};
+use crate::mcp::types::{FileReferenceAttachment, McpResponse, McpResponseContent};
 use crate::log_debug;
 
 /// 解析 MCP 响应内容
 ///
 /// 支持新的结构化格式和旧格式的兼容性，并生成适当的 Content 对象
 pub fn parse_mcp_response(response: &str) -> Result<Vec<Content>, McpError> {
-    if response.trim() == "CANCELLED" || response.trim() == "用户取消了操作" {
+    let trimmed = response.trim().trim_matches('"');
+    if trimmed == "CANCELLED" || trimmed == "用户取消了操作" {
         log_debug!("[parse_mcp_response] 收到取消信号");
         return Ok(vec![Content::text("用户取消了操作".to_string())]);
     }
@@ -102,10 +103,11 @@ pub fn parse_mcp_response(response: &str) -> Result<Vec<Content>, McpError> {
 
 /// 解析新的结构化响应格式
 ///
-/// 将前端响应拆分为三个语义区域返回给 agent：
-/// 1. 用户消息（干净的用户意图）
-/// 2. 附加上下文（选项、文件引用、图片元信息）
-/// 3. 执行偏好（条件性提示词 ✔/❌ 状态）
+/// 将前端响应拆分为语义区域返回给 agent：
+/// 1. 图片作为独立 Content::image（AI 直接可视）
+/// 2. 用户消息（干净的用户意图）
+/// 3. 附加上下文（选项 + 文件引用，不含冗余图片元信息）
+/// 4. 执行偏好（条件性提示词 ✔/❌ 状态）
 fn parse_structured_response(response: McpResponse) -> Result<Vec<Content>, McpError> {
     let mut result = Vec::new();
 
@@ -148,7 +150,7 @@ fn build_structured_context_text(response: &McpResponse) -> String {
         sections.push(user_message_parts.join("\n"));
     }
 
-    // 区域 2：附加上下文（选项 + 文件引用 + 图片元信息）
+    // 区域 2：附加上下文（选项 + 文件引用）
     let mut context_lines = Vec::new();
 
     if !response.selected_options.is_empty() {
@@ -160,16 +162,9 @@ fn build_structured_context_text(response: &McpResponse) -> String {
 
     if !response.files.is_empty() {
         let references: Vec<String> = response.files.iter().enumerate()
-            .map(|(i, file)| format!("- 资源{}: {}", i + 1, format_file_reference(file)))
+            .map(|(i, file)| format!("- 资源{}: {}", i + 1, format_file_reference_compact(file)))
             .collect();
         context_lines.extend(references);
-    }
-
-    if !response.images.is_empty() {
-        let images: Vec<String> = response.images.iter().enumerate()
-            .map(|(i, img)| format!("- 图片{}: {}", i + 1, format_image_attachment(img)))
-            .collect();
-        context_lines.extend(images);
     }
 
     if !context_lines.is_empty() {
@@ -221,53 +216,15 @@ fn is_preference_line(line: &str) -> bool {
     line.starts_with('✔') || line.starts_with('❌')
 }
 
-fn format_file_reference(file: &FileReferenceAttachment) -> String {
-    let reference_kind = if file.r#type == "url" {
-        "url"
-    } else if file.kind.as_deref() == Some("directory") {
-        "directory"
-    } else {
-        "file"
-    };
-
-    let location = if file.r#type == "url" {
-        file.url.as_deref().unwrap_or_default()
-    } else {
-        file.path.as_deref().unwrap_or_default()
-    };
-
-    let mut fields = vec![
-        format!("type: {}", serde_json::to_string(reference_kind).unwrap_or_default()),
-        format!("name: {}", serde_json::to_string(&file.name).unwrap_or_default()),
-    ];
-
+fn format_file_reference_compact(file: &FileReferenceAttachment) -> String {
     if file.r#type == "url" {
-        fields.push(format!("url: {}", serde_json::to_string(location).unwrap_or_default()));
+        let url = file.url.as_deref().unwrap_or_default();
+        format!("{} ({})", file.name, url)
     } else {
-        fields.push(format!("path: {}", serde_json::to_string(location).unwrap_or_default()));
+        let path = file.path.as_deref().unwrap_or_default();
+        let kind_tag = if file.kind.as_deref() == Some("directory") { "dir" } else { "file" };
+        format!("[{}] {} ({})", kind_tag, file.name, path)
     }
-
-    if let Some(mime_type) = file.mime_type.as_ref() {
-        fields.push(format!("mime_type: {}", serde_json::to_string(mime_type).unwrap_or_default()));
-    }
-
-    format!("{{ {} }}", fields.join(", "))
-}
-
-fn format_image_attachment(image: &ImageAttachment) -> String {
-    let estimated_size = (image.data.len() * 3) / 4;
-    let size_str = format_byte_size(estimated_size);
-
-    let mut fields = vec![
-        format!("media_type: {}", serde_json::to_string(&image.media_type).unwrap_or_default()),
-        format!("size: {}", serde_json::to_string(&size_str).unwrap_or_default()),
-    ];
-
-    if let Some(filename) = image.filename.as_ref() {
-        fields.push(format!("filename: {}", serde_json::to_string(filename).unwrap_or_default()));
-    }
-
-    format!("{{ {} }}", fields.join(", "))
 }
 
 fn format_byte_size(bytes: usize) -> String {

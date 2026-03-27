@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event'
 import { useMessage } from 'naive-ui'
 import { onMounted, ref } from 'vue'
 import { API_BASE_URL, API_EXAMPLES } from '../../constants/telegram'
+import AppModal from '../common/AppModal.vue'
 
 interface TelegramConfig {
   enabled: boolean
@@ -333,7 +334,7 @@ onMounted(() => {
   </n-space>
 
   <!-- 设置向导模态框 -->
-  <n-modal v-model:show="showSetupWizard" preset="card" title="Telegram Bot 设置向导" style="width: 600px; margin: 0 20px;">
+  <AppModal v-model:show="showSetupWizard" title="Telegram Bot 设置向导" width="600px">
     <n-steps :current="setupStep" size="small">
       <n-step title="创建Bot" />
       <n-step title="获取Token" />
@@ -354,10 +355,10 @@ onMounted(() => {
           <p>4. 创建成功后，BotFather会发送Bot Token给你</p>
         </div>
         <n-space justify="end">
-          <n-button @click="closeSetupWizard">
+          <n-button size="small" @click="closeSetupWizard">
             取消
           </n-button>
-          <n-button type="primary" @click="setupStep = 2">
+          <n-button size="small" type="primary" @click="setupStep = 2">
             下一步
           </n-button>
         </n-space>
@@ -376,10 +377,10 @@ onMounted(() => {
           />
         </div>
         <n-space justify="end">
-          <n-button @click="setupStep = 1">
+          <n-button size="small" @click="setupStep = 1">
             上一步
           </n-button>
-          <n-button type="primary" :disabled="!telegramConfig.bot_token.trim()" @click="setupStep = 3">
+          <n-button size="small" type="primary" :disabled="!telegramConfig.bot_token.trim()" @click="setupStep = 3">
             下一步
           </n-button>
         </n-space>
@@ -424,10 +425,10 @@ onMounted(() => {
           </n-card>
         </div>
         <n-space justify="end">
-          <n-button @click="setupStep = 2">
+          <n-button size="small" @click="setupStep = 2">
             上一步
           </n-button>
-          <n-button type="primary" :disabled="!telegramConfig.chat_id.trim()" @click="setupStep = 4">
+          <n-button size="small" type="primary" :disabled="!telegramConfig.chat_id.trim()" @click="setupStep = 4">
             下一步
           </n-button>
         </n-space>
@@ -467,14 +468,14 @@ onMounted(() => {
           </div>
         </div>
         <n-space justify="end">
-          <n-button @click="setupStep = 3">
+          <n-button size="small" @click="setupStep = 3">
             上一步
           </n-button>
-          <n-button type="primary" @click="closeSetupWizard">
+          <n-button size="small" type="primary" @click="closeSetupWizard">
             完成
           </n-button>
         </n-space>
       </div>
     </div>
-  </n-modal>
+  </AppModal>
 </template>

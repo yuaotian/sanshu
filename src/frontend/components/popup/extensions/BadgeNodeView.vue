@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { invoke } from '@tauri-apps/api/core'
-import { useMessage } from 'naive-ui'
-import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
-import { NodeViewWrapper } from '@tiptap/vue-3'
+import { invoke } from '@tauri-apps/api/core';
+import { NodeViewWrapper } from '@tiptap/vue-3';
+import { useMessage } from 'naive-ui';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 
 const props = defineProps<{
   node: {

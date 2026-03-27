@@ -6,6 +6,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { useMediaQuery } from '@vueuse/core'
 import { useMessage } from 'naive-ui'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import AppModal from '../../common/AppModal.vue'
 import { buildConditionalContext } from '../../utils/conditionalContext'
 import EnhanceConfigPanel from './enhance/EnhanceConfigPanel.vue'
 import EnhancePreview from './enhance/EnhancePreview.vue'
@@ -546,12 +547,12 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <n-modal
+  <AppModal
     :show="show"
-    preset="card"
+    class="w-[92vw] sm:w-[640px] max-w-[94vw]"
     :closable="false"
     :mask-closable="!isEnhancing"
-    class="w-[92vw] sm:w-[640px] max-w-[94vw]"
+    :close-on-esc="!isEnhancing"
     @update:show="(val: boolean) => !isEnhancing && emit('update:show', val)"
   >
     <template #header>
@@ -630,13 +631,15 @@ onUnmounted(() => {
         :blob-source-root="displayBlobSourceRoot"
       />
 
-      <!-- 操作按钮区 -->
+    </div>
+
+    <template #footer>
       <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <n-button
             v-if="errorMessage && !isEnhancing"
             size="small"
-            class="w-full min-h-[44px] rounded-lg border border-error/30 !bg-error/10 !text-black-900 shadow-sm transition-colors duration-200 hover:!bg-error/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-error/30 disabled:cursor-not-allowed disabled:opacity-60 sm:min-h-[36px] sm:w-auto"
+            type="error"
             @click="handleRetry"
           >
             重试
@@ -644,24 +647,22 @@ onUnmounted(() => {
           <n-button
             v-else-if="hasCompleted && enhancedPrompt"
             size="small"
-            class="w-full min-h-[44px] rounded-lg border border-black-200/70 !bg-black-50/90 text-black-700 shadow-sm transition-colors duration-200 hover:!bg-black-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-60 sm:min-h-[36px] sm:w-auto dark:!bg-black-200/80"
             @click="handleCopyResult"
           >
             复制结果
           </n-button>
         </div>
-        <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <n-space>
           <n-button
             size="small"
-            class="w-full min-h-[44px] rounded-lg border border-black-200/70 !bg-black-50/90 text-black-700 shadow-sm transition-colors duration-200 hover:!bg-black-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-60 sm:min-h-[36px] sm:w-auto dark:!bg-black-200/80"
             @click="handleClose"
           >
             取消
           </n-button>
           <n-button
             size="small"
+            type="primary"
             :disabled="!canConfirm"
-            class="w-full min-h-[44px] rounded-lg border border-primary-200/60 !bg-primary-200 !text-black-900 shadow-sm transition-colors duration-200 hover:!bg-primary-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 disabled:cursor-not-allowed disabled:opacity-60 sm:min-h-[36px] sm:w-auto dark:border-primary-600/40 dark:!bg-primary-700 dark:!text-white dark:hover:!bg-primary-600"
             @click="handleConfirm"
           >
             <template #icon>
@@ -669,8 +670,8 @@ onUnmounted(() => {
             </template>
             确认使用
           </n-button>
-        </div>
+        </n-space>
       </div>
-    </div>
-  </n-modal>
+    </template>
+  </AppModal>
 </template>

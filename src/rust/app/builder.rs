@@ -10,7 +10,6 @@ use tauri::Builder;
 pub fn build_tauri_app() -> Builder<tauri::Wry> {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
 
@@ -23,6 +22,8 @@ pub fn build_tauri_app() -> Builder<tauri::Wry> {
             get_app_info,
             get_always_on_top,
             set_always_on_top,
+            get_image_compression_enabled,
+            set_image_compression_enabled,
             sync_window_state,
             reload_config,
 
@@ -51,6 +52,8 @@ pub fn build_tauri_app() -> Builder<tauri::Wry> {
             get_current_window_size,
             apply_window_constraints,
             update_window_size,
+            save_window_position,
+            restore_window_position,
 
             // 字体命令
             get_font_config,
@@ -144,13 +147,8 @@ pub fn build_tauri_app() -> Builder<tauri::Wry> {
             force_exit_app,
             reset_exit_attempts_cmd,
 
-            // 更新命令
-            check_for_updates,
-            download_and_install_update,
+            // 版本信息
             get_current_version,
-            restart_app,
-            exit_for_update,
-            get_platform_info,
 
             // 代理配置命令
             crate::network::commands::get_proxy_config,

@@ -1,26 +1,26 @@
 // 导入 Naive UI 组件 (复用主应用的配置)
 import {
-  create,
-  NButton,
-  NCard,
-  NCheckbox,
-  NConfigProvider,
-  NDialogProvider,
-  NGrid,
-  NGridItem,
-  NImage,
-  NImageGroup,
-  NInput,
-  NInputGroup,
-  NInputNumber,
-  NMessageProvider,
-  NNotificationProvider,
-  NSpace,
-  NSwitch,
-  NTab,
-  NTabPane,
-  NTabs,
-  NTag,
+    create,
+    NButton,
+    NCard,
+    NCheckbox,
+    NConfigProvider,
+    NDialogProvider,
+    NGrid,
+    NGridItem,
+    NImage,
+    NImageGroup,
+    NInput,
+    NInputGroup,
+    NInputNumber,
+    NMessageProvider,
+    NNotificationProvider,
+    NSpace,
+    NSwitch,
+    NTab,
+    NTabPane,
+    NTabs,
+    NTag,
 } from 'naive-ui'
 import { createApp } from 'vue'
 
@@ -69,8 +69,8 @@ app.use(naive)
 app.mount('#app')
 
 // 模拟 Tauri API 用于测试环境
-if (!window.__TAURI__) {
-  window.__TAURI__ = {
+if (!(window as any).__TAURI__) {
+  (window as any).__TAURI__ = {
     core: {
       invoke: async (command: string) => {
         console.log(`模拟 Tauri 调用: ${command}`)

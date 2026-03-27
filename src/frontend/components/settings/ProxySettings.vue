@@ -8,9 +8,11 @@ const {
   proxyConfig,
   isLoading,
   isTesting,
+  isDetecting,
   getProxyConfig,
   saveProxyConfig,
   testCurrentProxy,
+  testProxyConnection,
   detectAvailableProxy,
 } = useProxyConfig()
 
@@ -63,7 +65,11 @@ async function handleSaveConfig() {
 // 测试代理连接
 async function handleTestProxy() {
   try {
-    const result = await testCurrentProxy()
+    const result = await testProxyConnection(
+      localConfig.value.proxy_type,
+      localConfig.value.host,
+      localConfig.value.port,
+    )
     if (result) {
       message.success('代理连接测试成功')
     }
@@ -98,109 +104,85 @@ async function handleAutoDetect() {
 // 应用预设端口
 function applyPresetPort(port: number) {
   localConfig.value.port = port
+  handleSaveConfig()
 }
 </script>
 
 <template>
-  <div class="proxy-settings">
-    <n-spin :show="isLoading">
-      <n-space vertical size="large">
-        <!-- 自动检测代理 -->
-        <div class="setting-section">
-          <div class="flex items-start">
-            <div class="w-1.5 h-1.5 bg-primary rounded-full mr-3 mt-2 flex-shrink-0" />
-            <div class="flex-1">
-              <div class="text-sm font-medium mb-3 leading-relaxed">
-                自动检测代理
-              </div>
-              <div class="text-xs opacity-60 mb-3">
-                启用后，将根据地理位置自动检测并使用本地代理
-              </div>
-              <n-switch
-                v-model:value="localConfig.auto_detect"
-                @update:value="handleSaveConfig"
-              >
-                <template #checked>
-                  已启用
-                </template>
-                <template #unchecked>
-                  已禁用
-                </template>
-              </n-switch>
+  <n-spin :show="isLoading">
+    <n-space vertical size="large">
+      <!-- 自动检测代理 -->
+      <div class="flex items-center justify-between">
+        <div class="flex items-center">
+          <div class="w-1.5 h-1.5 bg-primary rounded-full mr-3 flex-shrink-0" />
+          <div>
+            <div class="text-sm font-medium leading-relaxed">
+              自动检测代理
+            </div>
+            <div class="text-xs opacity-60">
+              启用后，将根据地理位置自动检测并使用本地代理
             </div>
           </div>
         </div>
+        <n-switch
+          v-model:value="localConfig.auto_detect"
+          size="small"
+          @update:value="handleSaveConfig"
+        />
+      </div>
 
-        <!-- 仅在中国大陆使用代理 -->
-        <div v-if="localConfig.auto_detect" class="setting-section">
-          <div class="flex items-start">
-            <div class="w-1.5 h-1.5 bg-info rounded-full mr-3 mt-2 flex-shrink-0" />
-            <div class="flex-1">
-              <div class="text-sm font-medium mb-3 leading-relaxed">
-                仅在中国大陆使用代理
-              </div>
-              <div class="text-xs opacity-60 mb-3">
-                启用后，仅在检测到IP位于中国大陆时使用代理
-              </div>
-              <n-switch
-                v-model:value="localConfig.only_for_cn"
-                @update:value="handleSaveConfig"
-              >
-                <template #checked>
-                  已启用
-                </template>
-                <template #unchecked>
-                  已禁用
-                </template>
-              </n-switch>
+      <!-- 仅在中国大陆使用代理 -->
+      <div v-if="localConfig.auto_detect" class="flex items-center justify-between">
+        <div class="flex items-center">
+          <div class="w-1.5 h-1.5 bg-info rounded-full mr-3 flex-shrink-0" />
+          <div>
+            <div class="text-sm font-medium leading-relaxed">
+              仅在中国大陆使用代理
+            </div>
+            <div class="text-xs opacity-60">
+              启用后，仅在检测到IP位于中国大陆时使用代理
             </div>
           </div>
         </div>
+        <n-switch
+          v-model:value="localConfig.only_for_cn"
+          size="small"
+          @update:value="handleSaveConfig"
+        />
+      </div>
 
-        <!-- 手动代理配置 -->
-        <div class="setting-section">
-          <div class="flex items-start">
-            <div class="w-1.5 h-1.5 bg-warning rounded-full mr-3 mt-2 flex-shrink-0" />
-            <div class="flex-1">
-              <div class="text-sm font-medium mb-3 leading-relaxed">
-                手动代理配置
-              </div>
-              <div class="text-xs opacity-60 mb-3">
-                启用后，将使用下方配置的代理（优先级低于自动检测）
-              </div>
-              <n-switch
-                v-model:value="localConfig.enabled"
-                :disabled="localConfig.auto_detect"
-                @update:value="handleSaveConfig"
-              >
-                <template #checked>
-                  已启用
-                </template>
-                <template #unchecked>
-                  已禁用
-                </template>
-              </n-switch>
-              <div v-if="localConfig.auto_detect" class="text-xs opacity-60 mt-2">
-                💡 自动检测已启用，手动配置将被忽略
-              </div>
+      <!-- 手动代理配置 -->
+      <div class="flex items-center justify-between">
+        <div class="flex items-center">
+          <div class="w-1.5 h-1.5 bg-warning rounded-full mr-3 flex-shrink-0" />
+          <div>
+            <div class="text-sm font-medium leading-relaxed">
+              手动代理配置
+            </div>
+            <div class="text-xs opacity-60">
+              启用后，将使用下方配置的代理（优先级低于自动检测）
             </div>
           </div>
         </div>
+        <n-switch
+          v-model:value="localConfig.enabled"
+          size="small"
+          :disabled="localConfig.auto_detect"
+          @update:value="handleSaveConfig"
+        />
+      </div>
 
-        <!-- 代理详细配置 -->
-        <div class="setting-section">
-          <div class="flex items-start">
-            <div class="w-1.5 h-1.5 bg-success rounded-full mr-3 mt-2 flex-shrink-0" />
-            <div class="flex-1">
-              <div class="text-sm font-medium mb-3 leading-relaxed">
-                代理服务器配置
-              </div>
+    <!-- 代理服务器配置 -->
+    <div class="pt-4 border-t border-gray-200 dark:border-gray-700">
+        <div class="flex items-start">
+          <div class="w-1.5 h-1.5 bg-success rounded-full mr-3 mt-2 flex-shrink-0" />
+          <div class="flex-1">
+            <div class="text-sm font-medium mb-3 leading-relaxed">
+              代理服务器配置
+            </div>
 
-              <!-- 代理类型 -->
-              <div class="mb-4">
-                <div class="text-xs opacity-60 mb-2">
-                  代理类型
-                </div>
+            <n-form :model="localConfig" label-placement="left" label-width="auto" size="small">
+              <n-form-item label="代理类型">
                 <n-radio-group
                   v-model:value="localConfig.proxy_type"
                   @update:value="handleSaveConfig"
@@ -215,40 +197,30 @@ function applyPresetPort(port: number) {
                     </n-radio>
                   </n-space>
                 </n-radio-group>
-              </div>
+              </n-form-item>
 
-              <!-- 代理主机 -->
-              <div class="mb-4">
-                <div class="text-xs opacity-60 mb-2">
-                  代理主机
-                </div>
+              <n-form-item label="代理主机">
                 <n-input
                   v-model:value="localConfig.host"
                   placeholder="127.0.0.1"
+                  size="small"
                   @blur="handleSaveConfig"
                 />
-              </div>
+              </n-form-item>
 
-              <!-- 代理端口 -->
-              <div class="mb-4">
-                <div class="text-xs opacity-60 mb-2">
-                  代理端口
-                </div>
+              <n-form-item label="代理端口">
                 <n-input-number
                   v-model:value="localConfig.port"
                   :min="1"
                   :max="65535"
                   placeholder="7890"
+                  size="small"
                   class="w-full"
                   @blur="handleSaveConfig"
                 />
-              </div>
+              </n-form-item>
 
-              <!-- 常用端口预设 -->
-              <div class="mb-4">
-                <div class="text-xs opacity-60 mb-2">
-                  常用端口预设
-                </div>
+              <n-form-item label="端口预设">
                 <n-space>
                   <n-button
                     v-for="preset in commonPorts"
@@ -259,64 +231,48 @@ function applyPresetPort(port: number) {
                     {{ preset.label }} ({{ preset.value }})
                   </n-button>
                 </n-space>
-              </div>
+              </n-form-item>
+            </n-form>
 
-              <!-- 操作按钮 -->
-              <n-space>
-                <n-button
-                  type="primary"
-                  :loading="isTesting"
-                  @click="handleTestProxy"
-                >
-                  测试连接
-                </n-button>
-                <n-button
-                  :loading="isTesting"
-                  @click="handleAutoDetect"
-                >
-                  自动检测
-                </n-button>
-              </n-space>
-            </div>
+            <n-space>
+              <n-button
+                type="primary"
+                size="small"
+                :loading="isTesting"
+                @click="handleTestProxy"
+              >
+                测试连接
+              </n-button>
+              <n-button
+                size="small"
+                :loading="isDetecting"
+                @click="handleAutoDetect"
+              >
+                自动检测
+              </n-button>
+            </n-space>
           </div>
         </div>
+      </div>
 
-        <!-- 说明信息 -->
-        <div class="setting-section">
-          <div class="flex items-start">
-            <div class="w-1.5 h-1.5 bg-gray-400 rounded-full mr-3 mt-2 flex-shrink-0" />
-            <div class="flex-1">
-              <div class="text-xs opacity-60">
-                <p class="mb-2">
-                  💡 <strong>使用说明：</strong>
-                </p>
-                <ul class="list-disc list-inside space-y-1">
-                  <li>自动检测模式会按优先级检测常用代理端口（7890, 7891, 10808, 10809, 1080, 8080）</li>
-                  <li>代理仅用于更新检查和下载，不影响其他网络请求</li>
-                  <li>建议启用"仅在中国大陆使用代理"以避免不必要的代理使用</li>
-                  <li>手动配置的代理优先级低于自动检测</li>
-                </ul>
-              </div>
-            </div>
+      <!-- 说明信息 -->
+      <div class="flex items-start">
+        <div class="w-1.5 h-1.5 bg-gray-400 rounded-full mr-3 mt-2 flex-shrink-0" />
+        <div class="flex-1">
+          <div class="text-xs opacity-60">
+            <p class="mb-2">
+              💡 <strong>使用说明：</strong>
+            </p>
+            <ul class="list-disc list-inside space-y-1">
+              <li>自动检测模式会按优先级检测常用代理端口（7890, 7891, 10808, 10809, 1080, 8080）</li>
+              <li>代理仅用于更新检查和下载，不影响其他网络请求</li>
+              <li>建议启用"仅在中国大陆使用代理"以避免不必要的代理使用</li>
+              <li>手动配置的代理优先级低于自动检测</li>
+            </ul>
           </div>
         </div>
-      </n-space>
-    </n-spin>
-  </div>
+      </div>
+    </n-space>
+  </n-spin>
 </template>
 
-<style scoped>
-.proxy-settings {
-  padding: 1rem;
-}
-
-.setting-section {
-  padding: 1rem;
-  border-radius: 0.5rem;
-  background-color: rgba(0, 0, 0, 0.02);
-}
-
-.dark .setting-section {
-  background-color: rgba(255, 255, 255, 0.05);
-}
-</style>

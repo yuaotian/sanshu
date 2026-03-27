@@ -101,6 +101,17 @@ body {
 .text-2xl { font-size: var(--font-size-2xl); }
 .text-3xl { font-size: var(--font-size-3xl); }
 
+/* 全局链接颜色 - 使用主色调替代浏览器默认深蓝 */
+a {
+  color: var(--color-primary, #14b8a6);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--color-primary-hover, #2dd4bf);
+  text-decoration: underline;
+}
+
 /* 确保引用块的边框在所有主题下都显示 */
 .markdown-content blockquote {
   border-left: 4px solid #14b8a6 !important;

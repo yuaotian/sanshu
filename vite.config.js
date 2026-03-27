@@ -1,5 +1,5 @@
-import process from 'node:process'
 import vue from '@vitejs/plugin-vue'
+import process from 'node:process'
 import UnoCSS from 'unocss/vite'
 import { defineConfig } from 'vite'
 
@@ -16,7 +16,7 @@ export default defineConfig({
     strictPort: true,
     host: '0.0.0.0',
     hmr: {
-      port: 5177,
+      port: 5178,
     },
   },
   envPrefix: ['VITE_', 'TAURI_'],

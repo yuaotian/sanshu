@@ -23,7 +23,6 @@ export function useMcpHandler() {
    */
   async function handleMcpResponse(response: any) {
     try {
-      // 通过Tauri命令发送响应并退出应用
       await invoke('send_mcp_response', { response })
       await invoke('exit_app')
     }
@@ -37,12 +36,10 @@ export function useMcpHandler() {
    */
   async function handleMcpCancel() {
     try {
-      // 发送取消信息并退出应用
       await invoke('send_mcp_response', { response: 'CANCELLED' })
       await invoke('exit_app')
     }
     catch (error) {
-      // 静默处理MCP取消错误
       console.error('MCP取消处理失败:', error)
     }
   }

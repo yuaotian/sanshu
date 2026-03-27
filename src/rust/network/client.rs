@@ -55,20 +55,6 @@ pub fn create_http_client(
         .map_err(|e| format!("构建HTTP客户端失败: {}", e))
 }
 
-/// 创建用于更新检查的HTTP客户端
-/// 
-/// 便捷方法，使用默认的30秒超时
-pub fn create_update_client(proxy_info: Option<&ProxyInfo>) -> Result<reqwest::Client, String> {
-    create_http_client(proxy_info, 30)
-}
-
-/// 创建用于下载的HTTP客户端
-/// 
-/// 便捷方法，使用较长的60秒超时（适合大文件下载）
-pub fn create_download_client(proxy_info: Option<&ProxyInfo>) -> Result<reqwest::Client, String> {
-    create_http_client(proxy_info, 60)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

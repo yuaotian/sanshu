@@ -106,7 +106,7 @@ function testPopup() {
 <template>
   <div class="flex flex-col min-h-screen">
     <!-- 主要内容区域 -->
-    <div class="flex-1 flex items-start justify-center p-6 pt-12">
+    <div class="flex-1 flex items-start justify-center p-6 pt-8">
       <div class="max-w-6xl w-full">
         <!-- 标题区域 -->
         <div class="text-center mb-8">

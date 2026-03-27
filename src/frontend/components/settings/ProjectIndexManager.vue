@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import type { IndexStatus, ProjectIndexStatus } from '../../types/tauri'
 import { invoke } from '@tauri-apps/api/core'
 import { useDialog, useMessage } from 'naive-ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useAcemcpSync } from '../../composables/useAcemcpSync'
+import type { IndexStatus, ProjectIndexStatus } from '../../types/tauri'
 import { ProjectCard, ProjectCardSkeleton } from '../index'
 import McpIndexStatusDrawer from '../popup/McpIndexStatusDrawer.vue'
 
@@ -416,41 +416,41 @@ function getDirectoryExists(projectRoot: string): boolean {
 </script>
 
 <template>
-  <div class="project-index-manager">
+  <div>
     <!-- 顶部工具栏 -->
-    <div class="toolbar-section">
+    <div class="mb-4 space-y-3">
       <!-- 统计信息 -->
-      <div class="stats-bar">
-        <div class="stat-chip">
-          <div class="i-carbon-folder text-primary-500" />
-          <span>{{ stats.total }} 个项目</span>
-        </div>
-        <div v-if="stats.indexing > 0" class="stat-chip text-blue-500">
-          <div class="i-carbon-in-progress animate-spin" />
-          <span>{{ stats.indexing }} 索引中</span>
-        </div>
-        <div v-if="stats.stale > 0" class="stat-chip text-amber-500">
-          <div class="i-carbon-warning-alt" />
-          <span>{{ stats.stale }} 待重建</span>
-        </div>
-        <div v-if="stats.synced > 0" class="stat-chip text-green-500">
-          <div class="i-carbon-checkmark-filled" />
-          <span>{{ stats.synced }} 已完成</span>
-        </div>
-        <div v-if="stats.failed > 0" class="stat-chip text-red-500">
-          <div class="i-carbon-warning-filled" />
-          <span>{{ stats.failed }} 失败</span>
-        </div>
+      <div class="flex flex-wrap gap-3">
+        <n-tag size="small" :bordered="false">
+          <template #icon><div class="i-carbon-folder" /></template>
+          {{ stats.total }} 个项目
+        </n-tag>
+        <n-tag v-if="stats.indexing > 0" size="small" type="info" :bordered="false">
+          <template #icon><div class="i-carbon-in-progress animate-spin" /></template>
+          {{ stats.indexing }} 索引中
+        </n-tag>
+        <n-tag v-if="stats.stale > 0" size="small" type="warning" :bordered="false">
+          <template #icon><div class="i-carbon-warning-alt" /></template>
+          {{ stats.stale }} 待重建
+        </n-tag>
+        <n-tag v-if="stats.synced > 0" size="small" type="success" :bordered="false">
+          <template #icon><div class="i-carbon-checkmark-filled" /></template>
+          {{ stats.synced }} 已完成
+        </n-tag>
+        <n-tag v-if="stats.failed > 0" size="small" type="error" :bordered="false">
+          <template #icon><div class="i-carbon-warning-filled" /></template>
+          {{ stats.failed }} 失败
+        </n-tag>
       </div>
 
       <!-- 搜索和筛选 -->
-      <div class="filter-bar">
+      <div class="flex flex-wrap gap-2 items-center">
         <n-input
           v-model:value="searchQuery"
           placeholder="搜索项目..."
           clearable
           size="small"
-          class="search-input"
+          class="flex-1 min-w-[150px] max-w-[250px]"
         >
           <template #prefix>
             <div class="i-carbon-search opacity-50" />
@@ -461,7 +461,7 @@ function getDirectoryExists(projectRoot: string): boolean {
           v-model:value="statusFilter"
           :options="statusOptions"
           size="small"
-          class="filter-select"
+          class="w-[100px]"
           placeholder="状态"
         />
 
@@ -469,7 +469,7 @@ function getDirectoryExists(projectRoot: string): boolean {
           v-model:value="sortBy"
           :options="sortOptions"
           size="small"
-          class="sort-select"
+          class="w-[90px]"
           placeholder="排序"
         />
 
@@ -482,46 +482,47 @@ function getDirectoryExists(projectRoot: string): boolean {
     </div>
 
     <!-- 加载状态 - 骨架屏网格 -->
-    <div v-if="loading" class="card-grid">
+    <div v-if="loading" class="grid grid-cols-1 md:grid-cols-2 gap-4">
       <ProjectCardSkeleton v-for="i in 6" :key="i" />
     </div>
 
     <!-- 空状态 -->
-    <div v-else-if="projectList.length === 0 && !searchQuery && statusFilter === 'all'" class="empty-state">
-      <div class="empty-icon">
+    <n-empty
+      v-else-if="projectList.length === 0 && !searchQuery && statusFilter === 'all'"
+      description="使用代码搜索工具后，项目将自动显示在这里"
+      class="py-12"
+    >
+      <template #icon>
         <div class="i-carbon-folder-off text-5xl opacity-30" />
-      </div>
-      <div class="empty-title">
-        暂无项目索引数据
-      </div>
-      <div class="empty-desc">
-        使用代码搜索工具后，项目将自动显示在这里
-      </div>
-    </div>
+      </template>
+      <template #extra>
+        <span class="text-base font-medium opacity-80">暂无项目索引数据</span>
+      </template>
+    </n-empty>
 
     <!-- 搜索无结果 -->
-    <div v-else-if="projectList.length === 0" class="empty-state">
-      <div class="empty-icon">
+    <n-empty
+      v-else-if="projectList.length === 0"
+      description="尝试调整搜索条件或筛选器"
+      class="py-12"
+    >
+      <template #icon>
         <div class="i-carbon-search text-4xl opacity-30" />
-      </div>
-      <div class="empty-title">
-        未找到匹配的项目
-      </div>
-      <div class="empty-desc">
-        尝试调整搜索条件或筛选器
-      </div>
-      <n-button size="small" @click="searchQuery = ''; statusFilter = 'all'">
-        清除筛选
-      </n-button>
-    </div>
+      </template>
+      <template #extra>
+        <n-button size="small" @click="searchQuery = ''; statusFilter = 'all'">
+          清除筛选
+        </n-button>
+      </template>
+    </n-empty>
 
     <!-- 项目卡片网格 -->
-    <div v-else class="card-grid">
+    <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-4">
       <ProjectCard
         v-for="project in projectList"
         :key="project.project_root"
         :project="project"
-        :is-watching="watchingProjects.includes(project.project_root)"
+        :is-watching="watchingProjects.some(p => normalizePath(p) === normalizePath(project.project_root))"
         :directory-exists="getDirectoryExists(project.project_root)"
         @view-tree="viewProjectTree(project.project_root)"
         @reindex="handleReindex(project.project_root)"
@@ -545,109 +546,3 @@ function getDirectoryExists(projectRoot: string): boolean {
   </div>
 </template>
 
-<style scoped>
-/* 项目索引管理容器 */
-.project-index-manager {
-  max-width: 100%;
-  margin: 0 auto;
-}
-
-/* 顶部工具栏区域 */
-.toolbar-section {
-  margin-bottom: 16px;
-  space-y: 12px;
-}
-
-/* 统计信息栏 */
-.stats-bar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.stat-chip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  opacity: 0.8;
-}
-
-/* 筛选栏 */
-.filter-bar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-}
-
-.search-input {
-  flex: 1;
-  min-width: 150px;
-  max-width: 250px;
-}
-
-.filter-select {
-  width: 100px;
-}
-
-.sort-select {
-  width: 90px;
-}
-
-/* 卡片网格布局 */
-.card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 16px;
-}
-
-/* 空状态样式 */
-.empty-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 48px 24px;
-  text-align: center;
-}
-
-.empty-icon {
-  margin-bottom: 16px;
-}
-
-.empty-title {
-  font-size: 16px;
-  font-weight: 500;
-  margin-bottom: 8px;
-  opacity: 0.8;
-}
-
-.empty-desc {
-  font-size: 13px;
-  opacity: 0.5;
-  margin-bottom: 16px;
-}
-
-/* 响应式调整 */
-@media (max-width: 768px) {
-  .card-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .filter-bar {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .search-input {
-    max-width: none;
-  }
-
-  .filter-select,
-  .sort-select {
-    width: 100%;
-  }
-}
-</style>

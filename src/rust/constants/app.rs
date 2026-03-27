@@ -13,13 +13,13 @@ pub const DESCRIPTION: &str = "智能代码审查工具";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// 应用程序作者
-pub const AUTHOR: &str = "yuaotian";
+pub const AUTHOR: &str = "Yueby";
 
 /// 应用程序主页
-pub const HOMEPAGE: &str = "https://github.com/yuaotian/sanshu";
+pub const HOMEPAGE: &str = "https://github.com/yueby/sanshu";
 
 /// 应用程序仓库
-pub const REPOSITORY: &str = "https://github.com/yuaotian/sanshu";
+pub const REPOSITORY: &str = "https://github.com/yueby/sanshu";
 
 /// 应用程序许可证
 pub const LICENSE: &str = "MIT";
@@ -31,7 +31,7 @@ pub const CONFIG_FILE_NAME: &str = "config.json";
 pub const LOG_FILE_PREFIX: &str = "sanshu";
 
 /// 应用程序标识符（用于系统集成）
-pub const APP_IDENTIFIER: &str = "com.yuaotian.sanshu";
+pub const APP_IDENTIFIER: &str = "com.yueby.sanshu";
 
 /// 用户代理字符串
 pub const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));

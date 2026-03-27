@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import type { ShortcutBinding, ShortcutConfig } from '../../types/popup'
 import { useMessage } from 'naive-ui'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useShortcuts } from '../../composables/useShortcuts'
+import type { ShortcutBinding, ShortcutConfig } from '../../types/popup'
+import AppModal from '../common/AppModal.vue'
 
 const message = useMessage()
 
@@ -263,57 +264,44 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="space-y-4">
-    <!-- 页面标题 -->
-    <div class="mb-4">
-      <h3 class="text-base font-medium text-on-surface">
-        自定义快捷键
-      </h3>
-      <p class="text-sm text-on-surface-secondary">
-        自定义应用快捷键绑定
-      </p>
-    </div>
-
+  <n-space vertical size="large">
     <!-- 快捷键列表 -->
     <div class="space-y-3">
       <div
         v-for="(binding, id) in config.shortcuts"
         :key="id"
-        class="p-3 border border-border rounded-lg"
+        class="flex items-center justify-between"
       >
-        <div class="flex items-center justify-between">
+        <div class="flex items-start flex-1">
+          <div class="w-1.5 h-1.5 bg-indigo-500 rounded-full mr-3 mt-2 flex-shrink-0" />
           <div class="flex-1">
             <div class="flex items-center gap-2">
-              <span class="text-base font-medium text-on-surface">{{ binding.name }}</span>
-            </div>
-            <p class="text-xs text-on-surface-secondary mt-1">
-              {{ binding.description }}
-            </p>
-            <div class="flex items-center gap-2 mt-2">
-              <span class="text-xs text-on-surface-secondary">作用域:</span>
+              <span class="text-sm font-medium">{{ binding.name }}</span>
               <n-tag size="small">
                 {{ getScopeText(binding.scope) }}
               </n-tag>
             </div>
-          </div>
-          <div class="flex items-center gap-2">
-            <n-button
-              size="small"
-              type="primary"
-              @click="editBinding(id, binding)"
-            >
-              编辑
-            </n-button>
+            <div class="text-xs opacity-60 mt-1">
+              {{ binding.description }}
+            </div>
+            <div class="mt-2">
+              <n-tag size="small" type="info">
+                <span class="font-mono">{{ shortcutKeyToString(binding.key_combination) }}</span>
+              </n-tag>
+            </div>
           </div>
         </div>
-        <div class="mt-2 p-2 bg-surface-variant rounded text-center">
-          <span class="font-mono text-sm">{{ shortcutKeyToString(binding.key_combination) }}</span>
-        </div>
+        <n-button
+          size="small"
+          @click="editBinding(id, binding)"
+        >
+          编辑
+        </n-button>
       </div>
     </div>
 
     <!-- 重置按钮 -->
-    <div class="pt-4 border-t border-border">
+    <div class="pt-4 border-t border-gray-200 dark:border-gray-700">
       <n-button
         type="warning"
         size="small"
@@ -324,8 +312,8 @@ onUnmounted(() => {
     </div>
 
     <!-- 编辑快捷键对话框 -->
-    <n-modal v-model:show="showEditDialog" preset="dialog" title="编辑快捷键">
-      <div class="space-y-4">
+    <AppModal v-model:show="showEditDialog" title="编辑快捷键" width="480px">
+      <n-form :model="editingBinding" label-placement="top">
         <n-form-item label="快捷键名称">
           <n-input v-model:value="editingBinding.name" placeholder="输入快捷键名称" />
         </n-form-item>
@@ -335,101 +323,94 @@ onUnmounted(() => {
         </n-form-item>
 
         <n-form-item label="快捷键设置">
-          <!-- 快捷键录制区域 -->
-          <div
-            class="border-2 border-dashed rounded-lg p-6 text-center transition-all duration-300"
-            :class="isRecording ? 'border-primary bg-primary-50 dark:bg-primary-950' : 'border-border hover:border-primary'"
+          <n-card
+            size="small"
+            class="text-center w-full"
+            :bordered="isRecording"
           >
             <div v-if="!isRecording" class="space-y-3">
-              <div class="text-lg text-on-surface">
-                🎹 快捷键录制器
-              </div>
-              <div class="text-sm text-on-surface-secondary">
+              <div class="text-sm opacity-60">
                 点击下方按钮，然后按下您想要的快捷键组合
               </div>
               <n-button
                 type="primary"
-                size="medium"
+                size="small"
                 @click="startRecording"
               >
-                🎙️ 开始录制快捷键
+                开始录制快捷键
               </n-button>
             </div>
 
             <div v-else class="space-y-4">
               <div class="flex items-center justify-center gap-2">
                 <div class="w-3 h-3 bg-primary rounded-full animate-pulse" />
-                <div class="text-lg text-primary font-medium">
-                  正在录制... 请按下您想要的快捷键组合
+                <div class="text-sm text-primary font-medium">
+                  正在录制... 请按下快捷键组合
                 </div>
                 <div class="w-3 h-3 bg-primary rounded-full animate-pulse" />
               </div>
 
-              <!-- 实时按键状态显示 -->
-              <div class="flex items-center justify-center gap-3 min-h-12 p-3 bg-surface rounded-lg">
-                <n-tag v-if="currentKeys.ctrl" size="medium" type="info">
+              <n-space justify="center" align="center" class="min-h-12">
+                <n-tag v-if="currentKeys.ctrl" size="small" type="info">
                   {{ isMac ? '⌃' : 'Ctrl' }}
                 </n-tag>
-                <n-tag v-if="currentKeys.alt" size="medium" type="info">
+                <n-tag v-if="currentKeys.alt" size="small" type="info">
                   {{ isMac ? '⌥' : 'Alt' }}
                 </n-tag>
-                <n-tag v-if="currentKeys.shift" size="medium" type="info">
+                <n-tag v-if="currentKeys.shift" size="small" type="info">
                   {{ isMac ? '⇧' : 'Shift' }}
                 </n-tag>
-                <n-tag v-if="currentKeys.meta && isMac" size="medium" type="info">
+                <n-tag v-if="currentKeys.meta && isMac" size="small" type="info">
                   ⌘
                 </n-tag>
-                <n-tag v-if="currentKeys.key" size="medium" type="primary">
+                <n-tag v-if="currentKeys.key" size="small" type="primary">
                   {{ currentKeys.key }}
                 </n-tag>
-                <span v-if="!hasAnyKey" class="text-on-surface-secondary">
+                <span v-if="!hasAnyKey" class="opacity-50">
                   等待按键...
                 </span>
-              </div>
+              </n-space>
 
-              <div class="text-sm text-on-surface-secondary space-y-1">
-                <div>💡 必须包含修饰键（Ctrl、Alt、Shift）或使用功能键</div>
-                <div>⚠️ 按 ESC 取消录制</div>
+              <div class="text-xs opacity-60 space-y-1">
+                <div>必须包含修饰键（Ctrl、Alt、Shift）或使用功能键 · 按 ESC 取消</div>
               </div>
 
               <n-button
-                size="medium"
+                size="small"
                 type="warning"
                 @click="stopRecording"
               >
                 取消录制
               </n-button>
             </div>
-          </div>
+          </n-card>
         </n-form-item>
 
-        <div class="p-3 bg-surface-variant rounded text-center">
-          <span class="text-sm text-on-surface-secondary">预览: </span>
+        <n-card size="small" :bordered="false" content-style="padding: 12px; text-align: center">
+          <span class="text-sm opacity-60">预览: </span>
           <span class="font-mono">{{ shortcutKeyToString(editingBinding.key_combination) }}</span>
-        </div>
+        </n-card>
 
-        <!-- 冲突检测 -->
-        <div v-if="conflictWarning" class="p-3 bg-error-container rounded">
-          <p class="text-sm text-error">
-            ⚠️ 快捷键冲突：与 "{{ conflictWarning }}" 冲突
-          </p>
-        </div>
-      </div>
+        <n-alert v-if="conflictWarning" type="error" :bordered="false">
+          快捷键冲突：与 "{{ conflictWarning }}" 冲突
+        </n-alert>
+      </n-form>
 
-      <template #action>
-        <div class="flex gap-2">
-          <n-button @click="showEditDialog = false">
+      <template #footer>
+        <n-space justify="end">
+          <n-button size="small" @click="showEditDialog = false">
             取消
           </n-button>
           <n-button
+            size="small"
             type="primary"
             :disabled="!!conflictWarning"
             @click="saveBinding"
           >
             保存
           </n-button>
-        </div>
+        </n-space>
       </template>
-    </n-modal>
-  </div>
+    </AppModal>
+  </n-space>
 </template>

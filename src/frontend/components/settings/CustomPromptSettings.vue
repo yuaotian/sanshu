@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import type { CustomPrompt, CustomPromptConfig } from '../../types/popup'
 import { invoke } from '@tauri-apps/api/core'
 import { emit } from '@tauri-apps/api/event'
 import { useMessage } from 'naive-ui'
 import { onMounted, ref } from 'vue'
+import type { CustomPrompt, CustomPromptConfig } from '../../types/popup'
+import AppModal from '../common/AppModal.vue'
 
 const message = useMessage()
 
@@ -220,24 +221,31 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="p-4">
+  <n-space vertical size="large">
     <!-- 启用开关 -->
-    <div class="flex items-center justify-between mb-6">
-      <div>
-        <div class="text-sm opacity-60">
-          是否开启快捷模板功能
+    <div class="flex items-center justify-between">
+      <div class="flex items-center">
+        <div class="w-1.5 h-1.5 bg-orange-500 rounded-full mr-3 flex-shrink-0" />
+        <div>
+          <div class="text-sm font-medium leading-relaxed">
+            快捷模板功能
+          </div>
+          <div class="text-xs opacity-60">
+            是否开启快捷模板功能
+          </div>
         </div>
       </div>
       <n-switch
         v-model:value="config.enabled"
+        size="small"
         @update:value="toggleEnabled"
       />
     </div>
 
-    <div v-if="config.enabled" data-guide="custom-prompt-settings">
+    <div v-if="config.enabled" class="pt-4 border-t border-gray-200 dark:border-gray-700" data-guide="custom-prompt-settings">
       <!-- 添加按钮 -->
       <div class="flex justify-between items-center mb-4">
-        <div class="text-sm opacity-60">
+        <div class="text-xs opacity-60">
           已创建 {{ config.prompts.length }} 个模板
         </div>
         <n-button
@@ -265,80 +273,76 @@ onMounted(() => {
       </div>
 
       <div v-else class="space-y-3">
-        <div class="space-y-3">
-          <div
-            v-for="prompt in config.prompts"
-            :key="prompt.id"
-            class="bg-black-50 rounded-lg p-4 border border-black-200 shadow-sm hover:border-black-300 transition-colors"
-          >
-            <div class="flex justify-between items-start mb-2">
-              <div class="flex-1">
-                <div class="flex items-center gap-2 mb-1">
-                  <span class="font-medium text-white">{{ prompt.name }}</span>
-                  <!-- 类型标识 -->
-                  <n-tag v-if="prompt.type === 'conditional'" size="small" type="info">
-                    上下文追加
-                  </n-tag>
-                  <n-tag v-else size="small" type="default">
-                    快捷模板
-                  </n-tag>
-                </div>
-                <div v-if="prompt.description" class="text-sm opacity-60 mb-2">
-                  {{ prompt.description }}
-                </div>
+        <n-card
+          v-for="prompt in config.prompts"
+          :key="prompt.id"
+          size="small"
+          hoverable
+        >
+          <div class="flex justify-between items-start">
+            <div class="flex-1">
+              <div class="flex items-center gap-2 mb-1">
+                <span class="font-medium text-sm">{{ prompt.name }}</span>
+                <n-tag v-if="prompt.type === 'conditional'" size="small" type="info">
+                  上下文追加
+                </n-tag>
+                <n-tag v-else size="small" type="default">
+                  快捷模板
+                </n-tag>
+              </div>
+              <div v-if="prompt.description" class="text-xs opacity-60 mb-2">
+                {{ prompt.description }}
+              </div>
 
-                <!-- 快捷模板内容显示 -->
-                <div v-if="prompt.type !== 'conditional'" class="text-sm bg-black-100 p-2 rounded border border-black-200">
-                  <span v-if="prompt.content.trim()">{{ prompt.content }}</span>
-                  <span v-else class="italic opacity-60">（空内容 - 清空输入框）</span>
-                </div>
+              <!-- 快捷模板内容显示 -->
+              <n-card v-if="prompt.type !== 'conditional'" size="small" :bordered="false" content-style="padding: 8px" class="text-xs">
+                <span v-if="prompt.content.trim()" class="opacity-70">{{ prompt.content }}</span>
+                <span v-else class="italic opacity-50">（空内容 - 清空输入框）</span>
+              </n-card>
 
-                <!-- 上下文追加内容显示 -->
-                <div v-else class="space-y-2">
-                  <div class="text-sm bg-black-100 p-2 rounded border border-black-200">
-                    <div class="font-medium mb-1">
-                      条件：{{ prompt.condition_text }}
-                    </div>
-                    <div class="space-y-1 text-xs">
-                      <div v-if="prompt.template_true">
-                        <span class="text-green-400">✓ 开启：</span>{{ prompt.template_true }}
-                      </div>
-                      <div v-if="prompt.template_false">
-                        <span class="text-red-400">✗ 关闭：</span>{{ prompt.template_false }}
-                      </div>
-                      <div class="text-gray-700 dark:text-white">
-                        当前状态：{{ prompt.current_state ? '开启' : '关闭' }}
-                      </div>
-                    </div>
+              <!-- 上下文追加内容显示 -->
+              <n-card v-else size="small" :bordered="false" content-style="padding: 8px" class="text-xs">
+                <div class="font-medium mb-1 opacity-70">
+                  条件：{{ prompt.condition_text }}
+                </div>
+                <div class="space-y-1 opacity-70">
+                  <div v-if="prompt.template_true">
+                    <span class="text-green-500">✓ 开启：</span>{{ prompt.template_true }}
+                  </div>
+                  <div v-if="prompt.template_false">
+                    <span class="text-red-500">✗ 关闭：</span>{{ prompt.template_false }}
+                  </div>
+                  <div>
+                    当前状态：{{ prompt.current_state ? '开启' : '关闭' }}
                   </div>
                 </div>
-              </div>
-              <div class="flex gap-1 ml-4">
-                <n-button size="small" quaternary @click="editPrompt(prompt)">
-                  <template #icon>
-                    <div class="i-carbon-edit w-4 h-4" />
-                  </template>
-                </n-button>
-                <n-button size="small" quaternary type="error" @click="showDeleteConfirm(prompt.id)">
-                  <template #icon>
-                    <div class="i-carbon-trash-can w-4 h-4" />
-                  </template>
-                </n-button>
-              </div>
+              </n-card>
+            </div>
+            <div class="flex gap-1 ml-4">
+              <n-button size="small" quaternary @click="editPrompt(prompt)">
+                <template #icon>
+                  <div class="i-carbon-edit w-4 h-4" />
+                </template>
+              </n-button>
+              <n-button size="small" quaternary type="error" @click="showDeleteConfirm(prompt.id)">
+                <template #icon>
+                  <div class="i-carbon-trash-can w-4 h-4" />
+                </template>
+              </n-button>
             </div>
           </div>
-        </div>
+        </n-card>
       </div>
     </div>
 
     <!-- 添加对话框 -->
-    <n-modal v-model:show="showAddDialog" preset="card" title="添加快捷模板" style="width: 600px">
+    <AppModal v-model:show="showAddDialog" title="添加快捷模板" width="600px">
       <n-form :model="newPrompt" label-placement="top">
         <n-form-item label="名称" required>
-          <n-input v-model:value="newPrompt.name" placeholder="输入模板名称" />
+          <n-input v-model:value="newPrompt.name" placeholder="输入模板名称" size="small" />
         </n-form-item>
         <n-form-item label="描述">
-          <n-input v-model:value="newPrompt.description" placeholder="简短描述这个模板的用途" />
+          <n-input v-model:value="newPrompt.description" placeholder="简短描述这个模板的用途" size="small" />
         </n-form-item>
 
         <!-- 模板类型选择 -->
@@ -358,6 +362,7 @@ onMounted(() => {
           <n-input
             v-model:value="newPrompt.content"
             type="textarea"
+            size="small"
             placeholder="输入模板内容（留空可实现清空输入框效果）"
             :autosize="{ minRows: 4, maxRows: 8 }"
           />
@@ -366,12 +371,13 @@ onMounted(() => {
         <!-- 上下文追加字段 -->
         <template v-if="newPrompt.type === 'conditional'">
           <n-form-item label="条件描述" required>
-            <n-input v-model:value="newPrompt.condition_text" placeholder="例如：是否使用TypeScript" />
+            <n-input v-model:value="newPrompt.condition_text" placeholder="例如：是否使用TypeScript" size="small" />
           </n-form-item>
           <n-form-item label="开启时的内容">
             <n-input
               v-model:value="newPrompt.template_true"
               type="textarea"
+              size="small"
               placeholder="例如：✔️需要使用TypeScript"
               :autosize="{ minRows: 2, maxRows: 4 }"
             />
@@ -380,12 +386,13 @@ onMounted(() => {
             <n-input
               v-model:value="newPrompt.template_false"
               type="textarea"
+              size="small"
               placeholder="例如：❌切记，不要使用TypeScript"
               :autosize="{ minRows: 2, maxRows: 4 }"
             />
           </n-form-item>
           <n-form-item label="当前状态">
-            <n-switch v-model:value="newPrompt.current_state">
+            <n-switch v-model:value="newPrompt.current_state" size="small">
               <template #checked>
                 开启
               </template>
@@ -397,25 +404,25 @@ onMounted(() => {
         </template>
       </n-form>
       <template #footer>
-        <div class="flex justify-end gap-2">
-          <n-button @click="showAddDialog = false">
+        <n-space justify="end">
+          <n-button size="small" @click="showAddDialog = false">
             取消
           </n-button>
-          <n-button type="primary" @click="addPrompt">
+          <n-button size="small" type="primary" @click="addPrompt">
             添加
           </n-button>
-        </div>
+        </n-space>
       </template>
-    </n-modal>
+    </AppModal>
 
     <!-- 编辑对话框 -->
-    <n-modal v-model:show="showEditDialog" preset="card" title="编辑快捷模板" style="width: 600px">
+    <AppModal v-model:show="showEditDialog" title="编辑快捷模板" width="600px">
       <n-form v-if="editingPrompt" :model="editingPrompt" label-placement="top">
         <n-form-item label="名称" required>
-          <n-input v-model:value="editingPrompt.name" placeholder="输入模板名称" />
+          <n-input v-model:value="editingPrompt.name" placeholder="输入模板名称" size="small" />
         </n-form-item>
         <n-form-item label="描述">
-          <n-input v-model:value="editingPrompt.description" placeholder="简短描述这个模板的用途" />
+          <n-input v-model:value="editingPrompt.description" placeholder="简短描述这个模板的用途" size="small" />
         </n-form-item>
 
         <!-- 模板类型选择 -->
@@ -435,6 +442,7 @@ onMounted(() => {
           <n-input
             v-model:value="editingPrompt.content"
             type="textarea"
+            size="small"
             placeholder="输入模板内容（留空可实现清空输入框效果）"
             :autosize="{ minRows: 4, maxRows: 8 }"
           />
@@ -443,12 +451,13 @@ onMounted(() => {
         <!-- 上下文追加字段 -->
         <template v-if="editingPrompt.type === 'conditional'">
           <n-form-item label="条件描述" required>
-            <n-input v-model:value="editingPrompt.condition_text" placeholder="例如：是否使用TypeScript" />
+            <n-input v-model:value="editingPrompt.condition_text" placeholder="例如：是否使用TypeScript" size="small" />
           </n-form-item>
           <n-form-item label="开启时的内容">
             <n-input
               v-model:value="editingPrompt.template_true"
               type="textarea"
+              size="small"
               placeholder="例如：✔️需要使用TypeScript"
               :autosize="{ minRows: 2, maxRows: 4 }"
             />
@@ -457,12 +466,13 @@ onMounted(() => {
             <n-input
               v-model:value="editingPrompt.template_false"
               type="textarea"
+              size="small"
               placeholder="例如：❌切记，不要使用TypeScript"
               :autosize="{ minRows: 2, maxRows: 4 }"
             />
           </n-form-item>
           <n-form-item label="当前状态">
-            <n-switch v-model:value="editingPrompt.current_state">
+            <n-switch v-model:value="editingPrompt.current_state" size="small">
               <template #checked>
                 开启
               </template>
@@ -474,57 +484,30 @@ onMounted(() => {
         </template>
       </n-form>
       <template #footer>
-        <div class="flex justify-end gap-2">
-          <n-button @click="cancelEdit">
+        <n-space justify="end">
+          <n-button size="small" @click="cancelEdit">
             取消
           </n-button>
-          <n-button type="primary" @click="updatePrompt">
+          <n-button size="small" type="primary" @click="updatePrompt">
             保存
           </n-button>
-        </div>
+        </n-space>
       </template>
-    </n-modal>
+    </AppModal>
 
     <!-- 删除确认对话框 -->
-    <n-modal v-model:show="showDeleteDialog" preset="dialog" title="确认删除">
-      <div>确定要删除这个模板吗？此操作无法撤销。</div>
-      <template #action>
-        <div class="flex justify-end gap-2">
-          <n-button @click="showDeleteDialog = false">
-            取消
-          </n-button>
-          <n-button type="error" @click="deletePrompt">
-            确定删除
-          </n-button>
-        </div>
-      </template>
-    </n-modal>
-  </div>
+    <AppModal
+      v-model:show="showDeleteDialog"
+      preset="dialog"
+      type="warning"
+      title="确认删除"
+      content="确定要删除这个模板吗？此操作无法撤销。"
+      positive-text="确定删除"
+      negative-text="取消"
+      :positive-button-props="{ type: 'error' }"
+      @positive-click="deletePrompt"
+      @negative-click="showDeleteDialog = false"
+    />
+  </n-space>
 </template>
 
-<style scoped>
-/* 拖拽排序样式 */
-.sortable-item {
-  cursor: default;
-  transition: all 0.2s ease;
-}
-
-.sortable-ghost {
-  opacity: 0.5;
-  transform: scale(0.95);
-  background: rgba(59, 130, 246, 0.1) !important;
-  border: 2px dashed rgba(59, 130, 246, 0.3) !important;
-}
-
-.sortable-chosen {
-  cursor: grabbing !important;
-  transform: scale(1.02);
-}
-
-.sortable-drag {
-  opacity: 0.8;
-  transform: rotate(2deg);
-  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
-  z-index: 1000;
-}
-</style>

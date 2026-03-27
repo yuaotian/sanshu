@@ -1,4 +1,4 @@
-use crate::config::AppState;
+use crate::config::{AppState, save_config};
 use crate::constants::app::{EXIT_CONFIRMATION_WINDOW_SECS, REQUIRED_EXIT_ATTEMPTS};
 use crate::log_important;
 use std::time::{Duration, Instant};
@@ -135,14 +135,38 @@ pub async fn handle_system_exit_request(
     }
 }
 
+/// 退出前保存窗口位置（多显示器支持）
+/// 直接保存物理坐标，避免 scale_factor 在不同显示器间转换导致坐标偏移
+pub async fn persist_window_position(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if let Some(window) = app.get_webview_window("main") {
+        if let Ok(position) = window.outer_position() {
+            if !crate::constants::validation::is_valid_window_position(position.x, position.y) {
+                return;
+            }
+
+            let px = position.x as f64;
+            let py = position.y as f64;
+
+            if let Ok(mut config) = state.config.lock() {
+                config.ui_config.window_config.position_x = Some(px);
+                config.ui_config.window_config.position_y = Some(py);
+            }
+            if let Err(e) = save_config(&state, app).await {
+                log::error!("保存窗口位置到配置文件失败: {}", e);
+            }
+        }
+    }
+}
+
 /// 执行实际的退出操作
 async fn perform_exit(app: AppHandle) -> Result<(), String> {
-    // 关闭所有窗口
+    persist_window_position(&app).await;
+
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.close();
     }
     
-    // 短暂延迟后强制退出应用
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     app.exit(0);
     Ok(())

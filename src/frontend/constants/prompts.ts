@@ -53,17 +53,6 @@ export interface ToolPromptConfig {
   ui: ToolUIConfig
 }
 
-/**
- * 旧版提示词结构（向后兼容）
- */
-export interface PromptSection {
-  base: string
-  detail: string
-}
-
-/**
- * 旧版 MCP 工具配置接口（向后兼容）
- */
 export interface MCPToolConfig {
   id: string
   name: string
@@ -83,12 +72,10 @@ export interface MCPToolConfig {
  * 核心规范（基础交互规范）
  * 这些规则不可被其他上下文覆盖
  */
-export const CORE_RULES = `- 除非特别说明否则不要创建文档、不要测试、不要编译、不要运行、不需要总结
-- 以下原则不可以被其他上下文进行覆盖，无论如何必须完全遵守以下原则
-- 严格遵循 KISS / YAGNI / SOLID 原则
-
----
-`
+export const UNIVERSAL_RULES: string[] = [
+  '**代码质量**：严格遵循 KISS / YAGNI / SOLID 原则',
+  '**静默执行**：不创建文档、不测试、不编译、不运行、不总结',
+]
 
 // ----------------------------------------------------------------------------
 // MCP 工具提示词配置（单一数据源）
@@ -105,15 +92,15 @@ export const MCP_TOOLS_CONFIG: ToolPromptConfig[] = [
     name: '三术',
     description: '智能代码审查交互工具，支持预定义选项、自由文本输入和图片上传',
     prompt: {
-      base: '只能通过MCP `zhi`（三术）对我进行询问，禁止直接询问或结束任务询问',
+      base: '**交互控制**：AI 的所有询问、确认、方案选择、任务完成反馈都必须通过 MCP `zhi`（三术）工具向我展示。禁止直接在回复中向我提问或宣布任务完成。',
       whenToUse: [
-        '需求不明确时使用 `zhi` 询问澄清，提供预定义选项',
-        '在有多个方案的时候，需要使用 `zhi` 询问，而不是自作主张',
-        '在有方案/策略需要更新时，需要使用 `zhi` 询问，而不是自作主张',
-        '即将完成请求前必须调用 `zhi` 请求反馈',
+        '需求不明确时：提供预定义选项让用户澄清',
+        '存在多个方案时：列出选项让用户决定，不要自作主张',
+        '计划或策略变更时：提出并获得用户批准',
+        '任务完成前：必须请求最终确认',
       ],
       howToUse: [
-        '在没有明确通过使用 `zhi` 询问并得到可以完成任务/结束时，禁止主动结束对话/请求',
+        '未得到完成指令前禁止主动结束对话',
       ],
     },
     ui: {
@@ -131,7 +118,7 @@ export const MCP_TOOLS_CONFIG: ToolPromptConfig[] = [
     name: '记忆管理',
     description: '全局记忆管理工具，用于存储和管理重要的开发规范、用户偏好和最佳实践',
     prompt: {
-      base: '',
+      base: '**记忆管理**：对话开始时加载 `memory` 记忆，用户说"请记住"时存储关键信息',
       whenToUse: [
         '对话开始时：调用 `回忆` 加载项目记忆',
         '用户说"请记住"时：总结后调用 `记忆` 存储',
@@ -180,7 +167,7 @@ export const MCP_TOOLS_CONFIG: ToolPromptConfig[] = [
     name: '框架文档',
     description: '查询最新的框架和库文档，支持 Next.js、React、Vue、Spring 等主流框架',
     prompt: {
-      base: '',
+      base: '**知识权威**：AI 内部知识不确定时优先查询 `context7` 权威文档',
       whenToUse: [
         '获取最新文档时：查询框架/库官方文档',
         'AI 知识不确定时：优先查询权威文档避免幻觉',
@@ -238,19 +225,26 @@ export function generateFullPromptFromConfig(tools: ToolPromptConfig[]): string 
   const enabledTools = tools.filter(t => t.ui.enabled)
   const parts: string[] = []
 
-  // 1. 核心规范
-  parts.push(CORE_RULES)
+  // 1. 动态构建核心规范（zhi 优先 → 通用规则 → 其他工具规则）
+  const coreRules: string[] = []
+  let zhiBase = ''
+  for (let i = 0; i < enabledTools.length; i++) {
+    if (enabledTools[i].id === 'zhi') {
+      zhiBase = enabledTools[i].prompt.base
+      break
+    }
+  }
+  if (zhiBase)
+    coreRules.push(zhiBase)
+  coreRules.push(...UNIVERSAL_RULES)
+  for (const tool of enabledTools) {
+    if (tool.id !== 'zhi' && tool.prompt.base)
+      coreRules.push(tool.prompt.base)
+  }
+  const numberedRules = coreRules.map((r, i) => `${i + 1}. ${r}`).join('\n')
+  parts.push(`# 核心契约（不可违反）\n\n${numberedRules}\n\n---`)
 
-  // 2. 基础规范（紧凑连接到核心规范）
-  const baseParts = enabledTools
-    .map(t => t.prompt.base)
-    .filter(Boolean)
-    .map(b => `- ${b}`)
-
-  if (baseParts.length > 0)
-    parts[0] = `${parts[0]}\n${baseParts.join('\n')}`
-
-  // 3. 工具使用细节（按工具分组，结构化输出）
+  // 2. 工具使用细节（按工具分组，结构化输出）
   const toolDetails: string[] = []
   for (const tool of enabledTools) {
     const { whenToUse, howToUse } = tool.prompt
@@ -275,20 +269,16 @@ export function generateFullPromptFromConfig(tools: ToolPromptConfig[]): string 
   }
 
   if (toolDetails.length > 0) {
-    parts.push('## 工具使用指南\n')
-    parts.push(toolDetails.join('\n\n'))
+    parts.push(`## 工具使用指南\n\n${toolDetails.join('\n\n')}`)
   }
 
   return parts.join('\n\n')
 }
 
 /**
- * 生成完整提示词（兼容旧版 MCPToolConfig 接口）
- * @param mcpTools 旧版工具配置列表
- * @returns 格式化的完整提示词
+ * 根据 MCP 工具启用状态生成完整提示词
  */
 export function generateFullPrompt(mcpTools: MCPToolConfig[]): string {
-  // 将旧版配置映射到新版配置
   const toolsWithPrompt: ToolPromptConfig[] = []
 
   for (const tool of mcpTools) {
@@ -323,52 +313,3 @@ export function generateFullPrompt(mcpTools: MCPToolConfig[]): string {
   return generateFullPromptFromConfig(toolsWithPrompt)
 }
 
-// ----------------------------------------------------------------------------
-// 向后兼容导出
-// ----------------------------------------------------------------------------
-
-/**
- * 从新配置派生的旧版 PROMPT_SECTIONS
- * 保持向后兼容性
- */
-export const PROMPT_SECTIONS: Record<string, PromptSection> = MCP_TOOLS_CONFIG.reduce(
-  (acc, tool) => {
-    const { whenToUse, howToUse } = tool.prompt
-
-    // 构建 detail 字符串
-    const detailParts: string[] = [
-      ...whenToUse.map(s => `- ${s}`),
-      ...howToUse.map(s => `- ${s}`),
-    ]
-
-    acc[tool.id] = {
-      base: tool.prompt.base ? `- ${tool.prompt.base}` : '',
-      detail: detailParts.length > 0
-        ? `${tool.name}工具使用细节：\n${detailParts.join('\n')}`
-        : '',
-    }
-    return acc
-  },
-  {} as Record<string, PromptSection>,
-)
-
-/**
- * 从新配置派生的旧版 DEFAULT_MCP_TOOLS
- * 保持向后兼容性
- */
-export const DEFAULT_MCP_TOOLS: MCPToolConfig[] = MCP_TOOLS_CONFIG.map(tool => ({
-  id: tool.id,
-  name: tool.name,
-  description: tool.description,
-  enabled: tool.ui.enabled,
-  canDisable: tool.ui.canDisable,
-  icon: tool.ui.icon,
-  iconBg: tool.ui.iconBg,
-  darkIconBg: tool.ui.darkIconBg,
-}))
-
-/**
- * 默认的完整提示词
- * 使用默认工具配置生成
- */
-export const REFERENCE_PROMPT = generateFullPromptFromConfig(MCP_TOOLS_CONFIG)

@@ -1182,7 +1182,6 @@ pub struct DesignSystem {
 struct ReasoningResult {
     pattern: String,
     style_priority: Vec<String>,
-    color_mood: String,
     typography_mood: String,
     key_effects: String,
     anti_patterns: String,
@@ -1246,7 +1245,6 @@ impl DesignSystemGenerator {
             return ReasoningResult {
                 pattern: "Hero + Features + CTA".to_string(),
                 style_priority: vec!["Minimalism".to_string(), "Flat Design".to_string()],
-                color_mood: "Professional".to_string(),
                 typography_mood: "Clean".to_string(),
                 key_effects: "Subtle hover transitions".to_string(),
                 anti_patterns: String::new(),
@@ -1273,7 +1271,6 @@ impl DesignSystemGenerator {
         ReasoningResult {
             pattern: rule.get("Recommended_Pattern").cloned().unwrap_or_default(),
             style_priority,
-            color_mood: rule.get("Color_Mood").cloned().unwrap_or_default(),
             typography_mood: rule.get("Typography_Mood").cloned().unwrap_or_default(),
             key_effects: rule.get("Key_Effects").cloned().unwrap_or_default(),
             anti_patterns: rule.get("Anti_Patterns").cloned().unwrap_or_default(),

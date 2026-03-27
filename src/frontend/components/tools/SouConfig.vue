@@ -414,7 +414,7 @@ function formatDebugTime(isoTime: string): string {
       minute: '2-digit',
       second: '2-digit',
       fractionalSecondDigits: 3,
-    })
+    } as Intl.DateTimeFormatOptions)
   }
   catch {
     return isoTime
@@ -508,29 +508,36 @@ defineExpose({ saveConfig })
 </script>
 
 <template>
-  <div class="sou-config">
+  <div class="h-full flex flex-col">
     <n-tabs type="line" animated>
       <!-- 基础配置 -->
       <n-tab-pane name="basic" tab="基础配置">
-        <n-scrollbar class="tab-scrollbar">
-          <n-space vertical size="large" class="tab-content">
+        <n-scrollbar class="max-h-[58vh]">
+          <n-space vertical size="medium" class="pr-3 pb-4">
             <ConfigSection title="连接设置" description="配置代码搜索服务的连接信息">
               <n-grid :x-gap="24" :y-gap="16" :cols="1">
                 <n-grid-item>
-                  <n-form-item label="API端点URL">
-                    <n-input v-model:value="config.base_url" placeholder="https://api.example.com" clearable />
-                  </n-form-item>
+                  <div>
+                    <div class="text-xs text-on-surface-secondary mb-1">
+                      API端点URL
+                    </div>
+                    <n-input v-model:value="config.base_url" size="small" placeholder="https://api.example.com" clearable />
+                  </div>
                 </n-grid-item>
                 <n-grid-item>
-                  <n-form-item label="认证令牌">
+                  <div>
+                    <div class="text-xs text-on-surface-secondary mb-1">
+                      认证令牌
+                    </div>
                     <n-input
                       v-model:value="config.token"
+                      size="small"
                       type="password"
                       show-password-on="click"
                       placeholder="输入认证令牌"
                       clearable
                     />
-                  </n-form-item>
+                  </div>
                 </n-grid-item>
               </n-grid>
             </ConfigSection>
@@ -538,60 +545,58 @@ defineExpose({ saveConfig })
             <ConfigSection title="性能参数" description="调整处理批量和文件大小限制">
               <n-grid :x-gap="24" :cols="2">
                 <n-grid-item>
-                  <n-form-item label="批处理大小">
-                    <n-input-number v-model:value="config.batch_size" :min="1" :max="100" class="w-full" />
-                  </n-form-item>
+                  <div>
+                    <div class="text-xs text-on-surface-secondary mb-1">
+                      批处理大小
+                    </div>
+                    <n-input-number v-model:value="config.batch_size" size="small" :min="1" :max="100" class="w-full" />
+                  </div>
                 </n-grid-item>
                 <n-grid-item>
-                  <n-form-item label="最大行数/块">
-                    <n-input-number v-model:value="config.max_lines_per_blob" :min="100" :max="5000" class="w-full" />
-                  </n-form-item>
+                  <div>
+                    <div class="text-xs text-on-surface-secondary mb-1">
+                      最大行数/块
+                    </div>
+                    <n-input-number v-model:value="config.max_lines_per_blob" size="small" :min="100" :max="5000" class="w-full" />
+                  </div>
                 </n-grid-item>
               </n-grid>
             </ConfigSection>
 
-            <!-- 代理设置 -->
-            <!-- 代理设置（重构后的简化卡片） -->
             <ConfigSection title="代理设置" description="配置 HTTP/HTTPS 代理以优化网络连接及访问速度">
-              <div class="flex items-center justify-between p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/50">
-                <div class="flex items-center gap-4">
-                  <!-- 状态图标 -->
-                  <div
-                    class="w-10 h-10 rounded-full flex items-center justify-center transition-colors"
-                    :class="config.proxy_enabled ? 'bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400' : 'bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-500'"
-                  >
-                    <div class="i-carbon-network-3 text-xl" />
-                  </div>
-
-                  <div>
-                    <div class="font-medium text-base flex items-center gap-2">
-                      代理服务
-                      <n-tag :type="config.proxy_enabled ? 'success' : 'default'" size="small" :bordered="false">
-                        {{ config.proxy_enabled ? '已启用' : '未启用' }}
-                      </n-tag>
-                    </div>
-                    <div class="text-xs text-gray-500 mt-0.5">
-                      <span v-if="config.proxy_enabled">
-                        {{ config.proxy_type.toUpperCase() }}://{{ config.proxy_host }}:{{ config.proxy_port }}
-                      </span>
-                      <span v-else>
-                        当前使用直连模式，配置代理可加速海外 API 访问
-                      </span>
+              <n-card size="small">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-3">
+                    <div class="i-carbon-network-3 text-lg" :class="config.proxy_enabled ? 'text-success' : 'text-on-surface-muted'" />
+                    <div>
+                      <div class="text-sm font-medium flex items-center gap-2">
+                        代理服务
+                        <n-tag :type="config.proxy_enabled ? 'success' : 'default'" size="small" :bordered="false">
+                          {{ config.proxy_enabled ? '已启用' : '未启用' }}
+                        </n-tag>
+                      </div>
+                      <div class="text-xs text-on-surface-muted mt-0.5">
+                        <template v-if="config.proxy_enabled">
+                          {{ config.proxy_type.toUpperCase() }}://{{ config.proxy_host }}:{{ config.proxy_port }}
+                        </template>
+                        <template v-else>
+                          当前使用直连模式，配置代理可加速海外 API 访问
+                        </template>
+                      </div>
                     </div>
                   </div>
+                  <n-button size="small" secondary @click="showProxyModal = true">
+                    <template #icon>
+                      <div class="i-carbon-settings-adjust" />
+                    </template>
+                    配置代理与诊断
+                  </n-button>
                 </div>
-
-                <n-button secondary @click="showProxyModal = true">
-                  <template #icon>
-                    <div class="i-carbon-settings-adjust" />
-                  </template>
-                  配置代理与诊断
-                </n-button>
-              </div>
+              </n-card>
             </ConfigSection>
 
             <div class="flex justify-end">
-              <n-button type="primary" @click="saveConfig">
+              <n-button type="primary" size="small" @click="saveConfig">
                 <template #icon>
                   <div class="i-carbon-save" />
                 </template>
@@ -604,40 +609,46 @@ defineExpose({ saveConfig })
 
       <!-- 高级配置 -->
       <n-tab-pane name="advanced" tab="高级配置">
-        <n-scrollbar class="tab-scrollbar">
-          <n-space vertical size="large" class="tab-content">
+        <n-scrollbar class="max-h-[58vh]">
+          <n-space vertical size="medium" class="pr-3 pb-4">
             <ConfigSection title="文件过滤" description="设置需索引的文件类型和排除规则">
               <n-space vertical size="medium">
-                <n-form-item label="包含扩展名">
+                <div>
+                  <div class="text-xs text-on-surface-secondary mb-1">
+                    包含扩展名
+                  </div>
                   <n-select
                     v-model:value="config.text_extensions"
+                    size="small"
                     :options="extOptions"
                     multiple tag filterable clearable
                     placeholder="输入或选择扩展名 (.py)"
                   />
-                  <template #feedback>
-                    <span class="form-feedback">小写，点开头，自动去重</span>
-                  </template>
-                </n-form-item>
+                  <div class="text-xs text-on-surface-muted mt-1">
+                    小写，点开头，自动去重
+                  </div>
+                </div>
 
-                <n-form-item label="排除模式">
+                <div>
+                  <div class="text-xs text-on-surface-secondary mb-1">
+                    排除模式
+                  </div>
                   <n-select
                     v-model:value="config.exclude_patterns"
+                    size="small"
                     :options="excludeOptions"
                     multiple tag filterable clearable
                     placeholder="输入或选择排除模式 (node_modules)"
                   />
-                  <template #feedback>
-                    <span class="form-feedback">
-                      支持 glob 通配符
-                    </span>
-                  </template>
-                </n-form-item>
+                  <div class="text-xs text-on-surface-muted mt-1">
+                    支持 glob 通配符
+                  </div>
+                </div>
               </n-space>
             </ConfigSection>
 
             <div class="flex justify-end">
-              <n-button type="primary" @click="saveConfig">
+              <n-button type="primary" size="small" @click="saveConfig">
                 <template #icon>
                   <div class="i-carbon-save" />
                 </template>
@@ -650,17 +661,16 @@ defineExpose({ saveConfig })
 
       <!-- 日志与调试 -->
       <n-tab-pane name="debug" tab="日志与调试">
-        <n-scrollbar class="tab-scrollbar">
-          <n-space vertical size="large" class="tab-content">
-            <ConfigSection title="工具状态" :no-card="true">
-              <n-alert type="info" :bordered="false" class="info-alert">
+        <n-scrollbar class="max-h-[58vh]">
+          <n-space vertical size="medium" class="pr-3 pb-4">
+            <ConfigSection title="工具状态">
+              <n-alert type="info" :bordered="false">
                 <template #icon>
                   <div class="i-carbon-terminal" />
                 </template>
-                日志路径: <code class="code-inline">{{ logFilePath || '默认：%APPDATA%/sanshu/log/acemcp.log (Windows) / ~/.config/sanshu/log/acemcp.log (macOS/Linux)' }}</code>
+                日志路径: <n-text code>{{ logFilePath || '默认路径' }}</n-text>
               </n-alert>
-
-              <n-space class="mt-3">
+              <n-space class="mt-2">
                 <n-button size="small" secondary @click="testConnection">
                   <template #icon>
                     <div class="i-carbon-connection-signal" />
@@ -688,83 +698,45 @@ defineExpose({ saveConfig })
               </n-space>
             </ConfigSection>
 
-            <!-- 状态信息卡片 -->
-            <ConfigSection title="运行状态" :no-card="true">
-              <n-grid :x-gap="12" :y-gap="12" :cols="12">
-                <n-grid-item :span="4">
-                  <div class="status-card">
-                    <div class="status-icon">
-                      <div :class="config.proxy_enabled ? 'i-carbon-checkmark-outline text-emerald-500' : 'i-carbon-close-outline text-slate-400'" />
-                    </div>
-                    <div class="status-info">
-                      <div class="status-title">
-                        代理状态
-                      </div>
-                      <div class="status-value">
-                        {{ config.proxy_enabled ? '已启用' : '未启用' }}
-                      </div>
-                      <div v-if="config.proxy_enabled" class="status-detail">
-                        {{ config.proxy_host }}:{{ config.proxy_port }}
-                      </div>
-                    </div>
-                  </div>
-                </n-grid-item>
-                <n-grid-item :span="4">
-                  <div class="status-card">
-                    <div class="status-icon">
-                      <div class="i-carbon-folder-shared text-blue-500" />
-                    </div>
-                    <div class="status-info">
-                      <div class="status-title">
-                        索引项目
-                      </div>
-                      <div class="status-value">
-                        {{ debugProjectOptions.length }} 个
-                      </div>
-                    </div>
-                  </div>
-                </n-grid-item>
-                <n-grid-item :span="4">
-                  <div class="status-card">
-                    <div class="status-icon">
-                      <div :class="debugResultData?.success ? 'i-carbon-checkmark-filled text-emerald-500' : (debugResultData === null ? 'i-carbon-pending text-slate-400' : 'i-carbon-warning-alt text-amber-500')" />
-                    </div>
-                    <div class="status-info">
-                      <div class="status-title">
-                        上次调试
-                      </div>
-                      <div class="status-value">
-                        {{ debugResultData ? (debugResultData.success ? '成功' : '失败') : '未执行' }}
-                      </div>
-                      <div v-if="debugResultData" class="status-detail">
-                        {{ debugResultData.total_duration_ms }}ms
-                      </div>
-                    </div>
-                  </div>
-                </n-grid-item>
-              </n-grid>
+            <ConfigSection title="运行状态">
+              <n-descriptions :column="3" label-placement="left" size="small" bordered>
+                <n-descriptions-item label="代理状态">
+                  <n-tag :type="config.proxy_enabled ? 'success' : 'default'" size="small">
+                    {{ config.proxy_enabled ? '已启用' : '未启用' }}
+                  </n-tag>
+                </n-descriptions-item>
+                <n-descriptions-item label="索引项目">
+                  {{ debugProjectOptions.length }} 个
+                </n-descriptions-item>
+                <n-descriptions-item label="上次调试">
+                  <n-tag v-if="debugResultData" :type="debugResultData.success ? 'success' : 'error'" size="small">
+                    {{ debugResultData.success ? '成功' : '失败' }} ({{ debugResultData.total_duration_ms }}ms)
+                  </n-tag>
+                  <n-text v-else depth="3">
+                    未执行
+                  </n-text>
+                </n-descriptions-item>
+              </n-descriptions>
             </ConfigSection>
 
             <ConfigSection title="搜索调试" description="模拟搜索请求以验证配置">
               <n-space vertical size="medium">
-                <!-- 项目选择 -->
-                <n-form-item :show-feedback="false">
-                  <template #label>
-                    <div class="flex items-center gap-2">
-                      <span>项目路径</span>
-                      <n-button
-                        text
-                        size="tiny"
-                        type="primary"
-                        @click="debugUseManualInput = !debugUseManualInput"
-                      >
-                        {{ debugUseManualInput ? '选择已索引' : '手动输入' }}
-                      </n-button>
-                    </div>
-                  </template>
+                <div>
+                  <div class="text-xs text-on-surface-secondary mb-1 flex items-center gap-2">
+                    <span>项目路径</span>
+                    <n-button
+                      text
+                      size="tiny"
+                      type="primary"
+                      @click="debugUseManualInput = !debugUseManualInput"
+                    >
+                      {{ debugUseManualInput ? '选择已索引' : '手动输入' }}
+                    </n-button>
+                  </div>
                   <n-select
                     v-if="!debugUseManualInput"
                     v-model:value="debugProjectRoot"
+                    size="small"
                     :options="debugProjectOptions"
                     :loading="debugProjectOptionsLoading"
                     placeholder="选择已索引的项目..."
@@ -775,23 +747,29 @@ defineExpose({ saveConfig })
                   <n-input
                     v-else
                     v-model:value="debugProjectRoot"
+                    size="small"
                     placeholder="/abs/path/to/project"
                     clearable
                   />
-                </n-form-item>
+                </div>
 
-                <n-form-item label="查询语句" :show-feedback="false">
+                <div>
+                  <div class="text-xs text-on-surface-secondary mb-1">
+                    查询语句
+                  </div>
                   <n-input
                     v-model:value="debugQuery"
+                    size="small"
                     type="textarea"
                     :rows="2"
                     placeholder="输入搜索意图..."
                   />
-                </n-form-item>
+                </div>
 
                 <n-button
                   type="primary"
                   ghost
+                  size="small"
                   :loading="debugLoading"
                   :disabled="!debugProjectRoot || !debugQuery"
                   @click="runToolDebug"
@@ -802,107 +780,61 @@ defineExpose({ saveConfig })
                   运行调试
                 </n-button>
 
-                <!-- 骨架屏加载态 -->
-                <div v-if="debugLoading" class="debug-skeleton">
-                  <n-skeleton text :repeat="3" />
-                  <n-skeleton text style="width: 60%" />
-                </div>
+                <n-spin v-if="debugLoading" size="small" />
 
-                <!-- 结构化结果展示 -->
                 <n-collapse-transition :show="debugResultData !== null && !debugLoading">
-                  <div v-if="debugResultData" class="debug-result-panel">
-                    <!-- 请求信息 -->
-                    <div class="result-section">
-                      <div class="section-header">
-                        <div class="i-carbon-send text-blue-500" />
-                        <span>请求信息</span>
-                      </div>
-                      <div class="section-content">
-                        <div class="info-row">
-                          <span class="info-label">项目:</span>
-                          <code class="info-value">{{ debugResultData.project_path }}</code>
-                        </div>
-                        <div class="info-row">
-                          <span class="info-label">查询:</span>
-                          <span class="info-value">{{ debugResultData.query }}</span>
-                        </div>
-                        <div class="info-row">
-                          <span class="info-label">发送时间:</span>
-                          <span class="info-value">{{ formatDebugTime(debugResultData.request_time) }}</span>
-                        </div>
-                      </div>
-                    </div>
+                  <n-card v-if="debugResultData" size="small">
+                    <n-descriptions :column="2" label-placement="left" size="small" bordered>
+                      <n-descriptions-item label="项目">
+                        <n-text code>{{ debugResultData.project_path }}</n-text>
+                      </n-descriptions-item>
+                      <n-descriptions-item label="查询">
+                        {{ debugResultData.query }}
+                      </n-descriptions-item>
+                      <n-descriptions-item label="发送时间">
+                        {{ formatDebugTime(debugResultData.request_time) }}
+                      </n-descriptions-item>
+                      <n-descriptions-item label="耗时">
+                        <n-text :type="debugResultData.success ? 'success' : 'error'">
+                          {{ debugResultData.total_duration_ms }}ms
+                        </n-text>
+                      </n-descriptions-item>
+                      <n-descriptions-item label="结果数">
+                        {{ debugResultData.result_count ?? '-' }}
+                      </n-descriptions-item>
+                      <n-descriptions-item label="状态">
+                        <n-tag :type="debugResultData.success ? 'success' : 'error'" size="small">
+                          {{ debugResultData.success ? '成功' : '失败' }}
+                        </n-tag>
+                      </n-descriptions-item>
+                    </n-descriptions>
 
-                    <!-- 性能指标 -->
-                    <div class="result-section">
-                      <div class="section-header">
-                        <div class="i-carbon-timer text-amber-500" />
-                        <span>性能指标</span>
-                      </div>
-                      <div class="section-content">
-                        <n-grid :x-gap="12" :cols="12">
-                          <n-grid-item :span="4">
-                            <div class="metric-item">
-                              <div class="metric-value" :class="debugResultData.success ? 'text-emerald-500' : 'text-red-500'">
-                                {{ debugResultData.total_duration_ms }}ms
-                              </div>
-                              <div class="metric-label">
-                                总耗时
-                              </div>
-                            </div>
-                          </n-grid-item>
-                          <n-grid-item :span="4">
-                            <div class="metric-item">
-                              <div class="metric-value">
-                                {{ debugResultData.result_count ?? '-' }}
-                              </div>
-                              <div class="metric-label">
-                                结果数
-                              </div>
-                            </div>
-                          </n-grid-item>
-                          <n-grid-item :span="4">
-                            <div class="metric-item">
-                              <n-tag :type="debugResultData.success ? 'success' : 'error'" size="small">
-                                {{ debugResultData.success ? '成功' : '失败' }}
-                              </n-tag>
-                              <div class="metric-label">
-                                状态
-                              </div>
-                            </div>
-                          </n-grid-item>
-                        </n-grid>
-                      </div>
-                    </div>
+                    <n-alert
+                      v-if="debugResultData.error"
+                      type="error"
+                      :bordered="false"
+                      class="mt-2"
+                    >
+                      {{ debugResultData.error }}
+                    </n-alert>
 
-                    <!-- 响应数据 / 错误信息 -->
-                    <div class="result-section">
-                      <div class="section-header">
-                        <div :class="debugResultData.success ? 'i-carbon-document text-emerald-500' : 'i-carbon-warning text-red-500'" />
-                        <span>{{ debugResultData.success ? '响应数据' : '错误信息' }}</span>
-                        <n-button
-                          v-if="debugResultData.success && debugResultData.result"
-                          size="tiny"
-                          text
-                          class="ml-auto"
-                          @click="copyDebugResult"
-                        >
+                    <template v-if="debugResultData.success && debugResultData.result">
+                      <div class="flex items-center justify-between mt-2 mb-1">
+                        <n-text depth="3" class="text-xs">
+                          响应数据
+                        </n-text>
+                        <n-button size="tiny" text @click="copyDebugResult">
                           <template #icon>
                             <div class="i-carbon-copy" />
                           </template>
                           复制
                         </n-button>
                       </div>
-                      <div class="section-content">
-                        <div v-if="debugResultData.error" class="error-content">
-                          {{ debugResultData.error }}
-                        </div>
-                        <n-scrollbar v-else style="max-height: 200px">
-                          <pre class="result-pre">{{ debugResultData.result || '无返回结果' }}</pre>
-                        </n-scrollbar>
-                      </div>
-                    </div>
-                  </div>
+                      <n-scrollbar style="max-height: 200px">
+                        <n-code :code="debugResultData.result" language="text" word-wrap />
+                      </n-scrollbar>
+                    </template>
+                  </n-card>
                 </n-collapse-transition>
               </n-space>
             </ConfigSection>
@@ -912,62 +844,44 @@ defineExpose({ saveConfig })
 
       <!-- 索引管理 -->
       <n-tab-pane name="index" tab="索引管理">
-        <n-scrollbar class="tab-scrollbar">
-          <n-space vertical size="large" class="tab-content">
+        <n-scrollbar class="max-h-[58vh]">
+          <n-space vertical size="medium" class="pr-3 pb-4">
             <ConfigSection title="全局策略">
-              <div class="auto-index-toggle">
-                <div class="toggle-info">
-                  <div class="toggle-icon">
-                    <div class="i-carbon-automatic w-5 h-5 text-primary-500" />
-                  </div>
-                  <div>
-                    <div class="toggle-title">
-                      自动索引
+              <n-space vertical size="small">
+                <n-card size="small">
+                  <div class="flex items-center justify-between">
+                    <div>
+                      <div class="text-sm font-medium">
+                        自动索引
+                      </div>
+                      <n-text depth="3" class="text-xs">
+                        文件变更时自动更新索引
+                      </n-text>
                     </div>
-                    <div class="toggle-desc">
-                      文件变更时自动更新索引
-                    </div>
+                    <n-switch :value="autoIndexEnabled" size="small" @update:value="toggleAutoIndex" />
                   </div>
-                </div>
-                <n-switch :value="autoIndexEnabled" @update:value="toggleAutoIndex" />
-              </div>
+                </n-card>
 
-              <!-- 嵌套项目自动索引开关 -->
-              <div class="auto-index-toggle mt-4">
-                <div class="toggle-info">
-                  <div class="toggle-icon nested-icon">
-                    <div class="i-carbon-folder-parent w-5 h-5 text-amber-500" />
-                  </div>
-                  <div>
-                    <div class="toggle-title">
-                      自动索引嵌套项目
+                <n-card size="small">
+                  <div class="flex items-center justify-between">
+                    <div>
+                      <div class="text-sm font-medium">
+                        自动索引嵌套项目
+                      </div>
+                      <n-text depth="3" class="text-xs">
+                        对父目录索引时，自动检测并索引所有 Git 子项目
+                      </n-text>
                     </div>
-                    <div class="toggle-desc">
-                      对父目录索引时，自动检测并索引所有 Git 子项目
-                    </div>
+                    <n-switch
+                      v-model:value="config.index_nested_projects"
+                      size="small"
+                      @update:value="saveConfig"
+                    />
                   </div>
-                </div>
-                <n-switch
-                  v-model:value="config.index_nested_projects"
-                  @update:value="saveConfig"
-                />
-              </div>
+                </n-card>
 
-              <n-divider class="my-3" />
-
-              <n-form-item label="防抖延迟时间" :show-feedback="false">
-                <div class="debounce-input-wrapper">
-                  <n-input-number
-                    v-model:value="config.watch_debounce_minutes"
-                    :min="1"
-                    :max="30"
-                    :step="1"
-                    class="debounce-input"
-                  />
-                  <span class="debounce-unit">分钟</span>
-                </div>
-                <template #label>
-                  <div class="form-label-with-desc">
+                <div>
+                  <div class="text-xs text-on-surface-secondary mb-1 flex items-center">
                     <span>防抖延迟时间</span>
                     <n-tooltip trigger="hover">
                       <template #trigger>
@@ -976,20 +890,33 @@ defineExpose({ saveConfig })
                       文件修改后等待指定时间无新修改才触发索引更新
                     </n-tooltip>
                   </div>
-                </template>
-              </n-form-item>
+                  <div class="flex items-center gap-2">
+                    <n-input-number
+                      v-model:value="config.watch_debounce_minutes"
+                      size="small"
+                      :min="1"
+                      :max="30"
+                      :step="1"
+                      class="w-[100px]"
+                    />
+                    <n-text depth="3" class="text-xs">
+                      分钟
+                    </n-text>
+                  </div>
+                </div>
 
-              <div class="flex justify-end mt-3">
-                <n-button type="primary" size="small" @click="saveConfig">
-                  <template #icon>
-                    <div class="i-carbon-save" />
-                  </template>
-                  保存配置
-                </n-button>
-              </div>
+                <div class="flex justify-end">
+                  <n-button type="primary" size="small" @click="saveConfig">
+                    <template #icon>
+                      <div class="i-carbon-save" />
+                    </template>
+                    保存配置
+                  </n-button>
+                </div>
+              </n-space>
             </ConfigSection>
 
-            <n-scrollbar class="project-list-scrollbar">
+            <n-scrollbar class="max-h-[55vh]">
               <ProjectIndexManager />
             </n-scrollbar>
           </n-space>
@@ -1003,356 +930,3 @@ defineExpose({ saveConfig })
     />
   </div>
 </template>
-
-<style scoped>
-.sou-config {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-}
-
-.tab-scrollbar {
-  max-height: 58vh;
-}
-
-.tab-content {
-  padding-right: 12px;
-  padding-bottom: 16px;
-}
-
-/* 表单反馈文字 */
-.form-feedback {
-  font-size: 11px;
-  color: var(--color-on-surface-muted, #9ca3af);
-}
-
-/* 信息提示 */
-.info-alert {
-  border-radius: 8px;
-}
-
-/* 代码样式 */
-.code-inline {
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 12px;
-  font-family: ui-monospace, monospace;
-  background: var(--color-container, rgba(128, 128, 128, 0.1));
-}
-
-:root.dark .code-inline {
-  background: rgba(255, 255, 255, 0.1);
-}
-
-/* 调试结果 */
-.debug-result {
-  margin-top: 8px;
-}
-
-.result-label {
-  font-size: 12px;
-  color: var(--color-on-surface-secondary, #6b7280);
-  margin-bottom: 6px;
-}
-
-:root.dark .result-label {
-  color: #9ca3af;
-}
-
-.result-content {
-  padding: 12px;
-  border-radius: 8px;
-  font-size: 12px;
-  font-family: ui-monospace, monospace;
-  white-space: pre-wrap;
-  max-height: 200px;
-  overflow-y: auto;
-  background: var(--color-container, rgba(128, 128, 128, 0.08));
-  border: 1px solid var(--color-border, rgba(128, 128, 128, 0.2));
-}
-
-:root.dark .result-content {
-  background: rgba(24, 24, 28, 0.8);
-  border-color: rgba(255, 255, 255, 0.08);
-}
-
-/* 自动索引开关 */
-.auto-index-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.toggle-info {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.toggle-icon {
-  padding: 8px;
-  border-radius: 8px;
-  background: rgba(20, 184, 166, 0.1);
-}
-
-:root.dark .toggle-icon {
-  background: rgba(20, 184, 166, 0.15);
-}
-
-/* 嵌套项目图标样式 */
-.toggle-icon.nested-icon {
-  background: rgba(245, 158, 11, 0.1);
-}
-
-:root.dark .toggle-icon.nested-icon {
-  background: rgba(245, 158, 11, 0.15);
-}
-
-.toggle-title {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--color-on-surface, #111827);
-}
-
-:root.dark .toggle-title {
-  color: #e5e7eb;
-}
-
-.toggle-desc {
-  font-size: 12px;
-  color: var(--color-on-surface-secondary, #6b7280);
-}
-
-:root.dark .toggle-desc {
-  color: #9ca3af;
-}
-
-/* 项目列表滚动容器 */
-.project-list-scrollbar {
-  max-height: 55vh;
-}
-
-/* 防抖延迟输入 */
-.debounce-input-wrapper {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.debounce-input {
-  width: 100px;
-}
-
-.debounce-unit {
-  font-size: 13px;
-  color: var(--color-on-surface-secondary, #6b7280);
-}
-
-:root.dark .debounce-unit {
-  color: #9ca3af;
-}
-
-/* 带描述的表单标签 */
-.form-label-with-desc {
-  display: flex;
-  align-items: center;
-}
-
-/* 调试界面 - 状态卡片 */
-.status-card {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px;
-  border-radius: 10px;
-  background: var(--color-container, rgba(128, 128, 128, 0.06));
-  border: 1px solid var(--color-border, rgba(128, 128, 128, 0.12));
-  transition: all 0.2s ease;
-}
-
-.status-card:hover {
-  border-color: rgba(99, 102, 241, 0.3);
-}
-
-:root.dark .status-card {
-  background: rgba(30, 30, 35, 0.6);
-  border-color: rgba(255, 255, 255, 0.08);
-}
-
-.status-icon {
-  font-size: 20px;
-}
-
-.status-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.status-title {
-  font-size: 11px;
-  color: var(--color-on-surface-muted, #9ca3af);
-  margin-bottom: 2px;
-}
-
-.status-value {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--color-on-surface, #111827);
-}
-
-:root.dark .status-value {
-  color: #f3f4f6;
-}
-
-.status-detail {
-  font-size: 11px;
-  color: var(--color-on-surface-muted, #9ca3af);
-  margin-top: 2px;
-  font-family: ui-monospace, monospace;
-}
-
-/* 调试界面 - 骨架屏 */
-.debug-skeleton {
-  padding: 16px;
-  border-radius: 10px;
-  background: var(--color-container, rgba(128, 128, 128, 0.06));
-  border: 1px solid var(--color-border, rgba(128, 128, 128, 0.12));
-}
-
-:root.dark .debug-skeleton {
-  background: rgba(30, 30, 35, 0.6);
-  border-color: rgba(255, 255, 255, 0.08);
-}
-
-/* 调试界面 - 结果面板 */
-.debug-result-panel {
-  border-radius: 10px;
-  background: var(--color-container, rgba(128, 128, 128, 0.04));
-  border: 1px solid var(--color-border, rgba(128, 128, 128, 0.12));
-  overflow: hidden;
-}
-
-:root.dark .debug-result-panel {
-  background: rgba(20, 20, 25, 0.5);
-  border-color: rgba(255, 255, 255, 0.08);
-}
-
-.result-section {
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--color-border, rgba(128, 128, 128, 0.1));
-}
-
-.result-section:last-child {
-  border-bottom: none;
-}
-
-:root.dark .result-section {
-  border-bottom-color: rgba(255, 255, 255, 0.06);
-}
-
-.section-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--color-on-surface, #374151);
-  margin-bottom: 10px;
-}
-
-:root.dark .section-header {
-  color: #e5e7eb;
-}
-
-.section-content {
-  font-size: 12px;
-}
-
-.info-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-
-.info-row:last-child {
-  margin-bottom: 0;
-}
-
-.info-label {
-  color: var(--color-on-surface-muted, #9ca3af);
-  white-space: nowrap;
-  min-width: 60px;
-}
-
-.info-value {
-  color: var(--color-on-surface, #374151);
-  word-break: break-all;
-}
-
-:root.dark .info-value {
-  color: #d1d5db;
-}
-
-/* 调试界面 - 性能指标 */
-.metric-item {
-  text-align: center;
-  padding: 8px;
-  border-radius: 8px;
-  background: rgba(128, 128, 128, 0.04);
-}
-
-:root.dark .metric-item {
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.metric-value {
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--color-on-surface, #111827);
-  margin-bottom: 4px;
-}
-
-:root.dark .metric-value {
-  color: #f3f4f6;
-}
-
-.metric-label {
-  font-size: 11px;
-  color: var(--color-on-surface-muted, #9ca3af);
-}
-
-/* 调试界面 - 错误内容 */
-.error-content {
-  padding: 12px;
-  border-radius: 8px;
-  background: rgba(239, 68, 68, 0.08);
-  color: #dc2626;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-:root.dark .error-content {
-  background: rgba(239, 68, 68, 0.15);
-  color: #fca5a5;
-}
-
-/* 调试界面 - 结果预览 */
-.result-pre {
-  margin: 0;
-  padding: 12px;
-  font-size: 12px;
-  font-family: ui-monospace, monospace;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-  background: rgba(128, 128, 128, 0.04);
-  border-radius: 8px;
-  color: var(--color-on-surface, #374151);
-}
-
-:root.dark .result-pre {
-  background: rgba(0, 0, 0, 0.3);
-  color: #d1d5db;
-}
-</style>

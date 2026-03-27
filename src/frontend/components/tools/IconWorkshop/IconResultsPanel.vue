@@ -92,7 +92,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="scrollContainer" class="flex-1 overflow-y-auto min-h-0 pr-2 custom-scrollbar relative">
+  <div ref="scrollContainer" class="flex-1 overflow-y-auto min-h-0 pr-2 relative">
     <!-- 初始骨架屏 -->
     <div v-if="loading && !hasResults" class="columns-4 sm:columns-5 md:columns-6 lg:columns-8 gap-3">
       <div v-for="i in 32" :key="`skeleton-${i}`" class="mb-3 break-inside-avoid">
@@ -131,68 +131,50 @@ onBeforeUnmount(() => {
       <div v-if="hasMore" ref="loadMoreTrigger" class="h-1 w-full" />
 
       <!-- 加载指示器 -->
-      <transition
-        enter-active-class="transition-all duration-300 ease-out"
-        enter-from-class="opacity-0 -translate-y-1"
-        enter-to-class="opacity-100 translate-y-0"
-        leave-active-class="transition-all duration-200 ease-in"
-        leave-from-class="opacity-100 translate-y-0"
-        leave-to-class="opacity-0 -translate-y-1"
-      >
-        <div v-if="loading && hasMore" class="flex items-center justify-center py-4 text-xs text-slate-400 dark:text-slate-500">
-          <div class="i-carbon-circle-dash animate-spin text-base" />
-          <span class="ml-2">加载中...</span>
-        </div>
-      </transition>
+      <div v-if="loading && hasMore" class="flex items-center justify-center py-4 text-xs text-on-surface-muted">
+        <div class="i-carbon-circle-dash animate-spin text-base" />
+        <span class="ml-2">加载中...</span>
+      </div>
 
       <!-- 手动加载按钮 -->
       <div v-if="hasMore && !loading" class="flex justify-center py-6">
-        <n-button secondary size="large" @click="handleLoadMore">
+        <n-button secondary size="small" @click="handleLoadMore">
           加载更多
         </n-button>
       </div>
     </template>
 
     <!-- 空状态 - 无搜索结果 -->
-    <div v-else-if="isEmpty" class="h-full flex flex-col items-center justify-center text-slate-400 dark:text-slate-500">
-      <div class="w-24 h-24 rounded-full bg-slate-100/80 dark:bg-white/5 flex items-center justify-center mb-4">
+    <div v-else-if="isEmpty" class="h-full flex flex-col items-center justify-center text-on-surface-muted">
+      <div class="w-24 h-24 rounded-full bg-container flex items-center justify-center mb-4">
         <div class="i-carbon-search-locate text-4xl opacity-50" />
       </div>
       <p class="text-sm">未找到相关图标，请尝试其他关键词</p>
     </div>
 
     <!-- 空状态 - 初始 -->
-    <div v-else-if="showEmptyState" class="h-full flex flex-col items-center justify-center text-slate-300 dark:text-slate-600">
+    <div v-else-if="showEmptyState" class="h-full flex flex-col items-center justify-center text-on-surface-disabled">
       <div class="i-carbon-image text-8xl opacity-10 mb-6" />
       <p class="text-lg font-medium opacity-80 mb-2">搜索 Iconfont 图标库</p>
       <p class="text-sm opacity-50">输入关键词开始探索无限创意</p>
     </div>
-  </div>
 
-  <!-- 悬浮分页组件 -->
-  <transition
-    enter-active-class="transition-all duration-300 ease-out"
-    enter-from-class="opacity-0 translate-y-4"
-    enter-to-class="opacity-100 translate-y-0"
-    leave-active-class="transition-all duration-200 ease-in"
-    leave-from-class="opacity-100 translate-y-0"
-    leave-to-class="opacity-0 translate-y-4"
-  >
+    <!-- 悬浮分页组件（在滚动容器内，使用 sticky 定位） -->
     <div
       v-if="hasResults"
-      class="fixed bottom-4 left-1/2 transform -translate-x-1/2 z-40 flex items-center gap-3 px-4 py-2 rounded-full bg-white/90 dark:bg-[#1f1f23]/95 border border-gray-200 dark:border-white/10 shadow-xl backdrop-blur-sm"
+      class="sticky bottom-2 mx-auto z-40 flex items-center gap-3 px-4 py-2 rounded-full bg-surface border border-border shadow-xl backdrop-blur-sm w-fit"
     >
-      <span class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
+      <span class="text-xs text-on-surface-secondary whitespace-nowrap">
         第 {{ currentPage }} 页
       </span>
-      <span class="text-xs text-gray-400 dark:text-gray-500 whitespace-nowrap">
+      <span class="text-xs text-on-surface-muted whitespace-nowrap">
         / {{ maxPage }} 页
       </span>
-      <div class="h-4 w-px bg-gray-200 dark:bg-white/10" />
-      <span class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
+      <div class="h-4 w-px bg-border" />
+      <span class="text-xs text-on-surface-secondary whitespace-nowrap">
         共 {{ total }} 个
       </span>
-      <div class="h-4 w-px bg-gray-200 dark:bg-white/10" />
+      <div class="h-4 w-px bg-border" />
       <div class="flex items-center gap-2">
         <n-input-number
           v-model:value="jumpPage"
@@ -216,24 +198,8 @@ onBeforeUnmount(() => {
       >
         加载更多
       </n-button>
-      <span v-else class="text-xs text-gray-400 dark:text-gray-500">已全部加载</span>
+      <span v-else class="text-xs text-on-surface-muted">已全部加载</span>
     </div>
-  </transition>
+  </div>
 </template>
 
-<style scoped>
-/* 自定义滚动条 */
-.custom-scrollbar::-webkit-scrollbar {
-  width: 6px;
-}
-.custom-scrollbar::-webkit-scrollbar-track {
-  background: transparent;
-}
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background-color: rgba(156, 163, 175, 0.2);
-  border-radius: 3px;
-}
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background-color: rgba(156, 163, 175, 0.4);
-}
-</style>

@@ -20,8 +20,6 @@ use crate::log_debug;
 pub struct MemoryManager {
     /// 记忆目录路径
     memory_dir: PathBuf,
-    /// 项目路径
-    project_path: String,
     /// 存储数据
     store: MemoryStore,
     /// 是否为非 Git 项目（降级模式）
@@ -116,7 +114,6 @@ impl MemoryManager {
 
         let manager = Self {
             memory_dir,
-            project_path: project_path_str,
             store,
             is_non_git_project: normalize_result.is_non_git,
         };

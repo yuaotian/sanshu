@@ -1,7 +1,7 @@
-import type { ShortcutBinding, ShortcutConfig, ShortcutKey } from '../types/popup'
 import { invoke } from '@tauri-apps/api/core'
 import { useMagicKeys } from '@vueuse/core'
 import { computed, ref, watch } from 'vue'
+import type { ShortcutBinding, ShortcutConfig, ShortcutKey } from '../types/popup'
 
 /**
  * 自定义快捷键管理
@@ -159,79 +159,41 @@ export function useShortcuts() {
     return `${shortcutKeyToString(binding.key_combination)} ${binding.name}`
   })
 
-  // 监听快速发送快捷键
+  function useShortcutWatch(action: string, callback: () => void) {
+    const binding = computed(() => getShortcutByAction(action))
+
+    watch(
+      () => binding.value,
+      (newBinding, _old, onCleanup) => {
+        if (!newBinding?.enabled)
+          return
+
+        const magicKey = shortcutKeyToMagicKey(newBinding.key_combination)
+        const keyRef = keys[magicKey]
+
+        if (keyRef) {
+          const stop = watch(keyRef, (pressed) => {
+            if (pressed) {
+              callback()
+            }
+          })
+          onCleanup(stop)
+        }
+      },
+      { immediate: true },
+    )
+  }
+
   function useQuickSubmitShortcut(callback: () => void) {
-    const binding = computed(() => getShortcutByAction('submit'))
-
-    watch(
-      () => binding.value,
-      (newBinding) => {
-        if (!newBinding)
-          return
-
-        const magicKey = shortcutKeyToMagicKey(newBinding.key_combination)
-        const keyRef = keys[magicKey]
-
-        if (keyRef) {
-          watch(keyRef, (pressed) => {
-            if (pressed) {
-              callback()
-            }
-          })
-        }
-      },
-      { immediate: true },
-    )
+    useShortcutWatch('submit', callback)
   }
 
-  // 监听增强快捷键
   function useEnhanceShortcut(callback: () => void) {
-    const binding = computed(() => getShortcutByAction('enhance'))
-
-    watch(
-      () => binding.value,
-      (newBinding) => {
-        if (!newBinding)
-          return
-
-        const magicKey = shortcutKeyToMagicKey(newBinding.key_combination)
-        const keyRef = keys[magicKey]
-
-        if (keyRef) {
-          watch(keyRef, (pressed) => {
-            if (pressed) {
-              callback()
-            }
-          })
-        }
-      },
-      { immediate: true },
-    )
+    useShortcutWatch('enhance', callback)
   }
 
-  // 监听继续快捷键
   function useContinueShortcut(callback: () => void) {
-    const binding = computed(() => getShortcutByAction('continue'))
-
-    watch(
-      () => binding.value,
-      (newBinding) => {
-        if (!newBinding)
-          return
-
-        const magicKey = shortcutKeyToMagicKey(newBinding.key_combination)
-        const keyRef = keys[magicKey]
-
-        if (keyRef) {
-          watch(keyRef, (pressed) => {
-            if (pressed) {
-              callback()
-            }
-          })
-        }
-      },
-      { immediate: true },
-    )
+    useShortcutWatch('continue', callback)
   }
 
   return {

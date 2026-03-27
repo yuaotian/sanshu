@@ -2,16 +2,18 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { useIntersectionObserver, useStorage } from '@vueuse/core'
+import StarterKit from '@tiptap/starter-kit'
+import { EditorContent, useEditor } from '@tiptap/vue-3'
+import { useStorage } from '@vueuse/core'
 import { useSortable } from '@vueuse/integrations/useSortable'
 import { useMessage } from 'naive-ui'
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
-import { EditorContent, useEditor } from '@tiptap/vue-3'
-import StarterKit from '@tiptap/starter-kit'
 import { useKeyboard } from '../../composables/useKeyboard'
 import { useMcpToolsReactive } from '../../composables/useMcpTools'
 import type { CustomPrompt, FileReferenceAttachment, McpRequest } from '../../types/popup'
 import { buildConditionalContext } from '../../utils/conditionalContext'
+import { compressImage, compressionSummary } from '../../utils/imageCompression'
+import AppModal from '../common/AppModal.vue'
 import type { InlineBadgeAttrs } from './extensions/InlineBadge'
 import { InlineBadge } from './extensions/InlineBadge'
 
@@ -179,6 +181,7 @@ const { start, stop } = useSortable(promptContainer, sortablePrompts, {
 const { pasteShortcut } = useKeyboard()
 
 const message = useMessage()
+const imageCompressionEnabled = ref(true)
 
 // 计算属性
 const hasOptions = computed(() => (props.request?.predefined_options?.length ?? 0) > 0)
@@ -211,20 +214,12 @@ const statusText = computed(() => {
 })
 
 // 悬浮/固定相关状态
-const isFloating = useStorage('popup-input-floating', false) // 开启/关闭悬浮模式
-const sentinelRef = ref<HTMLElement | null>(null) // 哨兵元素
-const isSticking = ref(false) // 当前是否处于吸附状态
+const isFloating = useStorage('popup-input-floating', false)
+const isFloatingExpanded = ref(false)
 
-// 监听哨兵可见性以判断是否吸附
-// 逻辑：当我们在页面上方时，底部的哨兵(sentinel)在视口下方不可见 -> isIntersecting=false -> isSticking=true
-// 当我们滚到底部时，哨兵进入视口 -> isIntersecting=true -> isSticking=false
-useIntersectionObserver(
-  sentinelRef,
-  ([{ isIntersecting }]) => {
-    isSticking.value = !isIntersecting
-  },
-  { threshold: 0.1 },
-)
+function toggleFloatingExpanded() {
+  isFloatingExpanded.value = !isFloatingExpanded.value
+}
 
 function toggleFloating() {
   isFloating.value = !isFloating.value
@@ -544,10 +539,17 @@ async function handleDroppedPaths(paths: string[]) {
   for (const rawPath of paths) {
     if (isImagePath(rawPath)) {
       try {
-        const dataUrl: string = await invoke('read_image_file_as_data_url', { path: rawPath })
+        const rawDataUrl: string = await invoke('read_image_file_as_data_url', { path: rawPath })
         const name = rawPath.split(/[/\\]/).pop() || 'image'
+        let dataUrl = rawDataUrl
+        let summary = ''
+        if (imageCompressionEnabled.value) {
+          const result = await compressImage(rawDataUrl)
+          dataUrl = result.dataUrl
+          summary = compressionSummary(result)
+        }
         if (addImageWithBadge(dataUrl, name)) {
-          message.success(`图片 ${name} 已添加`)
+          message.success(summary ? `图片 ${name} 已添加 (${summary})` : `图片 ${name} 已添加`)
           hasChanges = true
         }
       }
@@ -628,10 +630,17 @@ async function handleImageFiles(files: FileList | File[]): Promise<void> {
     if (!file.type.startsWith('image/')) continue
 
     try {
-      const base64 = await fileToBase64(file)
+      const rawBase64 = await fileToBase64(file)
       const name = file.name || `粘贴图片-${uploadedImages.value.length + 1}`
-      if (addImageWithBadge(base64, name)) {
-        message.success(`图片 ${name} 已添加`)
+      let dataUrl = rawBase64
+      let summary = ''
+      if (imageCompressionEnabled.value) {
+        const result = await compressImage(rawBase64)
+        dataUrl = result.dataUrl
+        summary = compressionSummary(result)
+      }
+      if (addImageWithBadge(dataUrl, name)) {
+        message.success(summary ? `图片 ${name} 已添加 (${summary})` : `图片 ${name} 已添加`)
         emitUpdate()
       }
     }
@@ -953,6 +962,10 @@ watch(() => props.submitting, (val) => {
 // 组件挂载时加载自定义prompt
 onMounted(async () => {
   console.log('组件挂载，开始加载prompt')
+  try {
+    imageCompressionEnabled.value = await invoke('get_image_compression_enabled') as boolean
+  }
+  catch { /* 默认 true */ }
   await loadCustomPrompts()
 
   // 加载 MCP 工具配置（用于检查关联工具状态）
@@ -1053,24 +1066,24 @@ defineExpose({
 </script>
 
 <template>
-  <div class="space-y-3">
+  <div class="space-y-2">
     <!-- 预定义选项 -->
-    <div v-if="!loading && hasOptions" class="space-y-3" data-guide="predefined-options">
-      <h4 class="text-sm font-medium text-white">
+    <div v-if="!loading && hasOptions" class="space-y-2" data-guide="predefined-options">
+      <h4 class="text-sm font-medium text-white m-0 py-1">
         请选择选项
       </h4>
-      <n-space vertical size="small">
+      <n-space vertical :size="4">
         <div
           v-for="(option, index) in request!.predefined_options"
           :key="`option-${index}`"
-          class="rounded-lg p-3 border border-gray-600 bg-gray-100 cursor-pointer hover:opacity-80 transition-opacity"
+          class="rounded-md p-2 border border-gray-600 bg-gray-100 cursor-pointer hover:opacity-80 transition-opacity"
           @click="handleOptionToggle(option)"
         >
           <n-checkbox
             :value="option"
             :checked="selectedOptions.includes(option)"
             :disabled="submitting"
-            size="medium"
+            size="small"
             @update:checked="(checked: boolean) => handleOptionChange(option, checked)"
             @click.stop
           >
@@ -1081,14 +1094,14 @@ defineExpose({
     </div>
 
     <!-- 图片预览区域 -->
-    <div v-if="!loading && uploadedImages.length > 0" class="space-y-3">
-      <h4 class="text-sm font-medium text-white">
+    <div v-if="!loading && uploadedImages.length > 0" class="space-y-1.5">
+      <h4 class="text-xs font-medium text-white">
         已添加的图片 ({{ uploadedImages.length }})
       </h4>
 
       <!-- 使用 Naive UI 的图片组件，支持预览和放大 -->
       <n-image-group>
-        <div class="flex flex-wrap gap-3">
+        <div class="flex flex-wrap gap-2">
           <div
             v-for="(image, index) in uploadedImages"
             :key="`image-${index}`"
@@ -1126,24 +1139,33 @@ defineExpose({
     </div>
 
     <!-- 文本输入区域 -->
+    <Teleport to="#floating-input-target" :disabled="!isFloating" defer>
     <div v-if="!loading">
-      <!-- 哨兵元素：用于检测是否到底部 -->
-      <div ref="sentinelRef" class="w-full h-px opacity-0 pointer-events-none absolute -mt-1" />
-
       <div
         class="transition-all duration-300 ease-[cubic-bezier(0.25,0.8,0.25,1)]"
         :class="[
-          isFloating ? 'sticky bottom-0 z-[50]' : 'relative',
-          (isFloating && isSticking)
-            ? 'bg-surface/85 backdrop-blur-xl shadow-[0_-8px_30px_rgba(0,0,0,0.15)] border-t border-white/10 pb-5 pt-4 px-3 -mx-3 mb-0'
-            : 'space-y-3',
+          isFloating
+            ? 'bg-surface/85 backdrop-blur-xl shadow-[0_-8px_30px_rgba(0,0,0,0.12)] border-t border-white/10 pb-2 pt-2 px-3 space-y-2'
+            : 'relative space-y-2',
         ]"
       >
         <!-- 标题栏 & 切换按钮 -->
         <div class="flex items-center justify-between mb-2">
-          <h4 class="text-sm font-medium text-white">
-            {{ hasOptions ? '补充说明 (可选)' : '请输入您的回复' }}
-          </h4>
+          <div
+            class="flex items-center gap-1"
+            :class="isFloating ? 'cursor-pointer select-none hover:opacity-80 transition-opacity' : ''"
+            :title="isFloating ? (isFloatingExpanded ? '折叠面板' : '展开模板和上下文') : undefined"
+            @click="isFloating && toggleFloatingExpanded()"
+          >
+            <h4 class="text-sm font-medium text-white m-0 py-1">
+              {{ hasOptions ? '补充说明 (可选)' : '请输入您的回复' }}
+            </h4>
+            <div
+              v-if="isFloating"
+              class="w-3 h-3 transition-transform duration-200 opacity-60"
+              :class="isFloatingExpanded ? 'i-carbon-chevron-up' : 'i-carbon-chevron-down'"
+            />
+          </div>
           <n-button
             text
             size="tiny"
@@ -1163,7 +1185,7 @@ defineExpose({
         </div>
 
         <!-- 自定义prompt按钮区域 -->
-        <div v-if="customPromptEnabled && customPrompts.length > 0" class="space-y-2" data-guide="custom-prompts">
+        <div v-if="customPromptEnabled && customPrompts.length > 0" v-show="!isFloating || isFloatingExpanded" class="space-y-2" data-guide="custom-prompts">
           <div class="text-xs text-on-surface-secondary flex items-center gap-2">
             <div class="i-carbon-bookmark w-3 h-3 text-primary-500" />
             <span>快捷模板 (拖拽调整顺序):</span>
@@ -1177,10 +1199,10 @@ defineExpose({
               v-for="prompt in sortablePrompts"
               :key="prompt.id"
               :title="prompt.description || (prompt.content.trim() ? prompt.content : '清空输入框')"
-              class="inline-flex items-center gap-1 px-2 py-1 text-xs bg-container-secondary hover:bg-container-tertiary rounded transition-all duration-200 select-none border border-gray-600 text-on-surface sortable-item"
+              class="inline-flex items-center gap-1 px-2 py-1 text-xs bg-container-secondary hover:bg-black-200 rounded-md transition-all duration-200 select-none border border-gray-600 text-on-surface sortable-item"
             >
               <!-- 拖拽手柄 -->
-              <div class="drag-handle cursor-move p-0.5 rounded hover:bg-container-tertiary transition-colors">
+              <div class="drag-handle cursor-move p-0.5 rounded-md hover:bg-black-200 transition-colors">
                 <div class="i-carbon-drag-horizontal w-3 h-3 text-on-surface-secondary" />
               </div>
 
@@ -1196,7 +1218,7 @@ defineExpose({
         </div>
 
         <!-- 上下文追加区域 -->
-        <div v-if="customPromptEnabled && conditionalPrompts.length > 0" class="space-y-2" data-guide="context-append">
+        <div v-if="customPromptEnabled && conditionalPrompts.length > 0" v-show="!isFloating || isFloatingExpanded" class="space-y-2" data-guide="context-append">
           <div class="text-xs text-on-surface-secondary flex items-center gap-2">
             <div class="i-carbon-settings-adjust w-3 h-3 text-primary-500" />
             <span>上下文追加:</span>
@@ -1205,9 +1227,9 @@ defineExpose({
             <div
               v-for="prompt in conditionalPrompts"
               :key="prompt.id"
-              class="flex items-center justify-between p-1.5 bg-container-secondary rounded border border-gray-600 transition-colors text-xs"
+              class="flex items-center justify-between p-1.5 bg-container-secondary rounded-md border border-gray-600 transition-colors text-xs"
               :class="[
-                isMcpToolEnabled(prompt.linked_mcp_tool) ? 'hover:bg-container-tertiary' : 'opacity-50 cursor-not-allowed',
+                isMcpToolEnabled(prompt.linked_mcp_tool) ? 'hover:bg-black-200' : 'opacity-50 cursor-not-allowed',
               ]"
             >
               <div class="flex-1 min-w-0 mr-1">
@@ -1232,7 +1254,7 @@ defineExpose({
         </div>
 
         <!-- 提示词增强入口 -->
-        <div class="flex items-center justify-between text-xs my-2">
+        <div class="flex items-center justify-between text-xs" :class="isFloating ? 'my-1' : 'my-2'">
           <div class="flex items-center gap-2 text-on-surface-secondary">
             <div class="i-carbon-magic-wand w-3 h-3 text-primary-500" />
             <span>{{ enhanceEnabled ? '将当前文本发送给本地 AI 做结构化增强' : '提示词增强未启用' }}</span>
@@ -1271,9 +1293,10 @@ defineExpose({
         </div>
       </div>
     </div>
+    </Teleport>
 
     <!-- 插入模式选择对话框 -->
-    <n-modal v-model:show="showInsertDialog" preset="dialog" title="插入模式选择">
+    <AppModal v-model:show="showInsertDialog" preset="dialog" title="插入模式选择">
       <template #header>
         <div class="flex items-center gap-2">
           <div class="i-carbon-text-creation w-4 h-4" />
@@ -1284,24 +1307,24 @@ defineExpose({
         <p class="text-sm text-on-surface-secondary">
           输入框中已有内容，请选择插入模式：
         </p>
-        <div class="bg-container-secondary p-3 rounded text-sm">
+        <div class="bg-container-secondary p-3 rounded-md text-sm max-h-40 overflow-y-auto">
           {{ pendingPromptContent }}
         </div>
       </div>
       <template #action>
-        <div class="flex gap-2">
-          <n-button @click="showInsertDialog = false">
+        <n-space justify="end">
+          <n-button size="small" @click="showInsertDialog = false">
             取消
           </n-button>
-          <n-button type="warning" @click="handleInsertMode('replace')">
+          <n-button type="warning" size="small" @click="handleInsertMode('replace')">
             替换内容
           </n-button>
-          <n-button type="primary" @click="handleInsertMode('append')">
+          <n-button type="primary" size="small" @click="handleInsertMode('append')">
             追加内容
           </n-button>
-        </div>
+        </n-space>
       </template>
-    </n-modal>
+    </AppModal>
   </div>
 </template>
 
@@ -1321,29 +1344,31 @@ defineExpose({
   transform: rotate(5deg);
 }
 
-/* TipTap 输入框 - 还原 n-input 视觉 */
+/* TipTap 输入框 - 精确模拟 Naive UI n-input 样式 */
 .popup-input-shell {
   position: relative;
-  border: 1px solid var(--color-surface-300, #374151);
+  border: 1px solid var(--color-border);
   border-radius: 3px;
   overflow: hidden;
-  background-color: var(--color-surface-100, #1f1f23);
-  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-  transition: border-color 0.3s;
+  background-color: var(--color-container-secondary);
+  transition: border-color 0.3s var(--n-bezier, cubic-bezier(.4, 0, .2, 1)),
+              box-shadow 0.3s var(--n-bezier, cubic-bezier(.4, 0, .2, 1)),
+              background-color 0.3s var(--n-bezier, cubic-bezier(.4, 0, .2, 1));
 }
 
 .popup-input-shell:hover {
-  border-color: var(--color-surface-400, #4b5563);
+  border-color: var(--color-primary-hover, var(--color-primary));
 }
 
 .popup-input-shell:focus-within {
-  border-color: #14b8a6;
-  background-color: rgba(20, 184, 166, 0.06);
+  border-color: var(--color-primary-hover, var(--color-primary));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 20%, transparent);
+  background-color: color-mix(in srgb, var(--color-primary) 2%, var(--color-container-secondary));
 }
 
 .popup-input-shell-dragover {
-  border-color: #14b8a6;
-  background-color: rgba(20, 184, 166, 0.04);
+  border-color: var(--color-primary);
+  background-color: color-mix(in srgb, var(--color-primary) 4%, var(--color-container-secondary));
 }
 
 .popup-drag-overlay {
@@ -1355,7 +1380,7 @@ defineExpose({
   align-items: center;
   justify-content: center;
   gap: 0.25rem;
-  background: rgba(20, 184, 166, 0.08);
+  background: color-mix(in srgb, var(--color-primary) 8%, transparent);
   border-radius: inherit;
   pointer-events: none;
 }
@@ -1391,7 +1416,7 @@ defineExpose({
   word-break: break-word;
   white-space: pre-wrap;
   scrollbar-width: thin;
-  scrollbar-color: rgba(120, 130, 150, 0.55) transparent;
+  scrollbar-color: var(--color-surface-400) transparent;
 }
 
 :deep(.tiptap:focus) {
@@ -1403,7 +1428,7 @@ defineExpose({
 }
 
 :deep(.tiptap ::selection) {
-  background: rgba(20, 184, 166, 0.3);
+  background: color-mix(in srgb, var(--color-primary) 30%, transparent);
 }
 
 /* 内联引用 badge */
@@ -1471,7 +1496,7 @@ defineExpose({
 }
 
 :deep(.popup-inline-reference-delete:hover) {
-  color: #ef4444;
+  color: var(--color-error);
 }
 
 :deep(.popup-inline-reference-label) {

@@ -14,7 +14,6 @@ pub use crate::ui::{
     audio::*,
     audio_assets::*,
     font_commands::*,
-    updater::*,
     exit::*,
     exit_handler::*,
 };

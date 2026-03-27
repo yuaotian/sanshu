@@ -45,8 +45,8 @@ jobs:
 
           # 检查 release assets 是否存在
           # URL 格式：/download/{TAG_NAME}/sanshu-cli-{TAG_NAME}-{platform}.tar.gz
-          INTEL_URL="https://github.com/yuaotian/sanshu/releases/download/${TAG_NAME}/sanshu-cli-${TAG_NAME}-macos-x86_64.tar.gz"
-          ARM_URL="https://github.com/yuaotian/sanshu/releases/download/${TAG_NAME}/sanshu-cli-${TAG_NAME}-macos-aarch64.tar.gz"
+          INTEL_URL="https://github.com/yueby/sanshu/releases/download/${TAG_NAME}/sanshu-cli-${TAG_NAME}-macos-x86_64.tar.gz"
+          ARM_URL="https://github.com/yueby/sanshu/releases/download/${TAG_NAME}/sanshu-cli-${TAG_NAME}-macos-aarch64.tar.gz"
 
           echo "Checking Intel asset: $INTEL_URL"
           if ! curl --head --fail "$INTEL_URL" > /dev/null 2>&1; then
@@ -68,8 +68,8 @@ jobs:
           TAG_NAME="${{ steps.release_info.outputs.tag_name }}"
           VERSION_NUMBER="${{ steps.release_info.outputs.version_number }}"
 
-          INTEL_URL="https://github.com/yuaotian/sanshu/releases/download/${TAG_NAME}/sanshu-cli-${TAG_NAME}-macos-x86_64.tar.gz"
-          ARM_URL="https://github.com/yuaotian/sanshu/releases/download/${TAG_NAME}/sanshu-cli-${TAG_NAME}-macos-aarch64.tar.gz"
+          INTEL_URL="https://github.com/yueby/sanshu/releases/download/${TAG_NAME}/sanshu-cli-${TAG_NAME}-macos-x86_64.tar.gz"
+          ARM_URL="https://github.com/yueby/sanshu/releases/download/${TAG_NAME}/sanshu-cli-${TAG_NAME}-macos-aarch64.tar.gz"
 
           echo "Downloading and calculating SHA256..."
 
@@ -91,7 +91,7 @@ jobs:
       - name: 检出 homebrew-sanshu 仓库
         uses: actions/checkout@v4
         with:
-          repository: yuaotian/homebrew-sanshu
+          repository: yueby/homebrew-sanshu
           token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
           path: homebrew-tap
 
@@ -129,11 +129,11 @@ jobs:
           sed -i "s|version \".*\"|version \"${VERSION_NUMBER}\"|g" Formula/sanshu.rb
 
           # 更新 Intel 版本的 URL 和 SHA256（适配新的 on_intel 语法）
-          sed -i "s|https://github.com/yuaotian/sanshu/releases/download/v[0-9.]*/sanshu-cli-v[0-9.]*-macos-x86_64.tar.gz|${INTEL_URL}|g" Formula/sanshu.rb
+          sed -i "s|https://github.com/yueby/sanshu/releases/download/v[0-9.]*/sanshu-cli-v[0-9.]*-macos-x86_64.tar.gz|${INTEL_URL}|g" Formula/sanshu.rb
           sed -i "/on_intel do/,/end/ { /sha256/ s|sha256[[:space:]]*\".*\"|sha256  \"${INTEL_SHA256}\"|; }" Formula/sanshu.rb
 
           # 更新 ARM 版本的 URL 和 SHA256（适配新的 on_arm 语法）
-          sed -i "s|https://github.com/yuaotian/sanshu/releases/download/v[0-9.]*/sanshu-cli-v[0-9.]*-macos-aarch64.tar.gz|${ARM_URL}|g" Formula/sanshu.rb
+          sed -i "s|https://github.com/yueby/sanshu/releases/download/v[0-9.]*/sanshu-cli-v[0-9.]*-macos-aarch64.tar.gz|${ARM_URL}|g" Formula/sanshu.rb
           sed -i "/on_arm do/,/end/ { /sha256/ s|sha256[[:space:]]*\".*\"|sha256  \"${ARM_SHA256}\"|; }" Formula/sanshu.rb
 
       - name: 验证配方更改
@@ -173,5 +173,5 @@ jobs:
         run: |
           echo "🧪 Formula update completed successfully!"
           echo "You can test the formula with:"
-          echo "  brew tap yuaotian/sanshu"
+          echo "  brew tap yueby/sanshu"
           echo "  brew install sanshu"

@@ -6,7 +6,7 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/yuaotian/sanshu.git
+git clone https://github.com/yueby/sanshu.git
 cd sanshu
 
 # 运行安装脚本
@@ -16,7 +16,7 @@ chmod +x install.sh
 
 ### 方式二：下载预编译版本
 
-从 [Releases](https://github.com/yuaotian/sanshu/releases) 页面下载对应平台的预编译版本：
+从 [Releases](https://github.com/yueby/sanshu/releases) 页面下载对应平台的预编译版本：
 
 - **Linux**: `sanshu-linux-x86_64.tar.gz`
 - **macOS**: `sanshu-macos-universal.tar.gz`

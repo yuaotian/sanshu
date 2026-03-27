@@ -1,7 +1,55 @@
 use tauri::{State, Manager};
 use crate::config::{AppState, save_config};
-use crate::constants::window;
+use crate::constants::{window, validation};
 use serde::{Deserialize, Serialize};
+
+/// 在包含指定物理坐标的显示器上居中窗口
+/// `logical_width`/`logical_height` 为窗口的逻辑尺寸，用于配合目标显示器缩放计算居中位置
+/// 返回 true 表示找到目标显示器并居中成功
+pub fn center_on_monitor_containing(
+    win: &tauri::WebviewWindow,
+    physical_x: i32,
+    physical_y: i32,
+    logical_width: f64,
+    logical_height: f64,
+) -> bool {
+    let monitors = match win.available_monitors() {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+
+    log::debug!("可用显示器数量: {}", monitors.len());
+    for (i, m) in monitors.iter().enumerate() {
+        let pos = m.position();
+        let size = m.size();
+        log::debug!("  显示器[{}]: 位置({}, {}) 尺寸 {}x{} 缩放 {}", i, pos.x, pos.y, size.width, size.height, m.scale_factor());
+    }
+
+    let target = monitors.iter().find(|m| {
+        let pos = m.position();
+        let size = m.size();
+        physical_x >= pos.x
+            && physical_x < pos.x + size.width as i32
+            && physical_y >= pos.y
+            && physical_y < pos.y + size.height as i32
+    });
+
+    if let Some(monitor) = target {
+        let m_pos = monitor.position();
+        let m_size = monitor.size();
+        let scale = monitor.scale_factor();
+        let win_w = (logical_width * scale) as i32;
+        let win_h = (logical_height * scale) as i32;
+        let cx = m_pos.x + (m_size.width as i32 - win_w) / 2;
+        let cy = m_pos.y + (m_size.height as i32 - win_h) / 2;
+        log::debug!("找到目标显示器(缩放{}), 居中到 ({}, {})", scale, cx, cy);
+
+        win.set_position(tauri::PhysicalPosition::new(cx, cy)).is_ok()
+    } else {
+        log::debug!("坐标 ({}, {}) 不在任何显示器范围内", physical_x, physical_y);
+        false
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WindowSizeUpdate {
@@ -134,4 +182,67 @@ pub async fn update_window_size(size_update: WindowSizeUpdate, state: State<'_, 
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn save_window_position(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        let position = window.outer_position()
+            .map_err(|e| format!("获取窗口位置失败: {}", e))?;
+
+        if !validation::is_valid_window_position(position.x, position.y) {
+            return Err(format!("无效的窗口位置: ({}, {})", position.x, position.y));
+        }
+
+        let px = position.x as f64;
+        let py = position.y as f64;
+
+        {
+            let mut config = state.config.lock().map_err(|e| format!("获取配置失败: {}", e))?;
+            config.ui_config.window_config.position_x = Some(px);
+            config.ui_config.window_config.position_y = Some(py);
+        }
+
+        save_config(&state, &app).await.map_err(|e| format!("保存配置失败: {}", e))?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn restore_window_position(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<bool, String> {
+    let (pos_x, pos_y, win_config) = {
+        let config = state.config.lock().map_err(|e| format!("获取配置失败: {}", e))?;
+        (
+            config.ui_config.window_config.position_x,
+            config.ui_config.window_config.position_y,
+            config.ui_config.window_config.clone(),
+        )
+    };
+
+    let (logical_w, logical_h) = if win_config.fixed {
+        (win_config.fixed_width, win_config.fixed_height)
+    } else {
+        (win_config.free_width, win_config.free_height)
+    };
+
+    if let (Some(x), Some(y)) = (pos_x, pos_y) {
+        log::debug!("读取到保存的窗口位置: ({}, {})", x, y);
+        if let Some(win) = app.get_webview_window("main") {
+            let physical_x = x as i32;
+            let physical_y = y as i32;
+
+            if center_on_monitor_containing(&win, physical_x, physical_y, logical_w, logical_h) {
+                log::debug!("窗口已在上次所在显示器上居中");
+                return Ok(true);
+            }
+
+            log::debug!("上次所在显示器不可用，使用主显示器居中");
+            let _ = win.center();
+        }
+    } else {
+        log::debug!("没有保存的窗口位置，使用默认位置");
+    }
+
+    Ok(false)
 }

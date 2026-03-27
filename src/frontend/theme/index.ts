@@ -127,8 +127,12 @@ export function applyThemeVariables(themeName: string) {
   root.style.setProperty('--color-on-surface-secondary', colors.onSurfaceSecondary)
   root.style.setProperty('--color-on-surface-muted', colors.onSurfaceMuted)
   root.style.setProperty('--color-container', colors.container)
+  root.style.setProperty('--color-container-secondary', colors.containerSecondary)
   root.style.setProperty('--color-border', colors.border)
   root.style.setProperty('--color-divider', colors.divider)
+  root.style.setProperty('--color-primary', primaryColors[500])
+  root.style.setProperty('--color-primary-hover', primaryColors[400])
+  root.style.setProperty('--color-error', functionalColors.error)
 
   // 设置body和text颜色变量（兼容旧CSS）
   root.style.setProperty('--body-color', colors.surface)

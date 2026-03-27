@@ -135,7 +135,7 @@ onMounted(() => {
             <template #trigger>
               <n-button
                 :disabled="!canEnhance || submitting"
-                size="medium"
+                size="small"
                 type="info"
                 data-guide="enhance-button"
                 @click="handleEnhance"
@@ -152,7 +152,7 @@ onMounted(() => {
             <template #trigger>
               <n-button
                 :disabled="submitting"
-                size="medium"
+                size="small"
                 type="warning"
                 data-guide="enhance-cta"
                 @click="handleEnhance"
@@ -172,7 +172,7 @@ onMounted(() => {
               <n-button
                 :disabled="submitting"
                 :loading="submitting"
-                size="medium"
+                size="small"
                 type="default"
                 data-guide="continue-button"
                 @click="handleContinue"
@@ -193,7 +193,7 @@ onMounted(() => {
                 type="primary"
                 :disabled="!canSubmit || submitting"
                 :loading="submitting"
-                size="medium"
+                size="small"
                 data-guide="submit-button"
                 @click="handleSubmit"
               >

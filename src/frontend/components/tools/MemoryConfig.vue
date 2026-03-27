@@ -3,10 +3,10 @@
  * 记忆管理配置组件
  * 包含：配置设置、记忆列表、相似度预览
  */
-import { invoke } from '@tauri-apps/api/core'
-import { useMessage } from 'naive-ui'
-import { computed, onMounted, ref, watch } from 'vue'
-import ConfigSection from '../common/ConfigSection.vue'
+import { invoke } from '@tauri-apps/api/core';
+import { useMessage } from 'naive-ui';
+import { computed, onMounted, ref, watch } from 'vue';
+import ConfigSection from '../common/ConfigSection.vue';
 
 // Props
 const props = defineProps<{
@@ -244,12 +244,12 @@ function getCategoryIcon(category: string): string {
 
 function getCategoryColor(category: string): string {
   const colors: Record<string, string> = {
-    '规范': 'text-blue-500',
-    '偏好': 'text-purple-500',
-    '模式': 'text-green-500',
-    '背景': 'text-orange-500',
+    '规范': 'text-info',
+    '偏好': 'text-primary',
+    '模式': 'text-success',
+    '背景': 'text-warning',
   }
-  return colors[category] || 'text-gray-500'
+  return colors[category] || 'text-on-surface-muted'
 }
 
 // ============ 生命周期 ============
@@ -271,9 +271,12 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="memory-config">
+  <div>
     <!-- 无项目路径提示 -->
-    <div v-if="!projectPath" class="empty-state">
+    <div
+      v-if="!projectPath"
+      class="flex flex-col items-center justify-center min-h-[200px] text-on-surface-muted"
+    >
       <div class="i-carbon-folder-off text-5xl mb-3 opacity-20" />
       <div class="text-sm opacity-60">
         请先在 MCP 工具中指定项目路径
@@ -284,13 +287,16 @@ onMounted(async () => {
       <n-tabs v-model:value="currentTab" type="line" animated>
         <!-- 配置 Tab -->
         <n-tab-pane name="config" tab="配置">
-          <n-scrollbar class="tab-scrollbar">
-            <n-space vertical size="large" class="tab-content">
+          <n-scrollbar class="max-h-[500px]">
+            <n-space vertical size="medium" class="py-4 px-1">
               <!-- 去重设置 -->
               <ConfigSection title="去重设置" description="配置相似度检测阈值和自动去重行为">
                 <n-space vertical size="medium">
                   <!-- 相似度阈值滑块 -->
-                  <n-form-item label="相似度阈值">
+                  <div>
+                    <div class="text-xs text-on-surface-secondary mb-1">
+                      相似度阈值
+                    </div>
                     <div class="w-full">
                       <div class="flex items-center gap-4">
                         <n-slider
@@ -301,46 +307,58 @@ onMounted(async () => {
                           :marks="{ 50: '50%', 70: '70%', 95: '95%' }"
                           class="flex-1"
                         />
-                        <n-tag type="info" :bordered="false">
+                        <n-tag type="info" size="small" :bordered="false">
                           {{ thresholdPercent }}%
                         </n-tag>
                       </div>
-                      <div class="text-xs text-gray-500 mt-2">
+                      <div class="text-xs text-on-surface-muted mt-1">
                         超过此相似度的内容将被视为重复。建议值：70%
                       </div>
                     </div>
-                  </n-form-item>
+                  </div>
 
                   <!-- 开关选项 -->
-                  <div class="switch-group">
-                    <div class="switch-item">
-                      <div class="switch-info">
-                        <div class="switch-label">启动时自动去重</div>
-                        <div class="switch-desc">每次加载记忆时自动检测并移除重复内容</div>
+                  <n-space vertical size="medium">
+                    <n-card size="small">
+                      <div class="flex items-center justify-between gap-4">
+                        <div class="flex-1 min-w-0">
+                          <div class="text-sm font-medium text-on-surface">
+                            启动时自动去重
+                          </div>
+                          <div class="text-xs text-on-surface-secondary mt-0.5">
+                            每次加载记忆时自动检测并移除重复内容
+                          </div>
+                        </div>
+                        <n-switch v-model:value="config.dedup_on_startup" size="small" />
                       </div>
-                      <n-switch v-model:value="config.dedup_on_startup" />
-                    </div>
-                    <div class="switch-item">
-                      <div class="switch-info">
-                        <div class="switch-label">启用去重检测</div>
-                        <div class="switch-desc">添加新记忆时检测是否与现有内容重复</div>
+                    </n-card>
+                    <n-card size="small">
+                      <div class="flex items-center justify-between gap-4">
+                        <div class="flex-1 min-w-0">
+                          <div class="text-sm font-medium text-on-surface">
+                            启用去重检测
+                          </div>
+                          <div class="text-xs text-on-surface-secondary mt-0.5">
+                            添加新记忆时检测是否与现有内容重复
+                          </div>
+                        </div>
+                        <n-switch v-model:value="config.enable_dedup" size="small" />
                       </div>
-                      <n-switch v-model:value="config.enable_dedup" />
-                    </div>
-                  </div>
+                    </n-card>
+                  </n-space>
                 </n-space>
               </ConfigSection>
 
               <!-- 快捷操作 -->
               <ConfigSection title="快捷操作" :no-card="true">
                 <n-space>
-                  <n-button type="primary" :loading="configSaving" @click="saveConfig">
+                  <n-button type="primary" size="small" :loading="configSaving" @click="saveConfig">
                     <template #icon>
                       <div class="i-carbon-save" />
                     </template>
                     保存配置
                   </n-button>
-                  <n-button secondary :loading="dedupLoading" @click="executeDeduplicate">
+                  <n-button secondary size="small" :loading="dedupLoading" @click="executeDeduplicate">
                     <template #icon>
                       <div class="i-carbon-clean" />
                     </template>
@@ -351,27 +369,47 @@ onMounted(async () => {
 
               <!-- 统计信息 -->
               <ConfigSection title="统计信息" :no-card="true">
-                <div class="stats-grid">
-                  <div class="stat-card">
-                    <div class="stat-value">{{ stats.total }}</div>
-                    <div class="stat-label">总计</div>
-                  </div>
-                  <div class="stat-card">
-                    <div class="stat-value text-blue-500">{{ stats.rules }}</div>
-                    <div class="stat-label">规范</div>
-                  </div>
-                  <div class="stat-card">
-                    <div class="stat-value text-purple-500">{{ stats.preferences }}</div>
-                    <div class="stat-label">偏好</div>
-                  </div>
-                  <div class="stat-card">
-                    <div class="stat-value text-green-500">{{ stats.patterns }}</div>
-                    <div class="stat-label">模式</div>
-                  </div>
-                  <div class="stat-card">
-                    <div class="stat-value text-orange-500">{{ stats.contexts }}</div>
-                    <div class="stat-label">背景</div>
-                  </div>
+                <div class="grid grid-cols-5 gap-3 w-full">
+                  <n-card size="small" class="text-center">
+                    <div class="text-2xl font-semibold text-on-surface">
+                      {{ stats.total }}
+                    </div>
+                    <div class="text-xs text-on-surface-secondary mt-1">
+                      总计
+                    </div>
+                  </n-card>
+                  <n-card size="small" class="text-center">
+                    <div class="text-2xl font-semibold text-info">
+                      {{ stats.rules }}
+                    </div>
+                    <div class="text-xs text-on-surface-secondary mt-1">
+                      规范
+                    </div>
+                  </n-card>
+                  <n-card size="small" class="text-center">
+                    <div class="text-2xl font-semibold text-primary">
+                      {{ stats.preferences }}
+                    </div>
+                    <div class="text-xs text-on-surface-secondary mt-1">
+                      偏好
+                    </div>
+                  </n-card>
+                  <n-card size="small" class="text-center">
+                    <div class="text-2xl font-semibold text-success">
+                      {{ stats.patterns }}
+                    </div>
+                    <div class="text-xs text-on-surface-secondary mt-1">
+                      模式
+                    </div>
+                  </n-card>
+                  <n-card size="small" class="text-center">
+                    <div class="text-2xl font-semibold text-warning">
+                      {{ stats.contexts }}
+                    </div>
+                    <div class="text-xs text-on-surface-secondary mt-1">
+                      背景
+                    </div>
+                  </n-card>
                 </div>
               </ConfigSection>
 
@@ -393,15 +431,18 @@ onMounted(async () => {
 
         <!-- 记忆列表 Tab -->
         <n-tab-pane name="list" tab="记忆列表">
-          <n-scrollbar class="tab-scrollbar">
-            <n-space vertical size="medium" class="tab-content">
+          <n-scrollbar class="max-h-[500px]">
+            <n-space vertical size="medium" class="py-4 px-1">
               <!-- 加载骨架屏 -->
-              <div v-if="listLoading" class="skeleton-list">
+              <div v-if="listLoading" class="flex flex-col gap-4">
                 <n-skeleton v-for="i in 4" :key="i" text :repeat="2" />
               </div>
 
               <!-- 空状态 -->
-              <div v-else-if="memories.length === 0" class="empty-list">
+              <div
+                v-else-if="memories.length === 0"
+                class="flex flex-col items-center justify-center min-h-[200px] text-on-surface-muted"
+              >
                 <div class="i-carbon-document text-4xl mb-2 opacity-20" />
                 <div class="text-sm opacity-60">暂无记忆条目</div>
               </div>
@@ -415,20 +456,20 @@ onMounted(async () => {
                   :disabled="items.length === 0"
                 >
                   <template #header>
-                    <div class="category-header">
+                    <div class="flex items-center gap-2 font-medium">
                       <div :class="[getCategoryIcon(category), getCategoryColor(category)]" />
                       <span>{{ category }}</span>
                       <n-tag size="small" :bordered="false">{{ items.length }}</n-tag>
                     </div>
                   </template>
 
-                  <div class="memory-list">
-                    <div v-for="item in items" :key="item.id" class="memory-item">
-                      <div class="memory-content">
+                  <div class="flex flex-col gap-2">
+                    <n-card v-for="item in items" :key="item.id" size="small">
+                      <div class="text-sm leading-normal text-on-surface break-words">
                         {{ item.content }}
                       </div>
-                      <div class="memory-meta">
-                        <span class="memory-time">{{ formatDate(item.created_at) }}</span>
+                      <div class="flex items-center justify-between mt-2 pt-2 border-t border-border">
+                        <span class="text-xs text-on-surface-muted">{{ formatDate(item.created_at) }}</span>
                         <n-popconfirm
                           :show="deleteConfirmId === item.id"
                           @positive-click="deleteMemory(item.id)"
@@ -450,14 +491,14 @@ onMounted(async () => {
                           确定要删除这条记忆吗？
                         </n-popconfirm>
                       </div>
-                    </div>
+                    </n-card>
                   </div>
                 </n-collapse-item>
               </n-collapse>
 
               <!-- 刷新按钮 -->
               <div class="flex justify-center pt-2">
-                <n-button text type="primary" :loading="listLoading" @click="loadMemories">
+                <n-button text type="primary" size="small" :loading="listLoading" @click="loadMemories">
                   <template #icon>
                     <div class="i-carbon-renew" />
                   </template>
@@ -470,18 +511,20 @@ onMounted(async () => {
 
         <!-- 相似度预览 Tab -->
         <n-tab-pane name="preview" tab="相似度预览">
-          <n-scrollbar class="tab-scrollbar">
-            <n-space vertical size="large" class="tab-content">
+          <n-scrollbar class="max-h-[500px]">
+            <n-space vertical size="medium" class="py-4 px-1">
               <ConfigSection title="输入检测" description="输入内容检测与现有记忆的相似度">
                 <n-space vertical size="medium">
                   <n-input
                     v-model:value="previewContent"
                     type="textarea"
+                    size="small"
                     :rows="3"
                     placeholder="输入要检测的内容..."
                   />
                   <n-button
                     type="primary"
+                    size="small"
                     :loading="previewLoading"
                     :disabled="!previewContent.trim()"
                     @click="previewSimilarity"
@@ -497,20 +540,20 @@ onMounted(async () => {
               <!-- 检测结果 -->
               <n-collapse-transition :show="previewResult !== null">
                 <ConfigSection v-if="previewResult" title="检测结果" :no-card="true">
-                  <div class="preview-result">
+                  <n-card size="small">
                     <!-- 相似度指示器 -->
-                    <div class="similarity-indicator">
+                    <div class="relative h-6 rounded-xl bg-container-secondary overflow-hidden">
                       <div
                         class="similarity-bar"
                         :style="{ width: `${previewResult.similarity * 100}%` }"
                         :class="{
-                          'bg-red-500': previewResult.is_duplicate,
-                          'bg-green-500': !previewResult.is_duplicate,
+                          'bg-error': previewResult.is_duplicate,
+                          'bg-success': !previewResult.is_duplicate,
                         }"
                       />
                       <div class="similarity-text">
                         相似度: {{ (previewResult.similarity * 100).toFixed(1) }}%
-                        <span class="threshold-text">
+                        <span class="opacity-80">
                           (阈值: {{ (previewResult.threshold * 100).toFixed(0) }}%)
                         </span>
                       </div>
@@ -529,11 +572,18 @@ onMounted(async () => {
                     </n-alert>
 
                     <!-- 匹配的内容 -->
-                    <div v-if="previewResult.matched_content" class="matched-content mt-4">
-                      <div class="matched-label">最相似的记忆:</div>
-                      <div class="matched-text">{{ previewResult.matched_content }}</div>
+                    <div
+                      v-if="previewResult.matched_content"
+                      class="mt-4 p-3 rounded-lg bg-container-secondary"
+                    >
+                      <div class="text-xs text-on-surface-secondary mb-1">
+                        最相似的记忆:
+                      </div>
+                      <div class="text-sm text-on-surface">
+                        {{ previewResult.matched_content }}
+                      </div>
                     </div>
-                  </div>
+                  </n-card>
                 </ConfigSection>
               </n-collapse-transition>
             </n-space>
@@ -545,191 +595,6 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.memory-config {
-  min-height: 400px;
-}
-
-.tab-scrollbar {
-  max-height: 500px;
-}
-
-.tab-content {
-  padding: 16px 4px;
-}
-
-/* 空状态 */
-.empty-state,
-.empty-list {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-height: 200px;
-  color: var(--color-on-surface-muted, #9ca3af);
-}
-
-/* 开关组 */
-.switch-group {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.switch-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-  border-radius: 8px;
-  background: var(--color-container, rgba(255, 255, 255, 0.5));
-  border: 1px solid var(--color-border, rgba(128, 128, 128, 0.15));
-}
-
-:root.dark .switch-item {
-  background: rgba(24, 24, 28, 0.5);
-  border-color: rgba(255, 255, 255, 0.08);
-}
-
-.switch-info {
-  flex: 1;
-}
-
-.switch-label {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--color-on-surface, #111827);
-}
-
-:root.dark .switch-label {
-  color: #e5e7eb;
-}
-
-.switch-desc {
-  font-size: 12px;
-  color: var(--color-on-surface-secondary, #6b7280);
-  margin-top: 2px;
-}
-
-:root.dark .switch-desc {
-  color: #9ca3af;
-}
-
-/* 统计网格 */
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 12px;
-}
-
-.stat-card {
-  text-align: center;
-  padding: 12px;
-  border-radius: 8px;
-  background: var(--color-container, rgba(255, 255, 255, 0.5));
-  border: 1px solid var(--color-border, rgba(128, 128, 128, 0.15));
-}
-
-:root.dark .stat-card {
-  background: rgba(24, 24, 28, 0.5);
-  border-color: rgba(255, 255, 255, 0.08);
-}
-
-.stat-value {
-  font-size: 24px;
-  font-weight: 600;
-  color: var(--color-on-surface, #111827);
-}
-
-:root.dark .stat-value {
-  color: #e5e7eb;
-}
-
-.stat-label {
-  font-size: 12px;
-  color: var(--color-on-surface-secondary, #6b7280);
-  margin-top: 4px;
-}
-
-/* 分类头部 */
-.category-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 500;
-}
-
-/* 记忆列表 */
-.memory-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.memory-item {
-  padding: 12px;
-  border-radius: 8px;
-  background: var(--color-container, rgba(255, 255, 255, 0.5));
-  border: 1px solid var(--color-border, rgba(128, 128, 128, 0.15));
-}
-
-:root.dark .memory-item {
-  background: rgba(24, 24, 28, 0.5);
-  border-color: rgba(255, 255, 255, 0.08);
-}
-
-.memory-content {
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--color-on-surface, #111827);
-  word-break: break-word;
-}
-
-:root.dark .memory-content {
-  color: #e5e7eb;
-}
-
-.memory-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--color-border, rgba(128, 128, 128, 0.1));
-}
-
-.memory-time {
-  font-size: 11px;
-  color: var(--color-on-surface-secondary, #9ca3af);
-}
-
-/* 骨架屏 */
-.skeleton-list {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-/* 相似度预览结果 */
-.preview-result {
-  padding: 16px;
-  border-radius: 8px;
-  background: var(--color-container, rgba(255, 255, 255, 0.5));
-  border: 1px solid var(--color-border, rgba(128, 128, 128, 0.15));
-}
-
-:root.dark .preview-result {
-  background: rgba(24, 24, 28, 0.5);
-  border-color: rgba(255, 255, 255, 0.08);
-}
-
-.similarity-indicator {
-  position: relative;
-  height: 24px;
-  border-radius: 12px;
-  background: var(--color-border, rgba(128, 128, 128, 0.2));
-  overflow: hidden;
-}
-
 .similarity-bar {
   position: absolute;
   top: 0;
@@ -747,30 +612,5 @@ onMounted(async () => {
   font-weight: 500;
   color: white;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
-}
-
-.threshold-text {
-  opacity: 0.8;
-}
-
-.matched-content {
-  padding: 12px;
-  border-radius: 8px;
-  background: var(--color-border, rgba(128, 128, 128, 0.1));
-}
-
-.matched-label {
-  font-size: 12px;
-  color: var(--color-on-surface-secondary, #6b7280);
-  margin-bottom: 4px;
-}
-
-.matched-text {
-  font-size: 13px;
-  color: var(--color-on-surface, #111827);
-}
-
-:root.dark .matched-text {
-  color: #e5e7eb;
 }
 </style>

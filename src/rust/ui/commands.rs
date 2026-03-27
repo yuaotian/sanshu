@@ -10,6 +10,11 @@ pub async fn get_app_info() -> Result<String, String> {
 }
 
 #[tauri::command]
+pub async fn get_current_version() -> Result<String, String> {
+    Ok(env!("CARGO_PKG_VERSION").to_string())
+}
+
+#[tauri::command]
 pub async fn get_always_on_top(state: State<'_, AppState>) -> Result<bool, String> {
     let config = state
         .config
@@ -46,6 +51,34 @@ pub async fn set_always_on_top(
         log::info!("用户切换窗口置顶状态为: {} (已保存配置)", enabled);
     }
 
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_image_compression_enabled(state: State<'_, AppState>) -> Result<bool, String> {
+    let config = state
+        .config
+        .lock()
+        .map_err(|e| format!("获取配置失败: {}", e))?;
+    Ok(config.ui_config.image_compression_enabled)
+}
+
+#[tauri::command]
+pub async fn set_image_compression_enabled(
+    enabled: bool,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    {
+        let mut config = state
+            .config
+            .lock()
+            .map_err(|e| format!("获取配置失败: {}", e))?;
+        config.ui_config.image_compression_enabled = enabled;
+    }
+    save_config(&state, &app)
+        .await
+        .map_err(|e| format!("保存配置失败: {}", e))?;
     Ok(())
 }
 
@@ -637,7 +670,6 @@ pub async fn open_external_url(url: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn exit_app(app: AppHandle) -> Result<(), String> {
-    // 直接调用强制退出，用于程序内部的退出操作（如MCP响应后退出）
     crate::ui::exit::force_exit_app(app).await
 }
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import type { ProjectIndexStatus } from '../../types/tauri'
 import { computed } from 'vue'
+import type { ProjectIndexStatus } from '../../types/tauri'
 
 interface Props {
   project: ProjectIndexStatus
@@ -38,8 +38,8 @@ const statusConfig = computed(() => {
       text: '待重建',
       type: 'warning' as const,
       icon: 'i-carbon-warning-alt',
-      glowColor: 'rgba(245, 158, 11, 0.35)',
-      borderColor: 'border-amber-500/40',
+      glowColor: '',
+      borderColor: '',
     }
   }
 
@@ -48,29 +48,29 @@ const statusConfig = computed(() => {
       text: '未索引',
       type: 'default' as const,
       icon: 'i-carbon-circle-dash',
-      glowColor: 'rgba(156, 163, 175, 0.3)',
-      borderColor: 'border-gray-400/30',
+      glowColor: '',
+      borderColor: '',
     },
     indexing: {
       text: '索引中',
       type: 'info' as const,
       icon: 'i-carbon-in-progress animate-spin',
-      glowColor: 'rgba(59, 130, 246, 0.4)',
-      borderColor: 'border-blue-500/40',
+      glowColor: '',
+      borderColor: '',
     },
     synced: {
       text: '已完成',
       type: 'success' as const,
       icon: 'i-carbon-checkmark-filled',
-      glowColor: 'rgba(34, 197, 94, 0.3)',
-      borderColor: 'border-green-500/30',
+      glowColor: '',
+      borderColor: '',
     },
     failed: {
       text: '失败',
       type: 'error' as const,
       icon: 'i-carbon-warning-filled',
-      glowColor: 'rgba(239, 68, 68, 0.4)',
-      borderColor: 'border-red-500/40',
+      glowColor: '',
+      borderColor: '',
     },
   }
   return configs[props.project.status] || configs.idle
@@ -144,54 +144,34 @@ function formatAbsoluteTime(timeStr: string | null): string {
 </script>
 
 <template>
-  <div
-    class="project-card group"
-    :class="[statusConfig.borderColor]"
-    :style="{ '--glow-color': statusConfig.glowColor }"
-  >
-    <!-- 科技感扫描线动画（仅索引中时显示） -->
-    <div v-if="project.status === 'indexing'" class="scan-line" />
-
-    <!-- 顶部装饰线 -->
-    <div class="card-top-border" />
-
-    <div class="card-content">
-      <!-- 头部：项目名称和状态 -->
-      <div class="card-header">
-        <div class="project-info">
-          <!-- 项目名称 -->
-          <div class="project-name">
-            <div class="i-carbon-folder text-primary-500 flex-shrink-0" />
-            <span class="name-text">{{ projectName }}</span>
-            <!-- 目录不存在警告 -->
+  <n-card size="small" hoverable>
+    <n-space vertical :size="8">
+      <div class="flex items-start justify-between gap-3">
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 mb-1">
+            <div class="i-carbon-folder text-primary shrink-0" />
+            <n-text class="text-sm font-medium truncate">{{ projectName }}</n-text>
             <n-tooltip v-if="!props.directoryExists" trigger="hover">
               <template #trigger>
-                <div class="i-carbon-warning-filled text-red-500 flex-shrink-0 ml-1" />
+                <div class="i-carbon-warning-filled text-error shrink-0" />
               </template>
               目录不存在，建议删除此记录
             </n-tooltip>
           </div>
-          <!-- 项目路径 -->
           <n-tooltip trigger="hover">
             <template #trigger>
-              <div
-                class="project-path"
+              <n-text
+                depth="3"
+                class="text-[11px] font-mono truncate block cursor-pointer hover:opacity-80 transition-opacity"
                 @click="emit('copy-path', displayPath)"
               >
                 {{ displayPath }}
-              </div>
+              </n-text>
             </template>
             点击复制路径
           </n-tooltip>
         </div>
-
-        <!-- 状态徽章 -->
-        <n-tag
-          :type="statusConfig.type"
-          :bordered="false"
-          size="small"
-          class="status-badge"
-        >
+        <n-tag :type="statusConfig.type" :bordered="false" size="small" class="shrink-0">
           <template #icon>
             <div class="text-xs" :class="[statusConfig.icon]" />
           </template>
@@ -199,90 +179,81 @@ function formatAbsoluteTime(timeStr: string | null): string {
         </n-tag>
       </div>
 
-      <div v-if="staleNotice" class="stale-section">
-        <div class="i-carbon-warning-alt stale-section__icon" />
-        <span>{{ staleNotice }}</span>
-      </div>
+      <n-alert v-if="staleNotice" type="warning" :bordered="false" class="text-xs">
+        {{ staleNotice }}
+      </n-alert>
 
-      <!-- 进度条（仅索引中时显示） -->
-      <div v-if="project.status === 'indexing'" class="progress-section">
-        <n-progress
-          type="line"
-          :percentage="project.progress"
-          :show-indicator="true"
-          :height="6"
-          :border-radius="3"
-          processing
-          class="cyber-progress"
-        />
-      </div>
+      <n-progress
+        v-if="project.status === 'indexing'"
+        type="line"
+        :percentage="project.progress"
+        :show-indicator="true"
+        :height="6"
+        :border-radius="3"
+        processing
+      />
 
-      <!-- 文件统计 -->
-      <div class="stats-section">
+      <n-space :size="6" class="text-xs">
         <n-tooltip trigger="hover">
           <template #trigger>
-            <div class="stat-item">
-              <div class="i-carbon-document" />
-              <span class="stat-label">总计</span>
-              <span class="stat-value">{{ project.total_files }}</span>
-            </div>
+            <n-tag size="tiny" :bordered="false">
+              <template #icon>
+                <div class="i-carbon-document text-[10px]" />
+              </template>
+              总计 {{ project.total_files }}
+            </n-tag>
           </template>
           项目中的总文件数
         </n-tooltip>
-
         <n-tooltip trigger="hover">
           <template #trigger>
-            <div class="stat-item text-green-500">
-              <div class="i-carbon-checkmark-filled" />
-              <span class="stat-label">已索引</span>
-              <span class="stat-value">{{ project.indexed_files }}</span>
-            </div>
+            <n-tag size="tiny" type="success" :bordered="false">
+              <template #icon>
+                <div class="i-carbon-checkmark-filled text-[10px]" />
+              </template>
+              已索引 {{ project.indexed_files }}
+            </n-tag>
           </template>
           已成功索引的文件数
         </n-tooltip>
-
         <n-tooltip v-if="project.pending_files > 0" trigger="hover">
           <template #trigger>
-            <div class="stat-item text-blue-500">
-              <div class="i-carbon-time" />
-              <span class="stat-label">待处理</span>
-              <span class="stat-value">{{ project.pending_files }}</span>
-            </div>
+            <n-tag size="tiny" type="info" :bordered="false">
+              <template #icon>
+                <div class="i-carbon-time text-[10px]" />
+              </template>
+              待处理 {{ project.pending_files }}
+            </n-tag>
           </template>
           等待索引的文件数
         </n-tooltip>
-
         <n-tooltip v-if="project.failed_files > 0" trigger="hover">
           <template #trigger>
-            <div class="stat-item text-red-500">
-              <div class="i-carbon-warning-filled" />
-              <span class="stat-label">失败</span>
-              <span class="stat-value">{{ project.failed_files }}</span>
-            </div>
+            <n-tag size="tiny" type="error" :bordered="false">
+              <template #icon>
+                <div class="i-carbon-warning-filled text-[10px]" />
+              </template>
+              失败 {{ project.failed_files }}
+            </n-tag>
           </template>
           索引失败的文件数
         </n-tooltip>
-      </div>
+      </n-space>
 
-      <!-- 最后索引时间 -->
-      <div class="time-section">
+      <n-tooltip trigger="hover">
+        <template #trigger>
+          <div class="flex items-center gap-1 text-[11px]">
+            <div class="i-carbon-time" />
+            <n-text depth="3">{{ formatRelativeTime(project.last_success_time) }}</n-text>
+          </div>
+        </template>
+        {{ formatAbsoluteTime(project.last_success_time) }}
+      </n-tooltip>
+
+      <div class="flex items-center gap-2 pt-2 border-t border-border">
         <n-tooltip trigger="hover">
           <template #trigger>
-            <div class="time-info">
-              <div class="i-carbon-time" />
-              <span>{{ formatRelativeTime(project.last_success_time) }}</span>
-            </div>
-          </template>
-          {{ formatAbsoluteTime(project.last_success_time) }}
-        </n-tooltip>
-      </div>
-
-      <!-- 操作按钮 -->
-      <div class="actions-section">
-        <!-- 监听开关 -->
-        <n-tooltip trigger="hover">
-          <template #trigger>
-            <div class="watch-toggle">
+            <div class="flex items-center gap-1.5">
               <n-switch
                 :value="isWatching"
                 size="small"
@@ -295,50 +266,27 @@ function formatAbsoluteTime(timeStr: string | null): string {
                   <div class="i-carbon-view-off text-[10px]" />
                 </template>
               </n-switch>
-              <span class="watch-label">监听</span>
+              <n-text depth="3" class="text-[10px]">监听</n-text>
             </div>
           </template>
           {{ isWatching ? '停止实时监听' : '开启实时监听' }}
         </n-tooltip>
-
         <div class="flex-1" />
-
-        <!-- 重新索引 -->
-        <n-button
-          size="tiny"
-          secondary
-          type="primary"
-          :disabled="project.status === 'indexing'"
-          @click="emit('reindex')"
-        >
+        <n-button size="tiny" secondary type="primary" :disabled="project.status === 'indexing'" @click="emit('reindex')">
           <template #icon>
             <div class="i-carbon-renew text-xs" />
           </template>
           索引
         </n-button>
-
-        <!-- 查看结构树 -->
-        <n-button
-          size="tiny"
-          secondary
-          type="info"
-          @click="emit('view-tree')"
-        >
+        <n-button size="tiny" secondary type="info" @click="emit('view-tree')">
           <template #icon>
             <div class="i-carbon-tree-view text-xs" />
           </template>
           结构
         </n-button>
-
-        <!-- 删除按钮 -->
         <n-tooltip trigger="hover">
           <template #trigger>
-            <n-button
-              size="tiny"
-              quaternary
-              type="error"
-              @click="emit('delete')"
-            >
+            <n-button size="tiny" quaternary type="error" @click="emit('delete')">
               <template #icon>
                 <div class="i-carbon-trash-can text-xs" />
               </template>
@@ -347,252 +295,6 @@ function formatAbsoluteTime(timeStr: string | null): string {
           删除索引记录
         </n-tooltip>
       </div>
-    </div>
-  </div>
+    </n-space>
+  </n-card>
 </template>
-
-<style scoped>
-/* 项目卡片基础样式 */
-.project-card {
-  position: relative;
-  border-radius: 12px;
-  overflow: hidden;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  border: 1px solid;
-  background: var(--color-container, rgba(255, 255, 255, 0.8));
-  backdrop-filter: blur(8px);
-}
-
-/* 深色模式背景 */
-:root.dark .project-card {
-  background: rgba(24, 24, 28, 0.9);
-}
-
-/* 悬停效果 - 霓虹光晕 */
-.project-card:hover {
-  transform: translateY(-2px);
-  box-shadow:
-    0 8px 25px -5px var(--glow-color, rgba(0, 0, 0, 0.1)),
-    0 0 20px -5px var(--glow-color, rgba(0, 0, 0, 0.1));
-}
-
-/* 卡片内容区域 */
-.card-content {
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-/* 头部区域 */
-.card-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-/* 项目信息 */
-.project-info {
-  flex: 1;
-  min-width: 0;
-}
-
-/* 项目名称 */
-.project-name {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 4px;
-}
-
-.name-text {
-  font-weight: 500;
-  font-size: 14px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 项目路径 */
-.project-path {
-  font-size: 11px;
-  font-family: ui-monospace, monospace;
-  opacity: 0.5;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: opacity 0.2s ease;
-}
-
-.project-path:hover {
-  opacity: 0.8;
-}
-
-/* 状态徽章 */
-.status-badge {
-  flex-shrink: 0;
-}
-
-/* 进度条区域 */
-.progress-section {
-  position: relative;
-}
-
-/* 统计信息区域 */
-.stats-section {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  font-size: 12px;
-}
-
-/* 时间信息区域 */
-.time-section {
-  font-size: 11px;
-}
-
-.time-info {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  opacity: 0.5;
-}
-
-.stale-section {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  font-size: 11px;
-  line-height: 1.5;
-  color: #b45309;
-  background: rgba(245, 158, 11, 0.12);
-  border: 1px solid rgba(245, 158, 11, 0.24);
-}
-
-.stale-section__icon {
-  flex-shrink: 0;
-  margin-top: 1px;
-}
-
-:root.dark .stale-section {
-  color: #fcd34d;
-  background: rgba(245, 158, 11, 0.18);
-  border-color: rgba(245, 158, 11, 0.3);
-}
-
-/* 操作按钮区域 */
-.actions-section {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding-top: 12px;
-  border-top: 1px solid rgba(128, 128, 128, 0.2);
-}
-
-/* 监听开关 */
-.watch-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.watch-label {
-  font-size: 10px;
-  opacity: 0.6;
-}
-
-/* 顶部装饰线 - 渐变霓虹效果 */
-.card-top-border {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    var(--glow-color, rgba(59, 130, 246, 0.5)),
-    transparent
-  );
-  opacity: 0;
-  transition: opacity 0.3s ease;
-}
-
-.project-card:hover .card-top-border {
-  opacity: 1;
-}
-
-/* 扫描线动画 */
-.scan-line {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 100%;
-  background: linear-gradient(
-    180deg,
-    transparent 0%,
-    rgba(59, 130, 246, 0.1) 50%,
-    transparent 100%
-  );
-  animation: scan 2s linear infinite;
-  pointer-events: none;
-  z-index: 1;
-}
-
-@keyframes scan {
-  0% {
-    transform: translateY(-100%);
-  }
-  100% {
-    transform: translateY(100%);
-  }
-}
-
-/* 统计项样式 */
-.stat-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 8px;
-  border-radius: 4px;
-  background: rgba(128, 128, 128, 0.08);
-  transition: all 0.2s ease;
-}
-
-.stat-item:hover {
-  background: rgba(128, 128, 128, 0.15);
-}
-
-/* 统计标签 - 确保可见 */
-.stat-label {
-  font-size: 10px;
-  opacity: 0.7;
-}
-
-/* 统计数值 - 加粗显示 */
-.stat-value {
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-/* 科技感进度条 */
-.cyber-progress :deep(.n-progress-graph-line-fill) {
-  background: linear-gradient(90deg, #3b82f6, #8b5cf6, #3b82f6);
-  background-size: 200% 100%;
-  animation: gradient-flow 2s linear infinite;
-}
-
-@keyframes gradient-flow {
-  0% {
-    background-position: 0% 50%;
-  }
-  100% {
-    background-position: 200% 50%;
-  }
-}
-</style>

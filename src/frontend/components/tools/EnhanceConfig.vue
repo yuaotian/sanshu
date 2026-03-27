@@ -3,10 +3,10 @@
  * 提示词增强配置面板
  * 复用 acemcp 配置，仅展示 base_url/token 与历史管理
  */
-import { invoke } from '@tauri-apps/api/core'
-import { useMessage } from 'naive-ui'
-import { computed, onMounted, ref, watch } from 'vue'
-import ConfigSection from '../common/ConfigSection.vue'
+import { invoke } from '@tauri-apps/api/core';
+import { useMessage } from 'naive-ui';
+import { computed, onMounted, ref, watch } from 'vue';
+import ConfigSection from '../common/ConfigSection.vue';
 
 const props = defineProps<{
   active: boolean
@@ -181,11 +181,11 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="enhance-config">
-    <n-scrollbar class="config-scrollbar">
-      <n-space vertical size="large" class="config-content">
+  <div class="h-full">
+    <n-scrollbar class="max-h-[65vh]">
+      <n-space vertical size="medium" class="pr-2 pb-4">
         <!-- 说明提示 -->
-        <n-alert type="info" :bordered="false" class="intro-alert">
+        <n-alert type="info" :bordered="false" class="rounded-lg">
           <template #icon>
             <div class="i-carbon-information" />
           </template>
@@ -194,28 +194,36 @@ onMounted(() => {
 
         <!-- 连接设置 -->
         <ConfigSection title="连接设置" description="配置 Augment API 连接信息（复用 acemcp 配置）">
-          <n-form-item label="API 端点 URL">
+          <div class="mb-4">
+            <div class="text-xs text-on-surface-secondary mb-1">
+              API 端点 URL
+            </div>
             <n-input
               v-model:value="config.base_url"
+              size="small"
               :disabled="loadingConfig"
               placeholder="https://d9.api.augmentcode.com"
               clearable
             />
-            <template #feedback>
-              <span class="form-feedback">需包含 http(s):// 前缀</span>
-            </template>
-          </n-form-item>
+            <div class="text-xs text-on-surface-muted mt-1">
+              需包含 http(s):// 前缀
+            </div>
+          </div>
 
-          <n-form-item label="认证 Token">
+          <div>
+            <div class="text-xs text-on-surface-secondary mb-1">
+              认证 Token
+            </div>
             <n-input
               v-model:value="config.token"
+              size="small"
               :disabled="loadingConfig"
               type="password"
               show-password-on="click"
               placeholder="请输入 token"
               clearable
             />
-          </n-form-item>
+          </div>
 
           <div class="flex justify-end mt-3">
             <n-button type="primary" size="small" :loading="loadingConfig" @click="saveConfig">
@@ -262,26 +270,3 @@ onMounted(() => {
   </div>
 </template>
 
-<style scoped>
-.enhance-config {
-  height: 100%;
-}
-
-.config-scrollbar {
-  max-height: 65vh;
-}
-
-.config-content {
-  padding-right: 8px;
-  padding-bottom: 16px;
-}
-
-.intro-alert {
-  border-radius: 8px;
-}
-
-.form-feedback {
-  font-size: 11px;
-  color: var(--color-on-surface-muted, #9ca3af);
-}
-</style>

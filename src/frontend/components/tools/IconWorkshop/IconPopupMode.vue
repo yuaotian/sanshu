@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { invoke } from '@tauri-apps/api/core'
+import type { DropdownOption } from 'naive-ui'
 import { useMessage } from 'naive-ui'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useIconSearch } from '../../../composables/useIconSearch'
 import type { IconFormat, IconItem, IconSaveItem, IconSaveRequest, IconSaveResult } from '../../../types/icon'
+import { sanitizeSvg } from '../../../utils/sanitize'
+import WindowTitleBar from '../../common/WindowTitleBar.vue'
 import IconWorkshop from './IconWorkshop.vue'
 
 interface Props {
@@ -110,6 +113,10 @@ const editorCollapseExpanded = ref(['appearance', 'transform'])
 const contextMenuVisible = ref(false)
 const contextMenuPosition = ref({ x: 0, y: 0 })
 const contextMenuIcon = ref<IconItem | null>(null)
+const contextMenuOptions: DropdownOption[] = [
+  { label: '打开 SVG 编辑器', key: 'editor', icon: () => h('div', { class: 'i-carbon-color-palette' }) },
+  { label: '复制 SVG', key: 'copy-svg', icon: () => h('div', { class: 'i-carbon-copy' }) },
+]
 const editorRect = ref({ x: 0, y: 0, width: 0, height: 0 })
 const editorRectInitialized = ref(false)
 const dragState = ref<{
@@ -187,10 +194,10 @@ const mergedSwatches = computed(() => {
 
 const previewBackgroundClass = computed(() => {
   if (previewBackground.value === 'light')
-    return 'bg-stone-50'
+    return 'bg-white'
   if (previewBackground.value === 'dark')
-    return 'bg-slate-900'
-  return 'bg-slate-900'
+    return 'bg-[#0a0a0c]'
+  return 'bg-[#0a0a0c]'
 })
 
 const previewScaleClass = computed(() => {
@@ -322,39 +329,33 @@ function handleIconContextMenu(icon: IconItem, event: MouseEvent) {
   contextMenuVisible.value = true
 }
 
-// 关闭右键菜单
 function closeContextMenu() {
   contextMenuVisible.value = false
   contextMenuIcon.value = null
 }
 
-// 右键菜单：打开编辑器
-function contextMenuOpenEditor() {
+async function handleContextMenuSelect(key: string) {
   if (!contextMenuIcon.value)
     return
-  handleIconDblClick(contextMenuIcon.value)
-  closeContextMenu()
-}
-
-// 右键菜单：复制SVG
-async function contextMenuCopySvg() {
-  if (!contextMenuIcon.value)
-    return
-  const icon = contextMenuIcon.value
-  try {
-    // 获取编辑后的SVG或原始SVG
-    const svgContent = getEditedSvg(icon) || icon.svgContent
-    if (svgContent) {
-      await navigator.clipboard.writeText(svgContent)
-      message.success(`已复制 ${icon.name} 的 SVG`)
-    }
-    else {
-      message.warning('暂无可复制的 SVG 内容')
-    }
+  if (key === 'editor') {
+    handleIconDblClick(contextMenuIcon.value)
   }
-  catch (error) {
-    console.error('复制失败:', error)
-    message.error('复制失败')
+  else if (key === 'copy-svg') {
+    const icon = contextMenuIcon.value
+    try {
+      const svgContent = getEditedSvg(icon) || icon.svgContent
+      if (svgContent) {
+        await navigator.clipboard.writeText(svgContent)
+        message.success(`已复制 ${icon.name} 的 SVG`)
+      }
+      else {
+        message.warning('暂无可复制的 SVG 内容')
+      }
+    }
+    catch (error) {
+      console.error('复制失败:', error)
+      message.error('复制失败')
+    }
   }
   closeContextMenu()
 }
@@ -379,7 +380,7 @@ function schedulePreviewUpdate() {
     }
 
     const { finalSvg, previewSvg } = buildEditedSvgPair(originalSvg, state, state.activeElementKey)
-    editorPreviewSvg.value = previewSvg
+    editorPreviewSvg.value = sanitizeSvg(previewSvg)
     editedSvgMap.value[icon.id] = finalSvg
     previewUpdating.value = false
   }, 200)
@@ -1112,8 +1113,13 @@ async function handleCancel() {
 
 <template>
   <div class="h-screen flex flex-col bg-surface text-on-surface">
+    <!-- 窗口标题栏 -->
+    <div class="flex-shrink-0 bg-container border-b border-border">
+      <WindowTitleBar title="图标工坊" />
+    </div>
+
     <!-- 顶部导航栏 -->
-    <div class="flex-shrink-0 h-14 border-b border-border flex items-center justify-between px-4 bg-surface-variant">
+    <div class="flex-shrink-0 border-b border-border flex items-center justify-between px-4 py-2 bg-container">
       <div class="flex items-center gap-2">
         <div class="i-carbon-image text-xl text-primary" />
         <span class="font-medium">图标工坊</span>
@@ -1159,7 +1165,7 @@ async function handleCancel() {
             v-if="showProgressOverlay"
             class="absolute inset-0 z-30 flex items-center justify-center bg-surface backdrop-blur"
           >
-            <div class="w-full max-w-xl rounded-2xl border border-border bg-surface-variant p-6 shadow-lg space-y-4">
+            <div class="w-full max-w-xl rounded-xl border border-border bg-container p-6 shadow-lg space-y-4">
               <div class="flex items-center gap-3">
                 <div class="i-carbon-download text-xl text-primary" />
                 <div class="text-base font-medium">
@@ -1185,7 +1191,7 @@ async function handleCancel() {
 
               <div v-else class="space-y-3">
                 <div class="flex items-center gap-2 text-sm text-on-surface-secondary">
-                  <div class="i-carbon-checkmark-outline text-green-500" />
+                  <div class="i-carbon-checkmark-outline text-success" />
                   <span>保存任务已完成</span>
                 </div>
 
@@ -1194,7 +1200,7 @@ async function handleCancel() {
                     <div class="text-on-surface-secondary">
                       成功
                     </div>
-                    <div class="text-lg font-semibold text-green-600">
+                    <div class="text-lg font-semibold text-success">
                       {{ saveSummary.successCount }}
                     </div>
                   </div>
@@ -1202,7 +1208,7 @@ async function handleCancel() {
                     <div class="text-on-surface-secondary">
                       失败
                     </div>
-                    <div class="text-lg font-semibold text-red-500">
+                    <div class="text-lg font-semibold text-error">
                       {{ saveSummary.failedCount }}
                     </div>
                   </div>
@@ -1216,12 +1222,12 @@ async function handleCancel() {
                   </div>
                 </div>
 
-                <div v-if="saveError" class="text-xs text-red-500">
+                <div v-if="saveError" class="text-xs text-error">
                   {{ saveError }}
                 </div>
 
                 <div class="flex justify-end">
-                  <n-button type="primary" @click="handleConfirmClose">
+                  <n-button type="primary" size="small" @click="handleConfirmClose">
                     确认并关闭
                   </n-button>
                 </div>
@@ -1251,45 +1257,16 @@ async function handleCancel() {
     </div>
 
     <!-- 右键上下文菜单 -->
-    <Teleport to="body">
-      <transition
-        enter-active-class="transition duration-100 ease-out"
-        enter-from-class="opacity-0 scale-95"
-        enter-to-class="opacity-100 scale-100"
-        leave-active-class="transition duration-75 ease-in"
-        leave-from-class="opacity-100 scale-100"
-        leave-to-class="opacity-0 scale-95"
-      >
-        <div
-          v-if="contextMenuVisible"
-          class="fixed z-50 min-w-40 rounded-lg border border-border bg-surface-variant shadow-xl py-1"
-          :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }"
-          @click.stop
-        >
-          <div
-            class="px-3 py-2 text-sm cursor-pointer hover:bg-surface-100 flex items-center gap-2"
-            @click="contextMenuOpenEditor"
-          >
-            <div class="i-carbon-color-palette text-base" />
-            <span>打开 SVG 编辑器</span>
-          </div>
-          <div
-            class="px-3 py-2 text-sm cursor-pointer hover:bg-surface-100 flex items-center gap-2"
-            @click="contextMenuCopySvg"
-          >
-            <div class="i-carbon-copy text-base" />
-            <span>复制 SVG</span>
-          </div>
-        </div>
-      </transition>
-      <!-- 点击遮罩关闭菜单 -->
-      <div
-        v-if="contextMenuVisible"
-        class="fixed inset-0 z-40"
-        @click="closeContextMenu"
-        @contextmenu.prevent="closeContextMenu"
-      />
-    </Teleport>
+    <n-dropdown
+      trigger="manual"
+      placement="bottom-start"
+      :show="contextMenuVisible"
+      :options="contextMenuOptions"
+      :x="contextMenuPosition.x"
+      :y="contextMenuPosition.y"
+      @select="handleContextMenuSelect"
+      @clickoutside="closeContextMenu"
+    />
 
     <!-- SVG 编辑器弹窗 -->
     <div v-if="editorModalOpen" class="fixed inset-0 z-40 pointer-events-none">
@@ -1301,12 +1278,12 @@ async function handleCancel() {
           editorInteracting ? 'transition-none' : 'transition-all duration-150 ease-out',
         ]"
       >
-        <div class="relative h-full rounded-2xl border border-slate-200/70 dark:border-white/10 bg-white/90 dark:bg-[#1f1f23] shadow-2xl flex flex-col overflow-hidden">
+        <div class="relative h-full rounded-xl border border-border bg-surface shadow-2xl flex flex-col overflow-hidden">
           <!-- 标题栏 -->
-          <div class="flex-shrink-0 flex items-center justify-between px-4 py-3 border-b border-slate-200/70 dark:border-white/5 bg-slate-50/80 dark:bg-[#252529] cursor-move" @pointerdown.prevent="startDrag">
+          <div class="flex-shrink-0 flex items-center justify-between px-4 py-3 border-b border-border bg-container cursor-move" @pointerdown.prevent="startDrag">
             <div class="flex items-center gap-2 select-none">
-              <div class="i-carbon-color-palette text-lg text-slate-500" />
-              <span class="font-semibold text-slate-700 dark:text-gray-200">SVG 编辑器</span>
+              <div class="i-carbon-color-palette text-lg text-on-surface-muted" />
+              <span class="font-semibold text-on-surface">SVG 编辑器</span>
               <n-tag :type="editorStatusTagType" size="small" round>
                 {{ editorStatusLabel }}
               </n-tag>
@@ -1320,10 +1297,10 @@ async function handleCancel() {
           <div class="flex-1 min-h-0 flex flex-col lg:flex-row gap-4 p-4">
             <!-- 左侧：选择 + 预览 -->
             <div class="flex flex-col gap-4 lg:basis-[46%] min-w-0">
-              <div class="rounded-xl border border-slate-200/70 dark:border-white/10 bg-white/80 dark:bg-[#1a1a1d] p-3 space-y-2">
+              <div class="rounded-lg border border-border bg-container p-3 space-y-2">
                 <div class="flex items-center justify-between">
-                  <label class="text-xs font-semibold text-slate-400 dark:text-gray-500 uppercase tracking-wider">当前图标</label>
-                  <span class="text-xs text-slate-400">{{ selectedIcons.length }} 个已选</span>
+                  <label class="text-xs font-semibold text-on-surface-muted uppercase tracking-wider">当前图标</label>
+                  <span class="text-xs text-on-surface-muted">{{ selectedIcons.length }} 个已选</span>
                 </div>
                 <n-select
                   v-model:value="activeIconId"
@@ -1335,9 +1312,9 @@ async function handleCancel() {
                 />
               </div>
 
-              <div class="flex-1 min-h-[260px] lg:min-h-[360px] rounded-2xl border border-slate-200/70 dark:border-white/10 bg-slate-50/70 dark:bg-[#141417] p-4 flex flex-col gap-3">
+              <div class="flex-1 min-h-[260px] lg:min-h-[360px] rounded-lg border border-border bg-container p-4 flex flex-col gap-3">
                 <div class="flex flex-wrap items-center justify-between gap-2">
-                  <label class="text-xs font-semibold text-slate-400 dark:text-gray-500 uppercase tracking-wider">实时预览</label>
+                  <label class="text-xs font-semibold text-on-surface-muted uppercase tracking-wider">实时预览</label>
                   <div class="flex flex-wrap items-center gap-2">
                     <n-radio-group v-model:value="previewBackground" size="small">
                       <n-radio-button value="grid">网格</n-radio-button>
@@ -1353,12 +1330,12 @@ async function handleCancel() {
                   </div>
                 </div>
 
-                <div class="relative flex-1 min-h-[200px] rounded-xl border border-slate-200/60 dark:border-white/10 overflow-hidden" :class="previewBackgroundClass">
+                <div class="relative flex-1 min-h-[200px] rounded-lg border border-border overflow-hidden" :class="previewBackgroundClass">
                   <div v-if="previewBackground === 'grid'" class="absolute inset-0 pattern-grid opacity-15 pointer-events-none" />
                   <n-spin :show="previewBusy" size="small">
                     <div class="relative z-10 w-full h-full flex items-center justify-center px-3">
                       <n-skeleton v-if="editorStatus === 'loading'" text :repeat="3" class="w-full" />
-                      <div v-else-if="editorStatus === 'error'" class="text-xs text-rose-400">
+                      <div v-else-if="editorStatus === 'error'" class="text-xs text-error">
                         SVG 加载失败
                       </div>
                       <div v-else-if="editorPreviewSvg" class="w-full h-full flex items-center justify-center">
@@ -1366,14 +1343,14 @@ async function handleCancel() {
                           <div class="editor-preview w-full h-full" v-html="editorPreviewSvg" />
                         </div>
                       </div>
-                      <div v-else class="text-xs text-slate-400">
+                      <div v-else class="text-xs text-on-surface-muted">
                         请选择图标进行编辑
                       </div>
                     </div>
                   </n-spin>
                 </div>
 
-                <div class="flex items-center justify-between text-xs text-slate-400">
+                <div class="flex items-center justify-between text-xs text-on-surface-muted">
                   <span class="truncate">{{ activeIcon?.name || '未选择' }}</span>
                   <span v-if="activeState">尺寸 {{ activeState.width }} × {{ activeState.height }}</span>
                 </div>
@@ -1392,9 +1369,9 @@ async function handleCancel() {
                 <div v-else class="space-y-4">
                   <n-collapse v-model:expanded-names="editorCollapseExpanded">
                     <n-collapse-item name="appearance" title="外观设置" :disabled="!activeState">
-                      <div class="rounded-xl border border-slate-200/60 dark:border-white/10 bg-white/70 dark:bg-[#18181b] p-4 space-y-4">
+                      <div class="space-y-4">
                         <div class="flex items-center justify-between">
-                          <span class="text-xs font-semibold text-slate-400 dark:text-gray-500 uppercase tracking-wider">全局颜色</span>
+                          <span class="text-xs font-semibold text-on-surface-muted uppercase tracking-wider">全局颜色</span>
                           <n-switch
                             :value="activeState?.applyColor ?? false"
                             size="small"
@@ -1413,7 +1390,7 @@ async function handleCancel() {
                     </n-collapse-item>
 
                     <n-collapse-item name="transform" title="尺寸与变换" :disabled="!activeState">
-                      <div class="rounded-xl border border-slate-200/60 dark:border-white/10 bg-white/70 dark:bg-[#18181b] p-4 space-y-4">
+                      <div class="space-y-4">
                         <div class="grid grid-cols-2 gap-2">
                           <n-input-number
                             :value="activeState?.width"
@@ -1423,7 +1400,7 @@ async function handleCancel() {
                             :disabled="!activeState"
                             @update:value="(value: number | null) => value !== null && updateActiveState('width', value)"
                           >
-                            <template #prefix><span class="text-xs text-slate-400">W</span></template>
+                            <template #prefix><span class="text-xs text-on-surface-muted">W</span></template>
                           </n-input-number>
                           <n-input-number
                             :value="activeState?.height"
@@ -1433,7 +1410,7 @@ async function handleCancel() {
                             :disabled="!activeState"
                             @update:value="(value: number | null) => value !== null && updateActiveState('height', value)"
                           >
-                            <template #prefix><span class="text-xs text-slate-400">H</span></template>
+                            <template #prefix><span class="text-xs text-on-surface-muted">H</span></template>
                           </n-input-number>
                         </div>
 
@@ -1459,8 +1436,8 @@ async function handleCancel() {
                           :disabled="!activeState"
                           @update:value="(value: number | null) => value !== null && updateActiveState('rotate', value)"
                         >
-                          <template #prefix><span class="text-xs text-slate-400">旋转</span></template>
-                          <template #suffix><span class="text-xs text-slate-400">°</span></template>
+                          <template #prefix><span class="text-xs text-on-surface-muted">旋转</span></template>
+                          <template #suffix><span class="text-xs text-on-surface-muted">°</span></template>
                         </n-input-number>
 
                         <div class="flex gap-2">
@@ -1489,9 +1466,9 @@ async function handleCancel() {
                     </n-collapse-item>
 
                     <n-collapse-item name="stroke" title="线条与圆角" :disabled="!activeState">
-                      <div class="rounded-xl border border-slate-200/60 dark:border-white/10 bg-white/70 dark:bg-[#18181b] p-4 space-y-4">
+                      <div class="space-y-4">
                         <div class="flex items-center justify-between">
-                          <span class="text-xs text-slate-500 dark:text-gray-400">圆角端点</span>
+                          <span class="text-xs text-on-surface-secondary">圆角端点</span>
                           <n-switch
                             :value="activeState?.roundStroke ?? false"
                             size="small"
@@ -1508,7 +1485,7 @@ async function handleCancel() {
                           :disabled="!activeState"
                           @update:value="(value: number | null) => updateActiveState('strokeWidth', value)"
                         >
-                          <template #prefix><span class="text-xs text-slate-400">粗细</span></template>
+                          <template #prefix><span class="text-xs text-on-surface-muted">粗细</span></template>
                         </n-input-number>
 
                         <n-input-number
@@ -1519,13 +1496,13 @@ async function handleCancel() {
                           :disabled="!activeState"
                           @update:value="(value: number | null) => updateActiveState('rectRadius', value)"
                         >
-                          <template #prefix><span class="text-xs text-slate-400">圆角</span></template>
+                          <template #prefix><span class="text-xs text-on-surface-muted">圆角</span></template>
                         </n-input-number>
                       </div>
                     </n-collapse-item>
 
                     <n-collapse-item name="element" title="元素级编辑">
-                      <div class="rounded-xl border border-slate-200/60 dark:border-white/10 bg-white/70 dark:bg-[#18181b] p-4 space-y-4">
+                      <div class="space-y-4">
                         <n-input
                           v-model:value="elementSearch"
                           size="small"
@@ -1533,7 +1510,7 @@ async function handleCancel() {
                           placeholder="搜索元素（名称/类型）"
                           :disabled="!activeElementOptions.length"
                         >
-                          <template #prefix><div class="i-carbon-search text-slate-400" /></template>
+                          <template #prefix><div class="i-carbon-search text-on-surface-muted" /></template>
                         </n-input>
 
                         <n-select
@@ -1545,9 +1522,9 @@ async function handleCancel() {
                           virtual-scroll
                         />
 
-                        <div v-if="activeElementStyle" class="p-3 bg-white/80 dark:bg-[#121214] rounded-lg border border-slate-200/60 dark:border-white/10 space-y-3">
+                        <div v-if="activeElementStyle" class="p-3 bg-container rounded-lg border border-border space-y-3">
                           <div class="flex items-center justify-between">
-                            <span class="text-xs font-medium text-slate-600 dark:text-gray-300">独立样式</span>
+                            <span class="text-xs font-medium text-on-surface">独立样式</span>
                             <n-switch
                               :value="activeElementStyle.enabled"
                               size="small"
@@ -1572,7 +1549,7 @@ async function handleCancel() {
                               <template #prefix><span class="text-xs">粗细</span></template>
                             </n-input-number>
                             <div class="flex items-center justify-between">
-                              <span class="text-xs text-slate-500">圆角</span>
+                              <span class="text-xs text-on-surface-secondary">圆角</span>
                               <n-switch
                                 :value="activeElementStyle.roundStroke"
                                 size="small"
@@ -1587,7 +1564,7 @@ async function handleCancel() {
                           </template>
                         </div>
 
-                        <div v-else-if="!activeElementOptions.length" class="text-xs text-slate-400 text-center py-2">
+                        <div v-else-if="!activeElementOptions.length" class="text-xs text-on-surface-muted text-center py-2">
                           此图标无可编辑元素
                         </div>
                       </div>
@@ -1599,10 +1576,10 @@ async function handleCancel() {
           </div>
 
           <!-- 底部操作栏 -->
-          <div class="flex-shrink-0 p-4 border-t border-slate-200/70 dark:border-white/5 bg-slate-50/80 dark:bg-[#252529] space-y-3">
+          <div class="flex-shrink-0 p-4 border-t border-border bg-container space-y-3">
             <div class="flex flex-wrap items-center gap-3">
               <div class="flex items-center gap-2">
-                <span class="text-xs text-slate-500">保存格式</span>
+                <span class="text-xs text-on-surface-secondary">保存格式</span>
                 <n-radio-group v-model:value="editorSaveFormat" size="small">
                   <n-radio-button value="svg">SVG</n-radio-button>
                   <n-radio-button value="png">PNG</n-radio-button>
@@ -1610,7 +1587,7 @@ async function handleCancel() {
                 </n-radio-group>
               </div>
               <div v-if="needsPngSize" class="flex flex-wrap items-center gap-2">
-                <span class="text-xs text-slate-500">PNG 尺寸</span>
+                <span class="text-xs text-on-surface-secondary">PNG 尺寸</span>
                 <n-input-number
                   :value="editorPngSize"
                   size="small"
@@ -1642,11 +1619,11 @@ async function handleCancel() {
                 placeholder="保存目录"
                 class="flex-1"
               >
-                <template #prefix><div class="i-carbon-folder text-gray-400" /></template>
+                <template #prefix><div class="i-carbon-folder text-on-surface-muted" /></template>
               </n-input>
               <n-button size="small" secondary @click="selectEditorDirectory">...</n-button>
             </div>
-            
+
             <div class="grid grid-cols-3 gap-2">
               <n-button size="small" secondary :disabled="!editorPreviewSvg" @click="copyEditedSvg">
                 <template #icon><div class="i-carbon-copy" /></template>
@@ -1666,7 +1643,7 @@ async function handleCancel() {
             class="absolute bottom-1 right-1 w-4 h-4 cursor-nwse-resize z-20"
             @pointerdown.prevent="startResize"
           >
-            <div class="absolute bottom-0 right-0 w-2 h-2 border-r-2 border-b-2 border-gray-300 dark:border-gray-600 rounded-br-sm" />
+            <div class="absolute bottom-0 right-0 w-2 h-2 border-r-2 border-b-2 border-border rounded-br-sm" />
           </div>
         </div>
       </div>
@@ -1756,18 +1733,4 @@ async function handleCancel() {
   background-size: 16px 16px;
 }
 
-/* 自定义滚动条 */
-.custom-scrollbar::-webkit-scrollbar {
-  width: 6px;
-}
-.custom-scrollbar::-webkit-scrollbar-track {
-  background: transparent;
-}
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background-color: rgba(156, 163, 175, 0.2);
-  border-radius: 3px;
-}
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background-color: rgba(156, 163, 175, 0.4);
-}
 </style>

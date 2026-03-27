@@ -6,8 +6,7 @@ import { setupExitWarningListener } from '../composables/useExitWarning'
 import { useKeyboard } from '../composables/useKeyboard'
 import { useLogViewer } from '../composables/useLogViewer'
 import { useMcpToolsReactive } from '../composables/useMcpTools'
-import { useVersionCheck } from '../composables/useVersionCheck'
-import UpdateModal from './common/UpdateModal.vue'
+import WindowTitleBar from './common/WindowTitleBar.vue'
 import LayoutWrapper from './layout/LayoutWrapper.vue'
 import McpIndexStatusDrawer from './popup/McpIndexStatusDrawer.vue'
 import McpPopup from './popup/McpPopup.vue'
@@ -66,9 +65,6 @@ interface Emits {
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
 
-// 版本检查相关
-const { versionInfo, showUpdateModal } = useVersionCheck()
-
 // 弹窗中的设置显示控制
 const showPopupSettings = ref(false)
 // 设置界面当前激活的 Tab
@@ -113,6 +109,15 @@ const showMcpIndexStatus = computed(() => {
   return souEnabled.value
     && !!props.mcpRequest?.project_root_path
     && !!currentProjectStatus.value
+})
+
+// 从项目路径提取项目名（取最后一级目录名）
+const projectName = computed(() => {
+  const p = props.mcpRequest?.project_root_path
+  if (!p) return ''
+  const normalized = p.replace(/\\/g, '/')
+  const segments = normalized.split('/').filter(Boolean)
+  return segments[segments.length - 1] || ''
 })
 
 // Header Tooltip 使用的错误与告警摘要信息
@@ -219,6 +224,7 @@ onUnmounted(() => {
           :loading="false"
           :show-main-layout="showPopupSettings"
           :always-on-top="props.appConfig.window.alwaysOnTop"
+          :project-name="projectName"
           :mcp-enabled="showMcpIndexStatus"
           :mcp-status-summary="statusSummary"
           :mcp-status-icon="statusIcon"
@@ -292,33 +298,9 @@ onUnmounted(() => {
       v-else-if="props.showMcpPopup || props.isInitializing"
       class="flex flex-col w-full h-screen bg-black text-white"
     >
-      <!-- 头部骨架 -->
-      <div class="flex-shrink-0 bg-black-100 border-b-2 border-black-200 px-4 py-3">
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-3">
-            <n-skeleton
-              circle
-              :width="12"
-              :height="12"
-            />
-            <n-skeleton
-              text
-              :width="256"
-            />
-          </div>
-          <div class="flex gap-2">
-            <n-skeleton
-              circle
-              :width="32"
-              :height="32"
-            />
-            <n-skeleton
-              circle
-              :width="32"
-              :height="32"
-            />
-          </div>
-        </div>
+      <!-- 头部 -->
+      <div class="flex-shrink-0 bg-black-200 border-b-2 border-black-300">
+        <WindowTitleBar title="三术 - 加载中..." />
       </div>
 
       <!-- 内容骨架 -->
@@ -366,11 +348,15 @@ onUnmounted(() => {
     </div>
 
     <!-- 主界面 - 只在非弹窗模式且非初始化时显示 -->
-    <LayoutWrapper
-      v-else
-      :app-config="props.appConfig"
-      :active-tab="activeTab"
-      :project-root-path="null"
+    <div v-else class="flex flex-col h-screen overflow-hidden">
+      <div class="flex-shrink-0 bg-black-200 border-b border-white/5">
+        <WindowTitleBar title="三术 - 设置" :current-theme="props.appConfig.theme" @theme-change="$emit('themeChange', $event)" />
+      </div>
+      <div class="flex-1 min-h-0 overflow-y-auto">
+      <LayoutWrapper
+        :app-config="props.appConfig"
+        :active-tab="activeTab"
+        :project-root-path="null"
       :auto-open-tool-id="pendingMcpToolConfig?.toolId || null"
       :auto-open-tool-request-id="pendingMcpToolConfig?.requestId || 0"
       @theme-change="$emit('themeChange', $event)"
@@ -385,12 +371,8 @@ onUnmounted(() => {
       @update:active-tab="activeTab = $event"
       @mcp-tool-auto-opened="handleMcpToolAutoOpened"
     />
-
-    <!-- 更新弹窗 -->
-    <UpdateModal
-      v-model:show="showUpdateModal"
-      :version-info="versionInfo"
-    />
+      </div>
+    </div>
 
     <!-- 全局日志查看器抽屉：主界面/弹窗模式均可打开 -->
     <AcemcpLogViewerDrawer v-model:show="showLogViewer" />

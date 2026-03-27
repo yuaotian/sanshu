@@ -2,10 +2,10 @@
 
 # 三术 / sanshu
 
-[![CI](https://img.shields.io/github/actions/workflow/status/yuaotian/sanshu/CI.yml?branch=main&style=flat-square&logo=github)](https://github.com/yuaotian/sanshu/actions)
-[![License](https://img.shields.io/github/license/yuaotian/sanshu?style=flat-square)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/yueby/sanshu/CI.yml?branch=main&style=flat-square&logo=github)](https://github.com/yueby/sanshu/actions)
+[![License](https://img.shields.io/github/license/yueby/sanshu?style=flat-square)](LICENSE)
 [![Rust Version](https://img.shields.io/badge/rust-1.70%2B-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square)](https://github.com/yuaotian/sanshu)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square)](https://github.com/yueby/sanshu)
 [![MCP Protocol](https://img.shields.io/badge/protocol-MCP-green.svg?style=flat-square&logo=openai)](https://modelcontextprotocol.io/)
 
 > **道生一，一生二，二生三，三生万物**
@@ -36,10 +36,10 @@
 
 | 🖥️ 平台 | 📥 GitHub 直链 | 🌏 国内加速 | 📋 说明 |
 |:-------:|:-------------:|:-----------:|:------:|
-| **Windows x64** | [下载 .zip ⏬](https://github.com/yuaotian/sanshu/releases/download/v0.5.4/sanshu-cli-v0.5.4-windows-x86_64.zip) | [wget.la ⏬](https://wget.la/https://github.com/yuaotian/sanshu/releases/download/v0.5.4/sanshu-cli-v0.5.4-windows-x86_64.zip) | 64位 Windows 系统 |
-| **macOS ARM64** | [下载 .tar.gz ⏬](https://github.com/yuaotian/sanshu/releases/download/v0.5.4/sanshu-cli-v0.5.4-macos-aarch64.tar.gz) | [wget.la ⏬](https://wget.la/https://github.com/yuaotian/sanshu/releases/download/v0.5.4/sanshu-cli-v0.5.4-macos-aarch64.tar.gz) | Apple Silicon (M1/M2/M3) |
-| **macOS Intel** | [下载 .tar.gz ⏬](https://github.com/yuaotian/sanshu/releases/download/v0.5.4/sanshu-cli-v0.5.4-macos-x86_64.tar.gz) | [wget.la ⏬](https://wget.la/https://github.com/yuaotian/sanshu/releases/download/v0.5.4/sanshu-cli-v0.5.4-macos-x86_64.tar.gz) | Intel 芯片 Mac |
-| **Linux x64** | [下载 .tar.gz ⏬](https://github.com/yuaotian/sanshu/releases/download/v0.5.4/sanshu-cli-v0.5.4-linux-x86_64.tar.gz) | [wget.la ⏬](https://wget.la/https://github.com/yuaotian/sanshu/releases/download/v0.5.4/sanshu-cli-v0.5.4-linux-x86_64.tar.gz) | 64位 Linux 系统 |
+| **Windows x64** | [下载 .zip ⏬](https://github.com/yueby/sanshu/releases/download/v0.5.4/sanshu-cli-v0.5.4-windows-x86_64.zip) | [wget.la ⏬](https://wget.la/https://github.com/yueby/sanshu/releases/download/v0.5.4/sanshu-cli-v0.5.4-windows-x86_64.zip) | 64位 Windows 系统 |
+| **macOS ARM64** | [下载 .tar.gz ⏬](https://github.com/yueby/sanshu/releases/download/v0.5.4/sanshu-cli-v0.5.4-macos-aarch64.tar.gz) | [wget.la ⏬](https://wget.la/https://github.com/yueby/sanshu/releases/download/v0.5.4/sanshu-cli-v0.5.4-macos-aarch64.tar.gz) | Apple Silicon (M1/M2/M3) |
+| **macOS Intel** | [下载 .tar.gz ⏬](https://github.com/yueby/sanshu/releases/download/v0.5.4/sanshu-cli-v0.5.4-macos-x86_64.tar.gz) | [wget.la ⏬](https://wget.la/https://github.com/yueby/sanshu/releases/download/v0.5.4/sanshu-cli-v0.5.4-macos-x86_64.tar.gz) | Intel 芯片 Mac |
+| **Linux x64** | [下载 .tar.gz ⏬](https://github.com/yueby/sanshu/releases/download/v0.5.4/sanshu-cli-v0.5.4-linux-x86_64.tar.gz) | [wget.la ⏬](https://wget.la/https://github.com/yueby/sanshu/releases/download/v0.5.4/sanshu-cli-v0.5.4-linux-x86_64.tar.gz) | 64位 Linux 系统 |
 
 > **🎯 如何选择下载链接？**
 >
@@ -327,7 +327,7 @@
 
 #### 1️⃣ 下载并放置可执行文件
 
-从 [Releases 页面](https://github.com/yuaotian/sanshu/releases) 下载对应平台的压缩包，解压后将可执行文件放置到以下推荐目录：
+从 [Releases 页面](https://github.com/yueby/sanshu/releases) 下载对应平台的压缩包，解压后将可执行文件放置到以下推荐目录：
 
 | 平台 | 推荐安装路径 | 说明 |
 |------|-------------|------|
@@ -413,7 +413,7 @@ macOS 用户也可以选择更便捷的 Homebrew 安装方式：
 
 ```bash
 # 1. 添加三术的 Tap 仓库
-brew tap yuaotian/tap
+brew tap yueby/tap
 
 # 2. 安装三术
 brew install sanshu
@@ -440,7 +440,7 @@ brew info sanshu
 brew uninstall sanshu
 
 # 移除 Tap 仓库
-brew untap yuaotian/tap
+brew untap yueby/tap
 ```
 
 > **💡 提示**：Homebrew 安装无需手动配置环境变量，安装完成后即可直接使用 `sanshu` 命令。
@@ -519,7 +519,7 @@ sanshu --version
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/yuaotian/sanshu.git
+git clone https://github.com/yueby/sanshu.git
 cd sanshu
 
 # 2. 安装前端依赖
@@ -1135,7 +1135,7 @@ git push origin v0.2.4
 
 发布完成后，可通过以下方式验证：
 
-1. **GitHub Releases**：访问 [Releases 页面](https://github.com/yuaotian/sanshu/releases) 确认新版本已发布
+1. **GitHub Releases**：访问 [Releases 页面](https://github.com/yueby/sanshu/releases) 确认新版本已发布
 2. **构建产物**：检查 Release 中是否包含所有平台的构建产物
 3. **Homebrew 更新**：
    ```bash
@@ -1364,7 +1364,7 @@ timeline
 | 💬 贡献反馈 | 🤝 社区共建 |
 |:-----------:|:-----------:|
 | 在 GitHub Issues<br/>分享使用体验 | 提交代码<br/>或功能建议 |
-| [提交反馈](https://github.com/yuaotian/sanshu/issues) | [贡献指南](#-贡献指南) |
+| [提交反馈](https://github.com/yueby/sanshu/issues) | [贡献指南](#-贡献指南) |
 | 💡 **帮助改进** | 🌍 **共建生态** |
 
 </div>
@@ -1436,6 +1436,7 @@ copies or substantial portions of the Software.
 
 特此感谢以下项目和贡献者：
 
+- [yuaotian](https://github.com/yuaotian) - 原始项目作者，本项目基于其开源工作 (Apache License 2.0) 进行 fork 和维护
 - [寸止 (Cunzhi)](https://github.com/yuaotian/cunzhi) - 为本项目提供了坚实的基础
 - [Model Context Protocol](https://modelcontextprotocol.io/) - 提供了 AI 与工具协同的标准协议
 - [Tauri](https://tauri.app/) - 提供了跨平台桌面应用框架

@@ -236,30 +236,27 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="h-full flex flex-col gap-4 bg-white dark:bg-[#121214] overflow-hidden">
+  <div class="relative flex flex-col gap-4 overflow-hidden max-h-[calc(85vh-120px)]">
     <!-- 搜索区域 -->
     <div class="flex flex-col gap-3 px-1 pt-1">
       <!-- 搜索栏 -->
       <div class="flex items-center gap-2">
-        <div class="flex-1 relative group">
-          <n-input
-            v-model:value="searchInput"
-            placeholder="输入关键词搜索图标..."
-            size="large"
-            clearable
-            class="!rounded-xl shadow-sm group-hover:shadow-md transition-shadow"
-            @keydown="handleKeydown"
-          >
-            <template #prefix>
-              <div class="i-carbon-search text-lg text-slate-400" />
-            </template>
-          </n-input>
-        </div>
+        <n-input
+          v-model:value="searchInput"
+          placeholder="输入关键词搜索图标..."
+          size="small"
+          clearable
+          class="flex-1"
+          @keydown="handleKeydown"
+        >
+          <template #prefix>
+            <div class="i-carbon-search text-lg text-on-surface-muted" />
+          </template>
+        </n-input>
 
         <n-button
           type="primary"
-          size="large"
-          class="!rounded-xl !px-6 shadow-indigo-500/20 shadow-lg"
+          size="small"
           :loading="loading"
           @click="handleSearch"
         >
@@ -271,8 +268,7 @@ onMounted(async () => {
 
         <n-button
           quaternary
-          size="large"
-          class="!rounded-xl"
+          size="small"
           :type="showFilters ? 'primary' : 'default'"
           @click="showFilters = !showFilters"
         >
@@ -283,81 +279,75 @@ onMounted(async () => {
         </n-button>
       </div>
 
-      <!-- 筛选面板 -->
-      <transition
-        enter-active-class="transition-all duration-300 ease-out"
-        enter-from-class="opacity-0 -translate-y-2 scale-95"
-        enter-to-class="opacity-100 translate-y-0 scale-100"
-        leave-active-class="transition-all duration-200 ease-in"
-        leave-from-class="opacity-100 translate-y-0 scale-100"
-        leave-to-class="opacity-0 -translate-y-2 scale-95"
-      >
-        <div
-          v-if="showFilters"
-          class="p-4 rounded-xl bg-gray-100 dark:bg-[#1f1f23] border border-gray-200 dark:border-white/10 flex flex-wrap gap-6"
-        >
-          <div class="flex items-center gap-3">
-            <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">风格</span>
-            <n-radio-group v-model:value="searchParams.style" size="small" @update:value="handleFilterChange">
-              <n-radio-button
-                v-for="opt in DEFAULT_FILTER_OPTIONS.styles"
-                :key="opt.value"
-                :value="opt.value"
-                class="!rounded-md"
-              >
-                {{ opt.label }}
-              </n-radio-button>
-            </n-radio-group>
-          </div>
+      <n-collapse-transition :show="showFilters">
+        <n-card size="small">
+          <n-space :size="[24, 8]" align="center" wrap>
+            <n-space align="center" :size="8">
+              <n-text depth="3" class="text-xs">
+                风格
+              </n-text>
+              <n-radio-group v-model:value="searchParams.style" size="small" @update:value="handleFilterChange">
+                <n-radio-button
+                  v-for="opt in DEFAULT_FILTER_OPTIONS.styles"
+                  :key="opt.value"
+                  :value="opt.value"
+                >
+                  {{ opt.label }}
+                </n-radio-button>
+              </n-radio-group>
+            </n-space>
 
-          <div class="flex items-center gap-3">
-            <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">填充</span>
-            <n-radio-group v-model:value="searchParams.fills" size="small" @update:value="handleFilterChange">
-              <n-radio-button
-                v-for="opt in DEFAULT_FILTER_OPTIONS.fills"
-                :key="opt.value"
-                :value="opt.value"
-              >
-                {{ opt.label }}
-              </n-radio-button>
-            </n-radio-group>
-          </div>
+            <n-space align="center" :size="8">
+              <n-text depth="3" class="text-xs">
+                填充
+              </n-text>
+              <n-radio-group v-model:value="searchParams.fills" size="small" @update:value="handleFilterChange">
+                <n-radio-button
+                  v-for="opt in DEFAULT_FILTER_OPTIONS.fills"
+                  :key="opt.value"
+                  :value="opt.value"
+                >
+                  {{ opt.label }}
+                </n-radio-button>
+              </n-radio-group>
+            </n-space>
 
-          <div class="flex items-center gap-3">
-            <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">排序</span>
-            <n-radio-group v-model:value="searchParams.sortType" size="small" @update:value="handleFilterChange">
-              <n-radio-button
-                v-for="opt in DEFAULT_FILTER_OPTIONS.sortTypes"
-                :key="opt.value"
-                :value="opt.value"
-              >
-                {{ opt.label }}
-              </n-radio-button>
-            </n-radio-group>
-          </div>
-        </div>
-      </transition>
+            <n-space align="center" :size="8">
+              <n-text depth="3" class="text-xs">
+                排序
+              </n-text>
+              <n-radio-group v-model:value="searchParams.sortType" size="small" @update:value="handleFilterChange">
+                <n-radio-button
+                  v-for="opt in DEFAULT_FILTER_OPTIONS.sortTypes"
+                  :key="opt.value"
+                  :value="opt.value"
+                >
+                  {{ opt.label }}
+                </n-radio-button>
+              </n-radio-group>
+            </n-space>
+          </n-space>
+        </n-card>
+      </n-collapse-transition>
     </div>
 
-    <!-- 操作栏 -->
-    <div v-if="hasResults || hasSelection" class="flex justify-between items-center px-3 py-2 bg-gray-100 dark:bg-[#1f1f23] rounded-lg mx-1 border border-gray-200 dark:border-white/10">
-      <div class="flex items-center gap-4">
-        <n-checkbox
-          :checked="isAllSelected"
-          :indeterminate="hasSelection && !isAllSelected"
-          class="ml-2"
-          @update:checked="toggleSelectAll"
-        >
-          全选
-        </n-checkbox>
-        <div class="h-4 w-px bg-slate-200 dark:bg-white/10" />
-        <span class="text-xs text-slate-500 dark:text-slate-400">
-          共 {{ total }} 个结果 · 第 {{ currentPage }} 页
-        </span>
-      </div>
+    <n-card v-if="hasResults || hasSelection" size="small" class="mx-1">
+      <div class="flex justify-between items-center">
+        <n-space align="center" :size="12">
+          <n-checkbox
+            :checked="isAllSelected"
+            :indeterminate="hasSelection && !isAllSelected"
+            @update:checked="toggleSelectAll"
+          >
+            全选
+          </n-checkbox>
+          <n-divider vertical />
+          <n-text depth="3" class="text-xs">
+            共 {{ total }} 个结果 · 第 {{ currentPage }} 页
+          </n-text>
+        </n-space>
 
-      <div class="flex items-center gap-3">
-        <transition name="fade">
+        <n-space :size="8">
           <n-button
             v-if="hasSelection"
             size="small"
@@ -367,22 +357,20 @@ onMounted(async () => {
           >
             清空 ({{ selectedCount }})
           </n-button>
-        </transition>
-
-        <n-button
-          type="primary"
-          size="small"
-          :disabled="!hasSelection"
-          class="shadow-sm"
-          @click="openSaveModal"
-        >
-          <template #icon>
-            <div class="i-carbon-download" />
-          </template>
-          保存选中 ({{ selectedCount }})
-        </n-button>
+          <n-button
+            type="primary"
+            size="small"
+            :disabled="!hasSelection"
+            @click="openSaveModal"
+          >
+            <template #icon>
+              <div class="i-carbon-download" />
+            </template>
+            保存选中 ({{ selectedCount }})
+          </n-button>
+        </n-space>
       </div>
-    </div>
+    </n-card>
 
     <IconResultsPanel
       :icons="icons"
@@ -403,8 +391,8 @@ onMounted(async () => {
     />
 
     <!-- 错误提示 -->
-    <div v-if="error" class="fixed bottom-20 left-1/2 transform -translate-x-1/2 z-50">
-      <n-alert type="error" closable title="出错了" class="shadow-xl">
+    <div v-if="error" class="absolute bottom-20 left-1/2 transform -translate-x-1/2 z-50">
+      <n-alert type="error" closable title="出错了">
         {{ error }}
       </n-alert>
     </div>
@@ -419,14 +407,3 @@ onMounted(async () => {
   </div>
 </template>
 
-<style scoped>
-/* 过渡动画 */
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.2s ease;
-}
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
-}
-</style>
