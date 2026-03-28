@@ -8,13 +8,12 @@ import BadgeNodeView from './BadgeNodeView.vue'
 const badgeSelectionKey = new PluginKey('inlineBadgeSelection')
 
 export interface InlineBadgeAttrs {
-  badgeType: 'url' | 'path' | 'image'
+  badgeType: 'url' | 'path'
   identity: string
   label: string
   kind: string
   serialized: string
   referenceData: string
-  imageBadgeId: string | null
   title: string
 }
 
@@ -34,7 +33,6 @@ export const InlineBadge = Node.create({
       kind: { default: '' },
       serialized: { default: '' },
       referenceData: { default: '' },
-      imageBadgeId: { default: null },
       title: { default: '' },
     }
   },
