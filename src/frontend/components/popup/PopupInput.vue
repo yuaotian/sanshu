@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import StarterKit from '@tiptap/starter-kit'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
@@ -418,6 +419,7 @@ async function setupDragDropListener() {
           break
         case 'drop':
           isDragOver.value = false
+          getCurrentWindow().setFocus().catch(() => {})
           await handleDroppedPaths(event.payload.paths)
           break
         case 'leave':
@@ -470,7 +472,10 @@ async function handleDroppedPaths(paths: string[]) {
       hasChanges = true
     }
   }
-  if (hasChanges) emitUpdate()
+  if (hasChanges) {
+    editor.value?.commands.focus('end')
+    emitUpdate()
+  }
 }
 
 let _shiftHeld = false
