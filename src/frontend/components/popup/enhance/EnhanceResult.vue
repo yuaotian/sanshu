@@ -21,25 +21,24 @@ interface Props {
 
 const props = defineProps<Props>()
 
-// 结果区：统一渲染流式、成功与错误状态
-const containerClass = computed(() => {
+const cardClass = computed(() => {
   if (props.errorMessage) {
-    return 'border-rose-300/80 bg-rose-50/60 dark:border-rose-500/40 dark:bg-rose-900/20'
+    return 'border-error/30 bg-error/5'
   }
   if (props.hasCompleted) {
-    return 'border-emerald-300/80 bg-emerald-50/60 dark:border-emerald-500/40 dark:bg-emerald-900/20'
+    return 'border-success/30 bg-success/5'
   }
-  return 'border-slate-200/80 bg-white/70 dark:border-slate-700/40 dark:bg-slate-900/30'
+  return 'border-border bg-container'
 })
 
 const statusIconClass = computed(() => {
   if (props.errorMessage) {
-    return 'i-carbon-warning-alt text-rose-500'
+    return 'i-carbon-warning-alt text-error'
   }
   if (props.hasCompleted) {
-    return 'i-carbon-checkmark-filled text-emerald-500'
+    return 'i-carbon-checkmark-filled text-success'
   }
-  return 'i-carbon-magic-wand text-slate-400'
+  return 'i-carbon-magic-wand text-on-surface-muted'
 })
 
 const showSkeleton = computed(() => props.isEnhancing && !props.streamContent)
@@ -111,37 +110,42 @@ const sourceMismatch = computed(() => {
 </script>
 
 <template>
-  <div class="rounded-2xl border p-4 shadow-sm transition-colors" :class="containerClass">
+  <n-card
+    size="small"
+    bordered
+    class="!rounded-[3px] shadow-sm transition-colors"
+    :class="cardClass"
+  >
     <div class="mb-3 flex items-center justify-between text-xs" role="status" aria-live="polite">
-      <div class="flex items-center gap-2 text-slate-600 dark:text-slate-300">
+      <div class="flex items-center gap-2 text-on-surface-secondary">
         <div class="w-4 h-4" :class="statusIconClass" />
         <span>{{ statusText }}</span>
       </div>
-      <span v-if="isEnhancing" class="text-slate-500 dark:text-slate-400">{{ progress }}%</span>
+      <span v-if="isEnhancing" class="text-on-surface-muted">{{ progress }}%</span>
     </div>
 
     <!-- 诊断信息：项目路径与上下文统计 -->
-    <div class="mb-3 space-y-1 text-xs text-slate-600 dark:text-slate-300">
+    <div class="mb-3 space-y-1 text-xs text-on-surface-secondary">
       <div class="flex items-start gap-2">
-        <div class="i-carbon-folder h-3.5 w-3.5 text-slate-400" />
-        <span class="text-slate-500 dark:text-slate-400">项目：</span>
-        <span class="break-all text-slate-700 dark:text-slate-200">
+        <div class="i-carbon-folder h-3.5 w-3.5 text-on-surface-muted" />
+        <span class="text-on-surface-muted">项目：</span>
+        <span class="break-all text-on-surface">
           {{ projectRootPath || '未提供项目路径' }}
         </span>
       </div>
       <div class="flex items-center gap-2">
-        <div class="i-carbon-package h-3.5 w-3.5 text-slate-400" />
-        <span class="text-slate-500 dark:text-slate-400">代码上下文：</span>
-        <span class="text-slate-700 dark:text-slate-200">{{ blobCountText }}</span>
+        <div class="i-carbon-package h-3.5 w-3.5 text-on-surface-muted" />
+        <span class="text-on-surface-muted">代码上下文：</span>
+        <span class="text-on-surface">{{ blobCountText }}</span>
       </div>
       <div class="flex items-center gap-2">
-        <div class="i-carbon-chat h-3.5 w-3.5 text-slate-400" />
-        <span class="text-slate-500 dark:text-slate-400">对话历史：</span>
-        <span class="text-slate-700 dark:text-slate-200">{{ historyCountText }}</span>
+        <div class="i-carbon-chat h-3.5 w-3.5 text-on-surface-muted" />
+        <span class="text-on-surface-muted">对话历史：</span>
+        <span class="text-on-surface">{{ historyCountText }}</span>
       </div>
-      <div v-if="showSourceRoot" class="flex items-start gap-2 text-[11px] text-amber-600 dark:text-amber-300">
+      <div v-if="showSourceRoot" class="flex items-start gap-2 text-[11px] text-warning">
         <div class="i-carbon-information h-3.5 w-3.5" />
-        <span class="text-slate-500 dark:text-slate-400">
+        <span class="text-on-surface-muted">
           索引来源{{ sourceMismatch ? '（与项目路径不一致）' : '' }}：
         </span>
         <span class="break-all">{{ blobSourceRootDisplay }}</span>
@@ -163,19 +167,19 @@ const sourceMismatch = computed(() => {
       <!-- 使用 n-scrollbar 包裹内容区域，max-h-[300px] 限制高度 -->
       <n-scrollbar v-if="hasContent" class="max-h-[300px]">
         <div class="pr-2 pb-6">
-          <!-- 错误状态：优化为卡片样式 -->
-          <div
+          <n-alert
             v-if="errorMessage"
-            class="flex items-start gap-2 rounded-lg p-3 bg-rose-50/80 border border-rose-200/60 dark:bg-rose-900/30 dark:border-rose-700/40"
+            type="error"
+            :bordered="false"
+            class="!rounded-[3px] text-sm"
           >
-            <div class="i-carbon-warning-alt h-4 w-4 text-rose-500 mt-0.5 shrink-0" />
-            <span class="text-sm text-rose-700 dark:text-rose-200">{{ errorMessage }}</span>
-          </div>
+            {{ errorMessage }}
+          </n-alert>
 
           <!-- 成功状态：增强完成后的结果 -->
           <div
             v-else-if="hasCompleted && enhancedPrompt"
-            class="whitespace-pre-wrap text-sm text-emerald-700 dark:text-emerald-200"
+            class="whitespace-pre-wrap text-sm text-success"
           >
             {{ enhancedPrompt }}
           </div>
@@ -183,10 +187,10 @@ const sourceMismatch = computed(() => {
           <!-- 流式内容：实时显示增强过程 -->
           <div
             v-else-if="streamContent"
-            class="whitespace-pre-wrap text-sm text-slate-700 dark:text-slate-200"
+            class="whitespace-pre-wrap text-sm text-on-surface"
           >
             {{ streamContent }}
-            <span v-if="isEnhancing" class="ml-1 inline-block h-4 w-2 animate-pulse rounded-sm bg-slate-400" />
+            <span v-if="isEnhancing" class="ml-1 inline-block h-4 w-2 animate-pulse rounded-sm bg-gray-400" />
           </div>
 
           <!-- 骨架屏：等待流式内容开始 -->
@@ -199,7 +203,7 @@ const sourceMismatch = computed(() => {
       </n-scrollbar>
 
       <!-- 初始状态：准备中 -->
-      <div v-else class="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+      <div v-else class="flex items-center gap-2 text-xs text-on-surface-muted">
         <n-spin size="small" />
         正在准备增强...
       </div>
@@ -207,8 +211,8 @@ const sourceMismatch = computed(() => {
       <!-- 底部渐变遮罩：提示内容可继续滚动 -->
       <div
         v-if="hasContent"
-        class="pointer-events-none absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-white/90 to-transparent dark:from-slate-900/90"
+        class="pointer-events-none absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-surface/90 to-transparent"
       />
     </div>
-  </div>
+  </n-card>
 </template>

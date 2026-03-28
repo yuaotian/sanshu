@@ -166,7 +166,7 @@ onMounted(async () => {
                       核心
                     </n-tag>
                   </div>
-                  <div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                  <div class="text-xs text-on-surface-secondary mt-0.5">
                     {{ tool.description }}
                   </div>
                 </div>
@@ -241,10 +241,16 @@ onMounted(async () => {
           :active="showToolConfigModal"
           :project-root-path="props.projectRootPath"
         />
-        <div v-else class="h-64 flex flex-col items-center justify-center opacity-40">
-          <div class="i-carbon-settings text-5xl mb-3" />
-          <div class="text-sm">暂无高级配置项</div>
-        </div>
+        <n-empty
+          v-else
+          size="small"
+          description="暂无高级配置项"
+          class="min-h-64 flex justify-center items-center"
+        >
+          <template #icon>
+            <div class="i-carbon-settings text-on-surface-muted" />
+          </template>
+        </n-empty>
       </div>
     </AppModal>
   </div>

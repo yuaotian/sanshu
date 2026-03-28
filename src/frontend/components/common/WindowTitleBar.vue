@@ -44,7 +44,7 @@ async function handleClose() {
       <!-- 左侧：标题 -->
       <div class="flex items-center gap-2 min-w-0" data-tauri-drag-region>
         <div class="w-2.5 h-2.5 rounded-full bg-primary-500 flex-shrink-0" />
-        <span class="text-xs font-medium text-white/80 truncate" data-tauri-drag-region>
+        <span class="text-xs font-medium text-on-surface-secondary truncate" data-tauri-drag-region>
           {{ title }}
         </span>
       </div>
@@ -54,7 +54,7 @@ async function handleClose() {
         <slot />
 
         <!-- 分隔线（仅在有插槽内容时可见） -->
-        <div v-if="$slots.default" class="w-px h-3 bg-white/8" />
+        <div v-if="$slots.default" class="w-px h-3 shrink-0" style="background-color: color-mix(in srgb, var(--color-on-surface) 25%, transparent)" />
 
         <!-- 主题切换 + 窗口控制 -->
         <n-space :size="2">
@@ -66,7 +66,7 @@ async function handleClose() {
             @click="handleThemeToggle"
           >
             <template #icon>
-              <ThemeIcon :theme="currentTheme" class="w-3.5 h-3.5 text-white/70" />
+              <ThemeIcon :theme="currentTheme" class="w-3.5 h-3.5 text-on-surface-secondary" />
             </template>
           </n-button>
           <n-button
@@ -78,7 +78,7 @@ async function handleClose() {
             @click="handleMinimize"
           >
             <template #icon>
-              <div class="i-carbon-subtract w-3.5 h-3.5 text-white/70" />
+              <div class="i-carbon-subtract w-3.5 h-3.5 text-on-surface-secondary" />
             </template>
           </n-button>
           <n-button
@@ -91,7 +91,7 @@ async function handleClose() {
             @click="handleClose"
           >
             <template #icon>
-              <div class="i-carbon-close w-3.5 h-3.5 text-white/70" />
+              <div class="i-carbon-close w-3.5 h-3.5 text-on-surface-secondary" />
             </template>
           </n-button>
         </n-space>
@@ -102,7 +102,7 @@ async function handleClose() {
 
 <style scoped>
 .titlebar-close-btn:hover {
-  background-color: rgba(239, 68, 68, 0.8) !important;
-  color: white !important;
+  background-color: color-mix(in srgb, var(--color-error) 80%, transparent) !important;
+  color: #fff !important;
 }
 </style>

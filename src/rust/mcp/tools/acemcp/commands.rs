@@ -103,6 +103,9 @@ pub struct SaveAcemcpConfigArgs {
     /// 是否自动索引嵌套的 Git 子项目
     #[serde(alias = "indexNestedProjects", alias = "index_nested_projects")]
     pub index_nested_projects: Option<bool>,
+    /// 是否在对话窗口顶部显示索引状态面板
+    #[serde(alias = "showIndexPanel", alias = "show_index_panel")]
+    pub show_index_panel: Option<bool>,
 }
 
 
@@ -148,6 +151,9 @@ pub async fn save_acemcp_config(
         // 仅在前端显式传入时才覆盖，避免其他页面保存配置时将用户设置重置为默认值
         if let Some(v) = args.index_nested_projects {
             config.mcp_config.acemcp_index_nested_projects = Some(v);
+        }
+        if let Some(v) = args.show_index_panel {
+            config.mcp_config.acemcp_show_index_panel = Some(v);
         }
     }
 
@@ -856,6 +862,8 @@ pub struct AcemcpConfigResponse {
     pub proxy_password: String,
     /// 是否自动索引嵌套的 Git 子项目（默认启用）
     pub index_nested_projects: bool,
+    /// 是否在对话窗口顶部显示索引状态面板（默认启用）
+    pub show_index_panel: bool,
 }
 
 #[tauri::command]
@@ -897,6 +905,7 @@ pub async fn get_acemcp_config(state: State<'_, AppState>) -> Result<AcemcpConfi
         proxy_password: config.mcp_config.acemcp_proxy_password.clone().unwrap_or_default(),
         // 嵌套项目索引开关（默认启用）
         index_nested_projects: config.mcp_config.acemcp_index_nested_projects.unwrap_or(true),
+        show_index_panel: config.mcp_config.acemcp_show_index_panel.unwrap_or(true),
     })
 }
 

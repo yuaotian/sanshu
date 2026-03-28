@@ -50,6 +50,7 @@ const config = ref({
 const loadingConfig = ref(false)
 const showProxyModal = ref(false)
 const logFilePath = ref('')
+const showIndexPanel = ref(true)
 const lastSavedConnection = ref({
   base_url: '',
   token: '',
@@ -193,6 +194,7 @@ async function loadAcemcpConfig() {
       // 嵌套项目索引配置
       index_nested_projects: res.index_nested_projects ?? true,
     }
+    showIndexPanel.value = res.show_index_panel ?? true
     lastSavedConnection.value = {
       base_url: normalizeBaseUrl(res.base_url || ''),
       token: (res.token || '').trim(),
@@ -227,6 +229,34 @@ async function loadLogFilePath() {
   }
   catch {
     logFilePath.value = ''
+  }
+}
+
+async function saveToggleSetting() {
+  try {
+    const res = await invoke('get_acemcp_config') as any
+    await invoke('save_acemcp_config', {
+      args: {
+        baseUrl: res.base_url || 'http://localhost',
+        token: res.token || '',
+        batchSize: res.batch_size,
+        maxLinesPerBlob: res.max_lines_per_blob,
+        textExtensions: res.text_extensions,
+        excludePatterns: res.exclude_patterns,
+        watchDebounceMs: res.watch_debounce_ms,
+        proxyEnabled: res.proxy_enabled,
+        proxyHost: res.proxy_host,
+        proxyPort: res.proxy_port,
+        proxyType: res.proxy_type,
+        proxyUsername: res.proxy_username,
+        proxyPassword: res.proxy_password,
+        indexNestedProjects: config.value.index_nested_projects,
+        showIndexPanel: showIndexPanel.value,
+      },
+    })
+  }
+  catch (err) {
+    console.error('保存开关配置失败:', err)
   }
 }
 
@@ -290,6 +320,7 @@ async function saveConfig() {
         proxyPassword: config.value.proxy_password,
         // 嵌套项目索引配置
         indexNestedProjects: config.value.index_nested_projects,
+        showIndexPanel: showIndexPanel.value,
       },
     })
     lastSavedConnection.value = {
@@ -852,6 +883,24 @@ defineExpose({ saveConfig })
                   <div class="flex items-center justify-between">
                     <div>
                       <div class="text-sm font-medium">
+                        显示索引状态面板
+                      </div>
+                      <n-text depth="3" class="text-xs">
+                        在对话窗口顶部显示代码索引状态提示
+                      </n-text>
+                    </div>
+                    <n-switch
+                      v-model:value="showIndexPanel"
+                      size="small"
+                      @update:value="saveToggleSetting"
+                    />
+                  </div>
+                </n-card>
+
+                <n-card size="small">
+                  <div class="flex items-center justify-between">
+                    <div>
+                      <div class="text-sm font-medium">
                         自动索引
                       </div>
                       <n-text depth="3" class="text-xs">
@@ -875,7 +924,7 @@ defineExpose({ saveConfig })
                     <n-switch
                       v-model:value="config.index_nested_projects"
                       size="small"
-                      @update:value="saveConfig"
+                      @update:value="saveToggleSetting"
                     />
                   </div>
                 </n-card>

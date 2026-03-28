@@ -133,6 +133,7 @@ export function applyThemeVariables(themeName: string) {
   root.style.setProperty('--color-primary', primaryColors[500])
   root.style.setProperty('--color-primary-hover', primaryColors[400])
   root.style.setProperty('--color-error', functionalColors.error)
+  root.style.setProperty('--color-success', functionalColors.success)
 
   // 设置body和text颜色变量（兼容旧CSS）
   root.style.setProperty('--body-color', colors.surface)

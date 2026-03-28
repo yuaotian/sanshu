@@ -92,7 +92,7 @@ export const MCP_TOOLS_CONFIG: ToolPromptConfig[] = [
     name: '三术',
     description: '智能代码审查交互工具，支持预定义选项、自由文本输入和图片上传',
     prompt: {
-      base: '**交互控制**：AI 的所有询问、确认、方案选择、任务完成反馈都必须通过 MCP `zhi`（三术）工具向我展示。禁止直接在回复中向我提问或宣布任务完成。',
+      base: '**交互控制**：AI（主代理/root agent）的所有询问、确认、方案选择、任务完成反馈都必须通过 MCP `zhi`（三术）工具向我展示。禁止直接在回复中向我提问或宣布任务完成。（注：此规则仅适用于主代理，子代理/subagent 不得调用 zhi，应直接返回结果）',
       whenToUse: [
         '需求不明确时：提供预定义选项让用户澄清',
         '存在多个方案时：列出选项让用户决定，不要自作主张',
@@ -101,6 +101,7 @@ export const MCP_TOOLS_CONFIG: ToolPromptConfig[] = [
       ],
       howToUse: [
         '未得到完成指令前禁止主动结束对话',
+        '**Subagent restriction**: 子代理(subagent/delegated agent)禁止调用 zhi，仅主代理(root/primary agent)可使用。子代理应直接返回结果。',
       ],
     },
     ui: {

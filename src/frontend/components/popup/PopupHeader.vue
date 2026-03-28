@@ -32,7 +32,7 @@ const props = withDefaults(defineProps<Props>(), {
   projectName: '',
   mcpEnabled: false,
   mcpStatusSummary: '',
-  mcpStatusIcon: 'i-carbon-help text-gray-400',
+  mcpStatusIcon: 'i-carbon-help text-on-surface-muted',
   mcpIsIndexing: false,
   mcpLastFailureTime: null,
   mcpLastError: null,
@@ -83,7 +83,7 @@ function isAuthFailure(): boolean {
         <n-button
           size="tiny"
           quaternary
-          class="!px-2 !py-0.5 !rounded-md !border !border-black-300/60 !bg-black-200/70 !text-[11px]"
+          class="!px-2 !py-0.5 !rounded-md !border !border-border !bg-container-secondary !text-[11px]"
           @click="handleOpenIndexStatus"
         >
           <template #icon>
@@ -93,7 +93,7 @@ function isAuthFailure(): boolean {
             />
           </template>
           <span class="font-medium whitespace-nowrap">索引</span>
-          <span class="opacity-80 max-w-[80px] truncate">{{ mcpStatusSummary }}</span>
+          <span class="text-on-surface-secondary max-w-[80px] truncate">{{ mcpStatusSummary }}</span>
         </n-button>
       </template>
       <div class="text-xs space-y-1">
@@ -133,7 +133,7 @@ function isAuthFailure(): boolean {
         <template #icon>
           <div
             :class="props.alwaysOnTop ? 'i-carbon-pin-filled' : 'i-carbon-pin'"
-            class="w-3.5 h-3.5 text-white/70"
+            class="w-3.5 h-3.5 text-on-surface-secondary"
           />
         </template>
       </n-button>
@@ -147,7 +147,7 @@ function isAuthFailure(): boolean {
         <template #icon>
           <div
             :class="props.showMainLayout ? 'i-carbon-chat' : 'i-carbon-settings'"
-            class="w-3.5 h-3.5 text-white/70"
+            class="w-3.5 h-3.5 text-on-surface-secondary"
           />
         </template>
       </n-button>
@@ -159,7 +159,7 @@ function isAuthFailure(): boolean {
         @click="handleOpenLogViewer"
       >
         <template #icon>
-          <div class="i-carbon-document w-3.5 h-3.5 text-white/70" />
+          <div class="i-carbon-document w-3.5 h-3.5 text-on-surface-secondary" />
         </template>
       </n-button>
     </n-space>

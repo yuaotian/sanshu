@@ -1,4 +1,6 @@
 <script setup>
+import { primaryColors, themeColors } from '../../theme/colors'
+
 defineProps({
   currentTheme: {
     type: String,
@@ -34,8 +36,11 @@ defineEmits(['themeChange'])
           <div
             class="w-3 h-3 rounded-full border transition-all duration-200"
             :style="{
-              backgroundColor: '#ffffff',
-              borderColor: currentTheme === 'light' ? '#14b8a6' : '#d1d5db',
+              backgroundColor: themeColors.light.surface,
+              borderColor:
+                currentTheme === 'light'
+                  ? primaryColors[500]
+                  : themeColors.light.surface300,
             }"
           />
         </template>
@@ -52,8 +57,11 @@ defineEmits(['themeChange'])
           <div
             class="w-3 h-3 rounded-full border transition-all duration-200"
             :style="{
-              backgroundColor: '#1f2937',
-              borderColor: currentTheme === 'dark' ? '#14b8a6' : '#d1d5db',
+              backgroundColor: themeColors.light.surface800,
+              borderColor:
+                currentTheme === 'dark'
+                  ? primaryColors[500]
+                  : themeColors.light.surface300,
             }"
           />
         </template>

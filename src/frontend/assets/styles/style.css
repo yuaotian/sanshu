@@ -66,17 +66,17 @@ body {
   overflow-x: hidden; /* 防止内容宽度超出窗口时产生横向滚动条 */
 }
 
-/* 全局滚动条样式（统一应用视觉）
- * 仅作用于常见滚动容器，避免对所有元素无差别覆盖
+/* 全局滚动条样式 — 对齐 Naive UI n-scrollbar 视觉规范
+ * 宽度 5px、主题感知颜色、pill 形 thumb、透明 track
  */
 :where(html, body, #app, .overflow-y-auto, .overflow-auto, .overflow-scroll, .scrollbar-thin, .popup-scrollbar, .custom-scrollbar) {
   scrollbar-width: thin;
-  scrollbar-color: rgba(120, 130, 150, 0.55) transparent;
+  scrollbar-color: color-mix(in srgb, var(--color-on-surface) 25%, transparent) transparent;
 }
 
 :where(html, body, #app, .overflow-y-auto, .overflow-auto, .overflow-scroll, .scrollbar-thin, .popup-scrollbar, .custom-scrollbar)::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 5px;
+  height: 5px;
 }
 
 :where(html, body, #app, .overflow-y-auto, .overflow-auto, .overflow-scroll, .scrollbar-thin, .popup-scrollbar, .custom-scrollbar)::-webkit-scrollbar-track {
@@ -84,12 +84,12 @@ body {
 }
 
 :where(html, body, #app, .overflow-y-auto, .overflow-auto, .overflow-scroll, .scrollbar-thin, .popup-scrollbar, .custom-scrollbar)::-webkit-scrollbar-thumb {
-  background: rgba(120, 130, 150, 0.55);
-  border-radius: 9999px;
+  background: color-mix(in srgb, var(--color-on-surface) 25%, transparent);
+  border-radius: 5px;
 }
 
 :where(html, body, #app, .overflow-y-auto, .overflow-auto, .overflow-scroll, .scrollbar-thin, .popup-scrollbar, .custom-scrollbar)::-webkit-scrollbar-thumb:hover {
-  background: rgba(120, 130, 150, 0.78);
+  background: color-mix(in srgb, var(--color-on-surface) 40%, transparent);
 }
 
 /* 字体大小工具类 */

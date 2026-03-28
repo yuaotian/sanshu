@@ -118,7 +118,7 @@ function testPopup() {
               class="w-10 h-10 rounded-xl shadow-lg"
               @error="handleImageError"
             >
-            <h1 class="text-4xl font-medium text-white">
+            <h1 class="text-4xl font-medium text-on-surface">
               三术
             </h1>
             <!-- 测试按钮 -->
@@ -148,7 +148,7 @@ function testPopup() {
           </div>
 
           <!-- 副标题 -->
-          <p class="text-base opacity-50 font-normal text-white">
+          <p class="text-base opacity-50 font-normal text-on-surface">
             道生一，一生二，二生三，三生万物
           </p>
         </div>

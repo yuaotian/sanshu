@@ -130,10 +130,11 @@ onBeforeUnmount(() => {
       <!-- 自动加载哨兵 -->
       <div v-if="hasMore" ref="loadMoreTrigger" class="h-1 w-full" />
 
-      <!-- 加载指示器 -->
       <div v-if="loading && hasMore" class="flex items-center justify-center py-4 text-xs text-on-surface-muted">
-        <div class="i-carbon-circle-dash animate-spin text-base" />
-        <span class="ml-2">加载中...</span>
+        <n-space align="center" :size="8">
+          <n-spin size="small" />
+          <span>加载中...</span>
+        </n-space>
       </div>
 
       <!-- 手动加载按钮 -->
@@ -144,20 +145,30 @@ onBeforeUnmount(() => {
       </div>
     </template>
 
-    <!-- 空状态 - 无搜索结果 -->
-    <div v-else-if="isEmpty" class="h-full flex flex-col items-center justify-center text-on-surface-muted">
-      <div class="w-24 h-24 rounded-full bg-container flex items-center justify-center mb-4">
+    <n-empty
+      v-else-if="isEmpty"
+      description="未找到相关图标，请尝试其他关键词"
+      class="h-full flex flex-col justify-center items-center text-on-surface-muted"
+    >
+      <template #icon>
         <div class="i-carbon-search-locate text-4xl opacity-50" />
-      </div>
-      <p class="text-sm">未找到相关图标，请尝试其他关键词</p>
-    </div>
+      </template>
+    </n-empty>
 
-    <!-- 空状态 - 初始 -->
-    <div v-else-if="showEmptyState" class="h-full flex flex-col items-center justify-center text-on-surface-disabled">
-      <div class="i-carbon-image text-8xl opacity-10 mb-6" />
-      <p class="text-lg font-medium opacity-80 mb-2">搜索 Iconfont 图标库</p>
-      <p class="text-sm opacity-50">输入关键词开始探索无限创意</p>
-    </div>
+    <n-empty
+      v-else-if="showEmptyState"
+      class="h-full flex flex-col justify-center items-center text-on-surface-disabled"
+    >
+      <template #icon>
+        <div class="i-carbon-image text-8xl opacity-10" />
+      </template>
+      <template #default>
+        <div class="text-center">
+          <p class="text-lg font-medium opacity-80 mb-2">搜索 Iconfont 图标库</p>
+          <p class="text-sm opacity-50">输入关键词开始探索无限创意</p>
+        </div>
+      </template>
+    </n-empty>
 
     <!-- 悬浮分页组件（在滚动容器内，使用 sticky 定位） -->
     <div
