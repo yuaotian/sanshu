@@ -152,37 +152,41 @@ function handleCancel() {
         <!-- 格式选择 -->
         <div class="flex flex-col gap-3">
           <label class="text-xs font-semibold uppercase tracking-wider text-on-surface-muted">导出格式</label>
-          <div class="flex flex-col gap-2">
-            <div
-              v-for="opt in formatOptions"
-              :key="opt.value"
-              class="relative px-4 py-3 rounded-lg border-2 cursor-pointer transition-all duration-200 group flex items-center gap-3"
-              :class="[
-                format === opt.value
-                  ? 'border-primary-500 bg-primary-500/5'
-                  : 'border-transparent bg-container hover:border-border'
-              ]"
-              @click="format = opt.value as IconFormat"
-            >
-              <div v-if="format === opt.value" class="absolute right-2 top-2 text-primary">
-                <div class="i-carbon-checkmark-filled text-lg" />
-              </div>
-
-              <div
-                class="w-10 h-10 rounded-full flex items-center justify-center text-xl transition-colors"
-                :class="format === opt.value ? 'bg-primary-500/10 text-primary' : 'bg-container-secondary text-on-surface-muted'"
+          <n-radio-group v-model:value="format" class="w-full">
+            <n-space vertical size="small" class="w-full">
+              <n-radio
+                v-for="opt in formatOptions"
+                :key="opt.value"
+                :value="opt.value"
+                class="w-full icon-save-format-radio"
               >
-                <div :class="opt.icon" />
-              </div>
-
-              <div class="flex-1">
-                <div class="font-medium text-on-surface" :class="{ 'text-primary': format === opt.value }">
-                  {{ opt.label }}
-                </div>
-                <div class="text-xs text-on-surface-muted leading-tight mt-0.5">{{ opt.desc }}</div>
-              </div>
-            </div>
-          </div>
+                <n-card
+                  size="small"
+                  embedded
+                  class="w-full mt-1 !rounded-[3px] border-2 transition-all duration-200"
+                  :class="[
+                    format === opt.value
+                      ? 'border-primary bg-primary/5'
+                      : 'border-transparent bg-container hover:border-border',
+                  ]"
+                  content-class="!p-0 flex items-center gap-3 px-4 py-3"
+                >
+                  <div
+                    class="w-10 h-10 rounded-full flex items-center justify-center text-xl transition-colors flex-shrink-0"
+                    :class="format === opt.value ? 'bg-primary/10 text-primary' : 'bg-container-secondary text-on-surface-muted'"
+                  >
+                    <div :class="opt.icon" />
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="font-medium text-on-surface" :class="{ 'text-primary': format === opt.value }">
+                      {{ opt.label }}
+                    </div>
+                    <div class="text-xs text-on-surface-muted leading-tight mt-0.5">{{ opt.desc }}</div>
+                  </div>
+                </n-card>
+              </n-radio>
+            </n-space>
+          </n-radio-group>
         </div>
 
         <!-- 底部按钮 -->
@@ -207,7 +211,7 @@ function handleCancel() {
       </div>
 
       <!-- 右侧：预览面板 -->
-      <div class="flex-1 bg-container rounded-lg flex flex-col overflow-hidden border border-border">
+      <div class="flex-1 bg-container rounded-[3px] flex flex-col overflow-hidden border border-border">
         <div class="px-4 py-3 flex justify-between items-center border-b border-border">
           <div>
             <div class="text-sm font-medium text-on-surface">预览清单</div>
@@ -218,12 +222,16 @@ function handleCancel() {
 
         <div class="flex-1 overflow-y-auto p-4">
           <div class="grid grid-cols-3 sm:grid-cols-4 gap-3">
-            <div
+            <n-card
               v-for="icon in icons"
               :key="icon.id"
-              class="group relative aspect-square rounded-lg bg-surface border border-border hover:border-primary-400 transition-all duration-200 flex flex-col items-center justify-center p-3"
+              size="small"
+              bordered
+              embedded
+              class="!rounded-[3px] aspect-square group bg-surface border-border hover:border-primary transition-all duration-200"
+              content-class="!p-3 flex flex-col items-center justify-center h-full min-h-0"
             >
-              <div class="flex-1 w-full flex items-center justify-center text-on-surface group-hover:text-primary transition-colors">
+              <div class="flex-1 w-full flex items-center justify-center text-on-surface group-hover:text-primary transition-colors min-h-0">
                 <div
                   v-if="icon.svgContent"
                   class="w-8 h-8 md:w-10 md:h-10 transition-transform duration-200 group-hover:scale-110"
@@ -231,12 +239,12 @@ function handleCancel() {
                 />
                 <div v-else class="i-carbon-image text-4xl opacity-20" />
               </div>
-              <div class="w-full text-center mt-2">
+              <div class="w-full text-center mt-2 shrink-0">
                 <div class="text-xs text-on-surface-secondary group-hover:text-on-surface truncate transition-colors">
                   {{ icon.name }}
                 </div>
               </div>
-            </div>
+            </n-card>
           </div>
 
           <div v-if="icons.length === 0" class="h-full flex flex-col items-center justify-center text-on-surface-disabled">
@@ -249,3 +257,9 @@ function handleCancel() {
   </AppModal>
 </template>
 
+<style scoped>
+.icon-save-format-radio :deep(.n-radio__label) {
+  flex: 1;
+  min-width: 0;
+}
+</style>

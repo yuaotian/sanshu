@@ -202,7 +202,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div :class="props.showMcpPopup ? 'h-screen overflow-hidden bg-black' : 'min-h-screen bg-black'">
+  <div :class="props.showMcpPopup ? 'h-screen overflow-hidden bg-surface' : 'min-h-screen bg-surface'">
     <!-- 图标搜索弹窗模式 -->
     <IconPopupMode
       v-if="props.isIconMode && props.iconParams"
@@ -215,10 +215,10 @@ onUnmounted(() => {
     <!-- MCP弹窗模式 -->
     <div
       v-else-if="props.showMcpPopup && props.mcpRequest"
-      class="flex flex-col w-full h-screen bg-black text-white select-none overflow-hidden"
+      class="flex flex-col w-full h-screen bg-surface text-on-surface select-none overflow-hidden"
     >
       <!-- 头部 - 固定在顶部 -->
-      <div class="sticky top-0 z-50 flex-shrink-0 bg-black-200 border-b-2 border-black-300">
+      <div class="sticky top-0 z-50 flex-shrink-0 bg-container-secondary border-b-2 border-border">
         <PopupHeader
           :current-theme="props.appConfig.theme"
           :loading="false"
@@ -296,16 +296,16 @@ onUnmounted(() => {
     <!-- 弹窗加载骨架屏 或 初始化骨架屏 -->
     <div
       v-else-if="props.showMcpPopup || props.isInitializing"
-      class="flex flex-col w-full h-screen bg-black text-white"
+      class="flex flex-col w-full h-screen bg-surface text-on-surface"
     >
       <!-- 头部 -->
-      <div class="flex-shrink-0 bg-black-200 border-b-2 border-black-300">
+      <div class="flex-shrink-0 bg-container-secondary border-b-2 border-border">
         <WindowTitleBar title="三术 - 加载中..." />
       </div>
 
       <!-- 内容骨架 -->
       <div class="flex-1 p-4">
-        <div class="bg-black-100 rounded-lg p-4 mb-4">
+        <div class="bg-container rounded-lg p-4 mb-4">
           <n-skeleton
             text
             :repeat="3"
@@ -325,7 +325,7 @@ onUnmounted(() => {
       </div>
 
       <!-- 底部骨架 -->
-      <div class="flex-shrink-0 bg-black-100 border-t-2 border-black-200 p-4">
+      <div class="flex-shrink-0 bg-container-secondary border-t-2 border-border p-4">
         <div class="flex justify-between items-center">
           <n-skeleton
             text
@@ -349,7 +349,7 @@ onUnmounted(() => {
 
     <!-- 主界面 - 只在非弹窗模式且非初始化时显示 -->
     <div v-else class="flex flex-col h-screen overflow-hidden">
-      <div class="flex-shrink-0 bg-black-200 border-b border-white/5">
+      <div class="flex-shrink-0 bg-container-secondary border-b border-border">
         <WindowTitleBar title="三术 - 设置" :current-theme="props.appConfig.theme" @theme-change="$emit('themeChange', $event)" />
       </div>
       <div class="flex-1 min-h-0 overflow-y-auto">

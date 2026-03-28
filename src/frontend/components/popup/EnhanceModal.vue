@@ -557,7 +557,7 @@ onUnmounted(() => {
   >
     <template #header>
       <div class="flex items-center justify-between">
-        <div class="flex items-center gap-2 text-sm font-semibold text-white">
+        <div class="flex items-center gap-2 text-sm font-semibold text-on-surface">
           <div class="i-carbon-magic-wand h-4 w-4 text-primary-500" />
           提示词增强
         </div>
@@ -567,7 +567,7 @@ onUnmounted(() => {
           :disabled="isEnhancing"
           aria-label="关闭提示词增强弹窗"
           title="关闭"
-          class="min-h-[44px] min-w-[44px] rounded-full text-black-500 transition-colors duration-200 hover:text-black-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 disabled:cursor-not-allowed disabled:opacity-60 sm:min-h-[32px] sm:min-w-[32px]"
+          class="min-h-[44px] min-w-[44px] rounded-full text-on-surface-muted transition-colors duration-200 hover:text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 disabled:cursor-not-allowed disabled:opacity-60 sm:min-h-[32px] sm:min-w-[32px]"
           @click="handleClose"
         >
           <div class="i-carbon-close h-4 w-4" />
@@ -577,18 +577,24 @@ onUnmounted(() => {
 
     <div class="space-y-4 sm:space-y-5">
       <!-- 核心输入区 -->
-      <div class="rounded-2xl border border-black-200/70 bg-gradient-to-br from-black-50/90 to-black-100/80 p-4 shadow-sm">
-        <div class="mb-2 flex items-center justify-between text-xs text-black-500">
-          <div class="flex items-center gap-2">
-            <div class="i-carbon-document h-3.5 w-3.5" />
-            核心提示词
+      <n-card
+        embedded
+        size="small"
+        class="!rounded-[3px] border border-border bg-container-secondary shadow-sm"
+      >
+        <template #header>
+          <div class="flex items-center justify-between text-xs text-on-surface-muted">
+            <div class="flex items-center gap-2">
+              <div class="i-carbon-document h-3.5 w-3.5 text-on-surface-muted" />
+              核心提示词
+            </div>
+            <span>{{ coreCharCount }} 字符</span>
           </div>
-          <span>{{ coreCharCount }} 字符</span>
-        </div>
-        <div class="max-h-28 overflow-y-auto whitespace-pre-wrap text-sm text-white">
+        </template>
+        <div class="max-h-28 overflow-y-auto whitespace-pre-wrap text-sm text-on-surface">
           {{ corePrompt || '暂无输入内容' }}
         </div>
-      </div>
+      </n-card>
 
       <!-- 配置区 -->
       <EnhanceConfigPanel

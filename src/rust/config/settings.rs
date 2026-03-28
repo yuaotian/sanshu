@@ -131,6 +131,8 @@ pub struct McpConfig {
     /// 是否自动索引嵌套的 Git 子项目（默认启用）
     /// 当对父目录触发索引或监听时，自动检测并索引/监听所有子项目
     pub acemcp_index_nested_projects: Option<bool>,
+    /// 是否在对话窗口顶部显示索引状态面板（默认启用）
+    pub acemcp_show_index_panel: Option<bool>,
     // Sou 代理配置
     pub acemcp_proxy_enabled: Option<bool>, // 代理启用开关
     pub acemcp_proxy_host: Option<String>, // 代理主机地址
@@ -333,6 +335,7 @@ pub fn default_mcp_config() -> McpConfig {
         acemcp_watch_debounce_ms: None, // 使用默认值 180000ms (3分钟)
         acemcp_auto_index_enabled: None, // 默认启用（未设置时视为 true）
         acemcp_index_nested_projects: None, // 自动索引嵌套项目（默认启用）
+        acemcp_show_index_panel: None, // 显示索引状态面板（默认启用）
         // 代理配置默认值
         acemcp_proxy_enabled: None,
         acemcp_proxy_host: None,

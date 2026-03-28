@@ -267,10 +267,14 @@ onMounted(() => {
         <n-spin size="medium" />
       </div>
 
-      <div v-else-if="config.prompts.length === 0" class="text-center py-8 opacity-60">
-        <div class="i-carbon-document-blank text-4xl mb-2" />
-        <div>暂无快捷模板</div>
-      </div>
+      <n-empty v-else-if="config.prompts.length === 0" class="py-8 opacity-60">
+        <template #icon>
+          <div class="i-carbon-document-blank text-4xl" />
+        </template>
+        <template #default>
+          <div>暂无快捷模板</div>
+        </template>
+      </n-empty>
 
       <div v-else class="space-y-3">
         <n-card
@@ -307,10 +311,10 @@ onMounted(() => {
                 </div>
                 <div class="space-y-1 opacity-70">
                   <div v-if="prompt.template_true">
-                    <span class="text-green-500">✓ 开启：</span>{{ prompt.template_true }}
+                    <span class="text-success">✓ 开启：</span>{{ prompt.template_true }}
                   </div>
                   <div v-if="prompt.template_false">
-                    <span class="text-red-500">✗ 关闭：</span>{{ prompt.template_false }}
+                    <span class="text-error">✗ 关闭：</span>{{ prompt.template_false }}
                   </div>
                   <div>
                     当前状态：{{ prompt.current_state ? '开启' : '关闭' }}

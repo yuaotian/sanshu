@@ -65,8 +65,12 @@ const nestedCommandUnavailableMessage = '当前后端版本不支持“Git 子�
 
 // ==================== 计算属性 ====================
 
-// 是否应该显示面板（需要有项目路径）
-const shouldShow = computed(() => !!props.projectRoot)
+// 引导模式不依赖项目路径，normal 模式才需要
+const shouldShow = computed(() => {
+  if (displayMode.value !== 'normal')
+    return true
+  return !!props.projectRoot
+})
 
 // 面板显示模式：normal（正常）/ guide-sou（引导启用 sou）/ guide-ace（引导配置 ACE）
 const displayMode = computed<'normal' | 'guide-sou' | 'guide-ace'>(() => {
@@ -360,38 +364,50 @@ onMounted(() => {
 </script>
 
 <template>
-  <n-card v-if="shouldShow" size="small" class="m-2" embedded>
-    <template v-if="displayMode === 'guide-sou'">
-      <div class="flex items-center gap-3">
-        <div class="i-carbon-search text-lg text-on-surface-muted" />
-        <div class="flex-1 flex items-center justify-between gap-2">
-          <n-text depth="3" class="text-xs">启用代码搜索以使用智能索引</n-text>
-          <n-button text type="primary" size="tiny" @click="handleOpenSettings">
-            前往设置
-            <template #icon>
-              <div class="i-carbon-arrow-right" />
-            </template>
-          </n-button>
+  <div v-if="shouldShow" class="mx-2 mt-2">
+    <n-alert
+      v-if="displayMode === 'guide-sou'"
+      type="default"
+      :bordered="false"
+      class="text-xs"
+      :show-icon="false"
+    >
+      <div class="flex items-center justify-between gap-2">
+        <div class="flex items-center gap-2">
+          <div class="i-carbon-search w-3.5 h-3.5 text-on-surface-muted shrink-0" />
+          <span>启用代码搜索以使用智能索引</span>
         </div>
+        <n-button text type="primary" size="tiny" @click="handleOpenSettings('sou')">
+          前往设置
+          <template #icon>
+            <div class="i-carbon-arrow-right" />
+          </template>
+        </n-button>
       </div>
-    </template>
+    </n-alert>
 
-    <template v-else-if="displayMode === 'guide-ace'">
-      <div class="flex items-center gap-3">
-        <div class="i-carbon-api text-lg text-warning" />
-        <div class="flex-1 flex items-center justify-between gap-2">
-          <n-text depth="3" class="text-xs">配置 API 密钥以启用代码索引</n-text>
-          <n-button text type="primary" size="tiny" @click="handleOpenSettings">
-            前往配置
-            <template #icon>
-              <div class="i-carbon-arrow-right" />
-            </template>
-          </n-button>
+    <n-alert
+      v-else-if="displayMode === 'guide-ace'"
+      type="warning"
+      :bordered="false"
+      class="text-xs"
+      :show-icon="false"
+    >
+      <div class="flex items-center justify-between gap-2">
+        <div class="flex items-center gap-2">
+          <div class="i-carbon-api w-3.5 h-3.5 text-warning shrink-0" />
+          <span>配置 API 密钥以启用代码索引</span>
         </div>
+        <n-button text type="primary" size="tiny" @click="handleOpenSettings('sou')">
+          前往配置
+          <template #icon>
+            <div class="i-carbon-arrow-right" />
+          </template>
+        </n-button>
       </div>
-    </template>
+    </n-alert>
 
-    <template v-else>
+    <n-card v-else size="small" embedded>
       <div class="flex items-center justify-between cursor-pointer" @click="toggleExpand">
         <div class="flex items-center flex-wrap gap-1.5 text-xs">
           <div :class="statusIcon" class="w-3.5 h-3.5 shrink-0" />
@@ -560,7 +576,7 @@ onMounted(() => {
           </div>
         </div>
       </n-collapse-transition>
-    </template>
-  </n-card>
+    </n-card>
+  </div>
 </template>
 

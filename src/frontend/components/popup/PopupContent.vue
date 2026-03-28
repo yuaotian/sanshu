@@ -3,7 +3,6 @@ import hljs from 'highlight.js'
 import MarkdownIt from 'markdown-it'
 import { useMessage } from 'naive-ui'
 import { nextTick, onMounted, onUpdated, watch } from 'vue'
-import { functionalColors, primaryColors } from '../../theme/colors'
 import type { McpRequest } from '../../types/popup'
 import { sanitizeHtml } from '../../utils/sanitize'
 
@@ -186,7 +185,7 @@ function createCopyButton(preEl: Element) {
       cursor: pointer;
       padding: 0;
       margin: 0;
-    " onmouseover="this.style.color='${primaryColors[500]}'" onmouseout="this.style.color='var(--color-on-surface-muted)'">
+    " onmouseover="this.style.color='var(--color-primary)'" onmouseout="this.style.color='var(--color-on-surface-muted)'">
       <div class="i-carbon-copy" style="width: 16px; height: 16px; display: block;"></div>
     </button>
   `
@@ -203,7 +202,7 @@ function createCopyButton(preEl: Element) {
       // 更新为成功状态
       const icon = button.querySelector('div')!
       icon.className = 'i-carbon-checkmark'
-      icon.style.cssText = `width: 16px; height: 16px; color: ${functionalColors.success}; display: block;`
+      icon.style.cssText = `width: 16px; height: 16px; color: var(--color-success); display: block;`
 
       setTimeout(() => {
         icon.className = 'i-carbon-copy'
@@ -310,11 +309,11 @@ onUpdated(() => {
 </script>
 
 <template>
-  <div class="text-white">
+  <div class="text-on-surface">
     <!-- 加载状态 -->
     <div v-if="loading" class="flex flex-col items-center justify-center py-8">
       <n-spin size="medium" />
-      <p class="text-sm mt-3 text-white opacity-60">
+      <p class="text-sm mt-3 text-on-surface-muted">
         加载中...
       </p>
     </div>
@@ -326,22 +325,22 @@ onUpdated(() => {
         v-if="request.is_markdown"
         class="markdown-content prose prose-sm max-w-none prose-headings:font-semibold prose-headings:leading-tight prose-h1:!mt-4 prose-h1:!mb-2 prose-h1:!text-lg prose-h1:!font-bold prose-h1:!leading-tight prose-h2:!mt-3 prose-h2:!mb-1.5 prose-h2:!text-base prose-h2:!font-semibold prose-h2:!leading-tight prose-h3:!mt-2.5 prose-h3:!mb-1 prose-h3:!text-sm prose-h3:!font-medium prose-h3:!leading-tight prose-h4:!mt-2 prose-h4:!mb-1 prose-h4:!text-sm prose-h4:!font-medium prose-h4:!leading-tight prose-p:my-1 prose-p:leading-relaxed prose-p:text-sm prose-ul:my-1 prose-ul:text-sm prose-ul:pl-4 prose-ol:my-1 prose-ol:text-sm prose-ol:pl-4 prose-li:my-1 prose-li:text-sm prose-li:leading-relaxed prose-blockquote:my-2 prose-blockquote:text-sm prose-blockquote:pl-4 prose-blockquote:ml-0 prose-blockquote:italic prose-blockquote:border-l-4 prose-blockquote:border-primary-500 prose-pre:relative prose-pre:border prose-pre:rounded-lg prose-pre:p-4 prose-pre:my-3 prose-pre:overflow-x-auto scrollbar-code prose-code:px-1 prose-code:py-0.5 prose-code:text-xs prose-code:cursor-pointer prose-code:font-mono prose-a:text-primary-500 prose-a:no-underline prose-a:cursor-default [&_a[onclick='return false;']]:opacity-60 [&_a[onclick='return false;']]:cursor-not-allowed" :class="[
           currentTheme === 'light' ? 'prose-slate' : 'prose-invert',
-          currentTheme === 'light' ? 'prose-headings:text-gray-900' : 'prose-headings:text-white',
-          currentTheme === 'light' ? 'prose-p:text-gray-700' : 'prose-p:text-white prose-p:opacity-85',
-          currentTheme === 'light' ? 'prose-ul:text-gray-700 prose-ol:text-gray-700 prose-li:text-gray-700' : 'prose-ul:text-white prose-ul:opacity-85 prose-ol:text-white prose-ol:opacity-85 prose-li:text-white prose-li:opacity-85',
-          currentTheme === 'light' ? 'prose-blockquote:text-gray-600' : 'prose-blockquote:text-gray-300 prose-blockquote:opacity-90',
-          currentTheme === 'light' ? 'prose-pre:bg-gray-50 prose-pre:border-gray-200' : 'prose-pre:bg-black prose-pre:border-gray-700',
-          currentTheme === 'light' ? 'prose-strong:text-gray-900 prose-strong:font-semibold' : 'prose-strong:text-white prose-strong:font-semibold',
-          currentTheme === 'light' ? 'prose-em:text-gray-600 prose-em:italic' : 'prose-em:text-gray-300 prose-em:italic',
+          'prose-headings:text-on-surface',
+          currentTheme === 'light' ? 'prose-p:text-on-surface-secondary' : 'prose-p:text-on-surface prose-p:opacity-85',
+          currentTheme === 'light' ? 'prose-ul:text-on-surface-secondary prose-ol:text-on-surface-secondary prose-li:text-on-surface-secondary' : 'prose-ul:text-on-surface prose-ul:opacity-85 prose-ol:text-on-surface prose-ol:opacity-85 prose-li:text-on-surface prose-li:opacity-85',
+          currentTheme === 'light' ? 'prose-blockquote:text-on-surface-muted' : 'prose-blockquote:text-on-surface-secondary prose-blockquote:opacity-90',
+          'prose-pre:bg-container-secondary prose-pre:border-border',
+          'prose-strong:text-on-surface prose-strong:font-semibold',
+          currentTheme === 'light' ? 'prose-em:text-on-surface-muted prose-em:italic' : 'prose-em:text-on-surface-secondary prose-em:italic',
         ]"
         v-html="renderMarkdown(request.message)"
       />
-      <div v-else class="whitespace-pre-wrap leading-relaxed text-white">
+      <div v-else class="whitespace-pre-wrap leading-relaxed text-on-surface">
         {{ request.message }}
       </div>
 
       <!-- 引用原文按钮 -->
-      <div class="flex justify-end mt-4 pt-3 border-t border-gray-600/30" data-guide="quote-message">
+      <div class="flex justify-end mt-4 pt-3 border-t border-border/30" data-guide="quote-message">
         <n-button
           size="small"
           secondary
@@ -359,7 +358,7 @@ onUpdated(() => {
 
     <!-- 错误状态 -->
     <n-alert v-else type="error" title="数据加载错误">
-      <div class="text-white">
+      <div class="text-on-surface">
         Request对象: {{ JSON.stringify(request) }}
       </div>
     </n-alert>

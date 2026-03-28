@@ -272,16 +272,19 @@ onMounted(async () => {
 
 <template>
   <div>
-    <!-- 无项目路径提示 -->
-    <div
+    <n-empty
       v-if="!projectPath"
-      class="flex flex-col items-center justify-center min-h-[200px] text-on-surface-muted"
+      class="flex flex-col items-center justify-center min-h-[200px] py-8"
     >
-      <div class="i-carbon-folder-off text-5xl mb-3 opacity-20" />
-      <div class="text-sm opacity-60">
-        请先在 MCP 工具中指定项目路径
-      </div>
-    </div>
+      <template #icon>
+        <div class="i-carbon-folder-off text-5xl opacity-20" />
+      </template>
+      <template #default>
+        <div class="text-sm text-on-surface-muted">
+          请先在 MCP 工具中指定项目路径
+        </div>
+      </template>
+    </n-empty>
 
     <template v-else>
       <n-tabs v-model:value="currentTab" type="line" animated>
@@ -438,14 +441,19 @@ onMounted(async () => {
                 <n-skeleton v-for="i in 4" :key="i" text :repeat="2" />
               </div>
 
-              <!-- 空状态 -->
-              <div
+              <n-empty
                 v-else-if="memories.length === 0"
-                class="flex flex-col items-center justify-center min-h-[200px] text-on-surface-muted"
+                class="flex flex-col items-center justify-center min-h-[200px] py-8"
               >
-                <div class="i-carbon-document text-4xl mb-2 opacity-20" />
-                <div class="text-sm opacity-60">暂无记忆条目</div>
-              </div>
+                <template #icon>
+                  <div class="i-carbon-document text-4xl opacity-20" />
+                </template>
+                <template #default>
+                  <div class="text-sm text-on-surface-muted">
+                    暂无记忆条目
+                  </div>
+                </template>
+              </n-empty>
 
               <!-- 分组列表 -->
               <n-collapse v-else v-model:expanded-names="expandedCategories" arrow-placement="left">
@@ -540,26 +548,25 @@ onMounted(async () => {
               <!-- 检测结果 -->
               <n-collapse-transition :show="previewResult !== null">
                 <ConfigSection v-if="previewResult" title="检测结果" :no-card="true">
-                  <n-card size="small">
-                    <!-- 相似度指示器 -->
-                    <div class="relative h-6 rounded-xl bg-container-secondary overflow-hidden">
-                      <div
-                        class="similarity-bar"
-                        :style="{ width: `${previewResult.similarity * 100}%` }"
-                        :class="{
-                          'bg-error': previewResult.is_duplicate,
-                          'bg-success': !previewResult.is_duplicate,
-                        }"
-                      />
-                      <div class="similarity-text">
-                        相似度: {{ (previewResult.similarity * 100).toFixed(1) }}%
-                        <span class="opacity-80">
-                          (阈值: {{ (previewResult.threshold * 100).toFixed(0) }}%)
+                  <n-card size="small" class="!rounded-[3px]">
+                    <n-progress
+                      type="line"
+                      indicator-placement="inside"
+                      :percentage="Math.min(100, Math.max(0, previewResult.similarity * 100))"
+                      :height="24"
+                      :border-radius="3"
+                      :status="previewResult.is_duplicate ? 'error' : 'success'"
+                    >
+                      <template #default>
+                        <span class="similarity-progress-label">
+                          相似度: {{ (previewResult.similarity * 100).toFixed(1) }}%
+                          <span class="opacity-80">
+                            (阈值: {{ (previewResult.threshold * 100).toFixed(0) }}%)
+                          </span>
                         </span>
-                      </div>
-                    </div>
+                      </template>
+                    </n-progress>
 
-                    <!-- 结果状态 -->
                     <n-alert
                       :type="previewResult.is_duplicate ? 'warning' : 'success'"
                       :bordered="false"
@@ -571,18 +578,19 @@ onMounted(async () => {
                       {{ previewResult.is_duplicate ? '检测到相似内容，添加时将被拒绝' : '未检测到相似内容，可以添加' }}
                     </n-alert>
 
-                    <!-- 匹配的内容 -->
-                    <div
+                    <n-card
                       v-if="previewResult.matched_content"
-                      class="mt-4 p-3 rounded-lg bg-container-secondary"
+                      embedded
+                      size="small"
+                      class="mt-4 !rounded-[3px]"
                     >
                       <div class="text-xs text-on-surface-secondary mb-1">
                         最相似的记忆:
                       </div>
-                      <div class="text-sm text-on-surface">
+                      <div class="text-sm text-on-surface break-words">
                         {{ previewResult.matched_content }}
                       </div>
-                    </div>
+                    </n-card>
                   </n-card>
                 </ConfigSection>
               </n-collapse-transition>
@@ -595,22 +603,10 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.similarity-bar {
-  position: absolute;
-  top: 0;
-  left: 0;
-  height: 100%;
-  transition: width 0.3s ease;
-}
-
-.similarity-text {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
+.similarity-progress-label {
   font-size: 12px;
   font-weight: 500;
-  color: white;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  color: var(--n-text-color-line-inner);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }
 </style>

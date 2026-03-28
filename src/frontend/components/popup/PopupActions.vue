@@ -115,15 +115,15 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="px-4 py-3 bg-gray-100 min-h-[60px] select-none">
+  <div class="px-4 py-3 bg-container-secondary min-h-[60px] select-none">
     <div v-if="!loading" class="flex justify-between items-center">
       <!-- 左侧状态信息 -->
       <div class="flex items-center">
-        <div class="flex items-center gap-2 text-xs text-gray-600">
-          <div class="w-2 h-2 rounded-full bg-primary-500" />
+        <div class="flex items-center gap-2 text-xs text-on-surface-secondary">
+          <div class="w-2 h-2 rounded-full bg-primary" />
           <span class="font-medium">{{ connectionStatus }}</span>
-          <span class="opacity-60">|</span>
-          <span class="opacity-60">{{ statusText }}</span>
+          <span class="text-on-surface-muted">|</span>
+          <span class="text-on-surface-muted">{{ statusText }}</span>
         </div>
       </div>
 

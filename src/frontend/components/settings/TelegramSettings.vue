@@ -2,7 +2,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useMessage } from 'naive-ui'
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { API_BASE_URL, API_EXAMPLES } from '../../constants/telegram'
 import AppModal from '../common/AppModal.vue'
 
@@ -171,6 +171,11 @@ function closeSetupWizard() {
   setupStep.value = 1
 }
 
+const getUpdatesUrl = computed(
+  () =>
+    `${telegramConfig.value.api_base_url}${telegramConfig.value.bot_token || 'YOUR_BOT_TOKEN'}/getUpdates`,
+)
+
 // 组件挂载时加载配置
 onMounted(() => {
   loadTelegramConfig()
@@ -255,7 +260,7 @@ onMounted(() => {
                 >
                   {{ isDetectingChatId ? '监听中...' : '自动获取' }}
                 </n-button>
-                <div v-if="detectedChatInfo" class="text-xs text-success-600 dark:text-success-400">
+                <div v-if="detectedChatInfo" class="text-xs text-success">
                   ✅ 已检测到: {{ detectedChatInfo.chat_title }} ({{ detectedChatInfo.username }})
                 </div>
               </n-space>
@@ -349,8 +354,12 @@ onMounted(() => {
           第一步：创建Telegram Bot
         </h3>
         <div class="space-y-3 text-sm">
-          <p>1. 在Telegram中搜索并打开 <code class="bg-blue-100 dark:bg-blue-800 text-blue-800 dark:text-blue-200 px-2 py-1 rounded font-medium">@BotFather</code></p>
-          <p>2. 发送命令 <code class="bg-green-100 dark:bg-green-800 text-green-800 dark:text-green-200 px-2 py-1 rounded font-medium">/newbot</code></p>
+          <p class="flex flex-wrap items-center gap-x-1 gap-y-1">
+            1. 在Telegram中搜索并打开 <n-tag size="small" type="info">@BotFather</n-tag>
+          </p>
+          <p class="flex flex-wrap items-center gap-x-1 gap-y-1">
+            2. 发送命令 <n-tag size="small" type="success">/newbot</n-tag>
+          </p>
           <p>3. 按提示输入Bot的名称和用户名</p>
           <p>4. 创建成功后，BotFather会发送Bot Token给你</p>
         </div>
@@ -402,7 +411,7 @@ onMounted(() => {
             >
               {{ isDetectingChatId ? '监听中，请发送消息...' : '开始自动获取' }}
             </n-button>
-            <div v-if="detectedChatInfo" class="mt-2 text-sm text-success-600 dark:text-success-400">
+            <div v-if="detectedChatInfo" class="mt-2 text-sm text-success">
               ✅ 检测成功: {{ detectedChatInfo.chat_id }}
             </div>
           </n-card>
@@ -411,13 +420,14 @@ onMounted(() => {
             <h4 class="font-medium mb-2">
               方式二：手动获取
             </h4>
-            <div class="text-sm space-y-2">
-              <div class="p-2 rounded border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
-                <code class="text-xs break-all text-gray-700 dark:text-gray-300">
-                  {{ telegramConfig.api_base_url }}{{ telegramConfig.bot_token || 'YOUR_BOT_TOKEN' }}/getUpdates
-                </code>
-              </div>
-            </div>
+            <n-input
+              readonly
+              size="small"
+              type="textarea"
+              :autosize="{ minRows: 2, maxRows: 6 }"
+              :value="getUpdatesUrl"
+              class="font-mono text-xs"
+            />
             <n-input
               v-model:value="telegramConfig.chat_id" type="text" placeholder="手动输入Chat ID" size="small"
               class="mt-2"
@@ -444,15 +454,15 @@ onMounted(() => {
             <h4 class="font-medium mb-2">
               配置确认
             </h4>
-            <n-card size="small" class="bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700">
+            <n-card size="small" embedded>
               <div class="space-y-1 text-sm">
-                <div class="text-gray-700 dark:text-gray-300">
+                <div>
                   <span class="font-medium">Bot Token:</span>
-                  <code class="ml-2 text-gray-600 dark:text-gray-400">{{ telegramConfig.bot_token.substring(0, 20) }}...</code>
+                  <n-text code class="ml-2 text-xs">{{ telegramConfig.bot_token.substring(0, 20) }}...</n-text>
                 </div>
-                <div class="text-gray-700 dark:text-gray-300">
+                <div>
                   <span class="font-medium">Chat ID:</span>
-                  <code class="ml-2 text-gray-600 dark:text-gray-400">{{ telegramConfig.chat_id }}</code>
+                  <n-text code class="ml-2 text-xs">{{ telegramConfig.chat_id }}</n-text>
                 </div>
               </div>
             </n-card>

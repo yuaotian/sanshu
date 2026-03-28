@@ -131,50 +131,19 @@ const { start, stop } = useSortable(promptContainer, sortablePrompts, {
   handle: '.drag-handle',
   forceFallback: true,
   fallbackTolerance: 3,
-  onStart: (evt) => {
-    console.log('PopupInput: 拖拽开始:', evt)
-    console.log('PopupInput: 拖拽开始时的容器:', evt.from)
-    console.log('PopupInput: 拖拽开始时的元素:', evt.item)
-  },
   onEnd: (evt) => {
-    console.log('PopupInput: 拖拽排序完成:', evt)
-    console.log('PopupInput: 从索引', evt.oldIndex, '移动到索引', evt.newIndex)
-    console.log('PopupInput: 拖拽后的sortablePrompts:', sortablePrompts.value.map(p => ({ id: p.id, name: p.name })))
-
-    // 检查是否真的发生了位置变化
     if (evt.oldIndex !== evt.newIndex && evt.oldIndex !== undefined && evt.newIndex !== undefined) {
-      // 手动重新排列数组
       const newList = [...sortablePrompts.value]
       const [movedItem] = newList.splice(evt.oldIndex, 1)
       newList.splice(evt.newIndex, 0, movedItem)
-
-      // 更新sortablePrompts
       sortablePrompts.value = newList
-      console.log('PopupInput: 手动更新后的sortablePrompts:', sortablePrompts.value.map(p => ({ id: p.id, name: p.name })))
 
-      // 立即更新 customPrompts 的顺序，确保数据同步
-      // 保留条件性prompt，只更新普通prompt的顺序
       const conditionalPromptsList = customPrompts.value.filter(prompt => prompt.type === 'conditional')
       customPrompts.value = [...sortablePrompts.value, ...conditionalPromptsList]
-      console.log('PopupInput: 位置发生变化，保存新排序')
-
-      // 立即保存排序
       savePromptOrder()
     }
-    else {
-      console.log('PopupInput: 位置未发生变化，无需保存')
-    }
   },
-  onMove: (evt) => {
-    console.log('PopupInput: 拖拽移动中:', evt)
-    return true // 允许移动
-  },
-  onChoose: (evt) => {
-    console.log('PopupInput: 选择拖拽元素:', evt)
-  },
-  onUnchoose: (evt) => {
-    console.log('PopupInput: 取消选择拖拽元素:', evt)
-  },
+  onMove: () => true,
 })
 
 // 使用键盘快捷键 composable
@@ -673,28 +642,15 @@ function removeImage(index: number) {
 // 加载自定义prompt配置
 async function loadCustomPrompts() {
   try {
-    console.log('PopupInput: 开始加载自定义prompt配置')
     const config = await invoke('get_custom_prompt_config')
     if (config) {
       const promptConfig = config as any
-
-      // 按sort_order排序
       customPrompts.value = (promptConfig.prompts || []).sort((a: CustomPrompt, b: CustomPrompt) => a.sort_order - b.sort_order)
       customPromptEnabled.value = promptConfig.enabled ?? true
-      console.log('PopupInput: 加载到的prompt数量:', customPrompts.value.length)
-      console.log('PopupInput: 条件性prompt列表:', customPrompts.value.filter(p => p.type === 'conditional'))
-
-      // 同步到拖拽列表（只包含普通prompt）
       sortablePrompts.value = [...normalPrompts.value]
-      console.log('PopupInput: 同步到sortablePrompts:', sortablePrompts.value.length)
 
-      // 延迟初始化拖拽功能，等待组件完全挂载
       if (customPrompts.value.length > 0) {
-        console.log('PopupInput: 准备启动拖拽功能')
         initializeDragSort()
-      }
-      else {
-        console.log('PopupInput: 没有prompt，跳过拖拽初始化')
       }
     }
   }
@@ -802,76 +758,40 @@ function generateConditionalContent(): string {
 
 // 移除拖拽排序初始化函数
 
-// 初始化拖拽排序功能
 async function initializeDragSort() {
-  console.log('PopupInput: initializeDragSort 被调用')
-
-  // 等待多个tick确保DOM完全渲染
   await nextTick()
   await nextTick()
 
-  // 使用更长的延迟
-  setTimeout(async () => {
-    console.log('PopupInput: 开始查找容器')
-
-    // 尝试多种方式查找容器
+  setTimeout(() => {
     let targetContainer = promptContainer.value
 
     if (!targetContainer) {
       targetContainer = document.querySelector('[data-prompt-container]') as HTMLElement
-      console.log('PopupInput: querySelector结果:', targetContainer)
     }
 
     if (!targetContainer) {
-      // 尝试通过类名查找
       const containers = document.querySelectorAll('.flex.flex-wrap')
-      console.log('PopupInput: 找到的flex容器数量:', containers.length)
       for (let i = 0; i < containers.length; i++) {
         const container = containers[i] as HTMLElement
         if (container.querySelector('.sortable-item')) {
           targetContainer = container
-          console.log('PopupInput: 通过sortable-item找到容器')
           break
         }
       }
     }
 
     if (targetContainer) {
-      console.log('PopupInput: 找到目标容器:', targetContainer)
-      const dragHandles = targetContainer.querySelectorAll('.drag-handle')
-      console.log('PopupInput: 找到拖拽手柄数量:', dragHandles.length)
-
-      const sortableItems = targetContainer.querySelectorAll('.sortable-item')
-      console.log('PopupInput: 找到可排序项数量:', sortableItems.length)
-
-      // 更新容器引用
       promptContainer.value = targetContainer
-
-      console.log('PopupInput: 调用start()函数')
       start()
-      console.log('PopupInput: start()函数调用完成')
     }
-    else {
-      console.log('PopupInput: 无法找到容器，DOM可能还没有渲染')
-      console.log('PopupInput: 当前页面所有带data-prompt-container的元素:', document.querySelectorAll('[data-prompt-container]'))
-      console.log('PopupInput: 当前页面所有.sortable-item元素:', document.querySelectorAll('.sortable-item'))
-    }
-  }, 500) // 增加延迟时间
+  }, 500)
 }
 
 // 保存prompt排序
 async function savePromptOrder() {
   try {
-    console.log('savePromptOrder被调用')
-    console.log('当前sortablePrompts:', sortablePrompts.value.map(p => ({ id: p.id, name: p.name })))
     const promptIds = sortablePrompts.value.map(p => p.id)
-    console.log('开始保存排序，prompt IDs:', promptIds)
-
-    const startTime = Date.now()
     await invoke('update_custom_prompt_order', { promptIds })
-    const endTime = Date.now()
-
-    console.log(`排序已保存，耗时: ${endTime - startTime}ms`)
     message.success('排序已保存')
   }
   catch (error) {
@@ -906,7 +826,6 @@ async function setupWindowMoveListener() {
       // 窗口移动后修复输入法位置
       fixIMEPosition()
     })
-    console.log('窗口移动监听器已设置')
   }
   catch (error) {
     console.error('设置窗口移动监听器失败:', error)
@@ -961,7 +880,6 @@ watch(() => props.submitting, (val) => {
 
 // 组件挂载时加载自定义prompt
 onMounted(async () => {
-  console.log('组件挂载，开始加载prompt')
   try {
     imageCompressionEnabled.value = await invoke('get_image_compression_enabled') as boolean
   }
@@ -973,7 +891,6 @@ onMounted(async () => {
 
   // 监听自定义prompt更新事件
   unlistenCustomPromptUpdate = await listen('custom-prompt-updated', () => {
-    console.log('收到自定义prompt更新事件，重新加载数据')
     loadCustomPrompts()
   })
   // 设置窗口移动监听器
@@ -1069,14 +986,14 @@ defineExpose({
   <div class="space-y-2">
     <!-- 预定义选项 -->
     <div v-if="!loading && hasOptions" class="space-y-2" data-guide="predefined-options">
-      <h4 class="text-sm font-medium text-white m-0 py-1">
+      <h4 class="text-sm font-medium text-on-surface m-0 py-1">
         请选择选项
       </h4>
-      <n-space vertical :size="4">
+      <div class="flex flex-col gap-1">
         <div
           v-for="(option, index) in request!.predefined_options"
           :key="`option-${index}`"
-          class="rounded-md p-2 border border-gray-600 bg-gray-100 cursor-pointer hover:opacity-80 transition-opacity"
+          class="px-3 py-1.5 bg-container-secondary rounded-[3px] cursor-pointer hover:bg-black-200 transition-colors"
           @click="handleOptionToggle(option)"
         >
           <n-checkbox
@@ -1090,52 +1007,7 @@ defineExpose({
             {{ option }}
           </n-checkbox>
         </div>
-      </n-space>
-    </div>
-
-    <!-- 图片预览区域 -->
-    <div v-if="!loading && uploadedImages.length > 0" class="space-y-1.5">
-      <h4 class="text-xs font-medium text-white">
-        已添加的图片 ({{ uploadedImages.length }})
-      </h4>
-
-      <!-- 使用 Naive UI 的图片组件，支持预览和放大 -->
-      <n-image-group>
-        <div class="flex flex-wrap gap-2">
-          <div
-            v-for="(image, index) in uploadedImages"
-            :key="`image-${index}`"
-            class="relative"
-          >
-            <!-- 使用 n-image 组件，启用预览功能 -->
-            <n-image
-              :src="image"
-              width="100"
-              height="100"
-              object-fit="cover"
-              class="rounded-lg border-2 border-gray-300 hover:border-primary-400 transition-all duration-200 cursor-pointer"
-            />
-
-            <!-- 删除按钮 -->
-            <n-button
-              class="absolute -top-2 -right-2 z-10"
-              size="tiny"
-              type="error"
-              circle
-              @click="removeImage(index)"
-            >
-              <template #icon>
-                <div class="i-carbon-close w-3 h-3" />
-              </template>
-            </n-button>
-
-            <!-- 序号 -->
-            <div class="absolute bottom-1 left-1 w-5 h-5 bg-primary-500 text-white text-xs rounded-full flex items-center justify-center font-bold shadow-sm z-5">
-              {{ index + 1 }}
-            </div>
-          </div>
-        </div>
-      </n-image-group>
+      </div>
     </div>
 
     <!-- 文本输入区域 -->
@@ -1157,7 +1029,7 @@ defineExpose({
             :title="isFloating ? (isFloatingExpanded ? '折叠面板' : '展开模板和上下文') : undefined"
             @click="isFloating && toggleFloatingExpanded()"
           >
-            <h4 class="text-sm font-medium text-white m-0 py-1">
+            <h4 class="text-sm font-medium text-on-surface m-0 py-1">
               {{ hasOptions ? '补充说明 (可选)' : '请输入您的回复' }}
             </h4>
             <div
@@ -1199,10 +1071,10 @@ defineExpose({
               v-for="prompt in sortablePrompts"
               :key="prompt.id"
               :title="prompt.description || (prompt.content.trim() ? prompt.content : '清空输入框')"
-              class="inline-flex items-center gap-1 px-2 py-1 text-xs bg-container-secondary hover:bg-black-200 rounded-md transition-all duration-200 select-none border border-gray-600 text-on-surface sortable-item"
+              class="inline-flex items-center gap-1 px-2 py-1 text-xs bg-container-secondary hover:bg-black-200 rounded-[3px] transition-all duration-200 select-none border border-gray-600 text-on-surface sortable-item"
             >
               <!-- 拖拽手柄 -->
-              <div class="drag-handle cursor-move p-0.5 rounded-md hover:bg-black-200 transition-colors">
+              <div class="drag-handle cursor-move p-0.5 rounded-[3px] hover:bg-black-200 transition-colors">
                 <div class="i-carbon-drag-horizontal w-3 h-3 text-on-surface-secondary" />
               </div>
 
@@ -1227,7 +1099,7 @@ defineExpose({
             <div
               v-for="prompt in conditionalPrompts"
               :key="prompt.id"
-              class="flex items-center justify-between p-1.5 bg-container-secondary rounded-md border border-gray-600 transition-colors text-xs"
+              class="flex items-center justify-between p-1.5 bg-container-secondary rounded-[3px] border border-gray-600 transition-colors text-xs"
               :class="[
                 isMcpToolEnabled(prompt.linked_mcp_tool) ? 'hover:bg-black-200' : 'opacity-50 cursor-not-allowed',
               ]"
@@ -1273,6 +1145,36 @@ defineExpose({
           </n-button>
         </div>
 
+        <!-- 图片预览（嵌入输入框上方，floating 时跟随） -->
+        <div v-if="uploadedImages.length > 0" class="flex items-center gap-1 flex-wrap">
+          <n-image-group>
+            <div
+              v-for="(image, index) in uploadedImages"
+              :key="`image-${index}`"
+              class="relative group"
+            >
+              <n-image
+                :src="image"
+                width="40"
+                height="40"
+                object-fit="cover"
+                class="!rounded-[3px] border border-border hover:border-primary transition-colors cursor-pointer"
+              />
+              <n-button
+                class="absolute -top-1.5 -right-1.5 z-10 opacity-0 group-hover:opacity-100 transition-opacity"
+                size="tiny"
+                type="error"
+                circle
+                @click="removeImage(index)"
+              >
+                <template #icon>
+                  <div class="i-carbon-close w-2.5 h-2.5" />
+                </template>
+              </n-button>
+            </div>
+          </n-image-group>
+        </div>
+
         <!-- TipTap 输入框 -->
         <div
           class="popup-input-shell"
@@ -1307,7 +1209,7 @@ defineExpose({
         <p class="text-sm text-on-surface-secondary">
           输入框中已有内容，请选择插入模式：
         </p>
-        <div class="bg-container-secondary p-3 rounded-md text-sm max-h-40 overflow-y-auto">
+        <div class="bg-container-secondary p-3 rounded-[3px] text-sm max-h-40 overflow-y-auto">
           {{ pendingPromptContent }}
         </div>
       </div>
@@ -1390,7 +1292,7 @@ defineExpose({
   top: 4px;
   left: 10px;
   right: 10px;
-  color: var(--color-surface-500, #6b7280);
+  color: var(--color-surface-500);
   pointer-events: none;
   font-size: 14px;
   line-height: 1.6;
@@ -1409,14 +1311,14 @@ defineExpose({
   outline: none;
   font-size: 14px;
   line-height: 1.6;
-  color: var(--color-on-surface, #e5e7eb);
+  color: var(--color-on-surface);
   background: transparent;
   border: none;
   box-sizing: border-box;
   word-break: break-word;
   white-space: pre-wrap;
   scrollbar-width: thin;
-  scrollbar-color: var(--color-surface-400) transparent;
+  scrollbar-color: color-mix(in srgb, var(--color-on-surface) 25%, transparent) transparent;
 }
 
 :deep(.tiptap:focus) {
@@ -1440,11 +1342,11 @@ defineExpose({
   gap: 0.25rem;
   margin: 0 0.15rem;
   padding: 0.1rem 0.35rem;
-  border: 1px solid var(--color-surface-300, #374151);
+  border: 1px solid var(--color-surface-300);
   border-radius: 4px;
-  background: var(--color-surface-200, #27272a);
-  color: var(--color-on-surface, #e5e7eb);
-  vertical-align: middle;
+  background: var(--color-surface-200);
+  color: var(--color-on-surface);
+  vertical-align: text-bottom;
   user-select: none;
   cursor: default;
   font-size: 12px;
@@ -1453,8 +1355,8 @@ defineExpose({
 }
 
 :deep(.popup-inline-reference:hover) {
-  border-color: var(--color-surface-400, #4b5563);
-  background: var(--color-surface-300, #374151);
+  border-color: var(--color-surface-400);
+  background: var(--color-surface-300);
 }
 
 :deep(.popup-inline-reference-icon-slot) {
@@ -1470,7 +1372,7 @@ defineExpose({
 :deep(.popup-inline-reference-kind) {
   width: 12px;
   height: 12px;
-  color: var(--color-on-surface-secondary, #d1d5db);
+  color: var(--color-on-surface-secondary);
   transition: opacity 0.15s;
 }
 
@@ -1483,7 +1385,7 @@ defineExpose({
   opacity: 0;
   cursor: pointer;
   pointer-events: auto;
-  color: var(--color-on-surface-secondary, #d1d5db);
+  color: var(--color-on-surface-secondary);
   transition: opacity 0.15s, color 0.15s;
 }
 
@@ -1510,6 +1412,12 @@ defineExpose({
   text-decoration: underline;
 }
 
+:deep(.popup-inline-reference.badge-in-selection) {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
+}
+
 :deep(.badge-popover) {
   position: absolute;
   top: calc(100% + 4px);
@@ -1520,9 +1428,9 @@ defineExpose({
   gap: 0;
   padding: 2px;
   border-radius: 6px;
-  border: 1px solid var(--color-surface-300, #374151);
-  background: var(--color-surface-200, #1e1e2e);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--color-surface-300);
+  background: var(--color-surface-200);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--color-on-surface) 15%, transparent);
   z-index: 100;
   white-space: nowrap;
   font-size: 11px;
@@ -1535,18 +1443,18 @@ defineExpose({
   padding: 3px 8px;
   border-radius: 4px;
   cursor: pointer;
-  color: var(--color-on-surface, #e5e7eb);
+  color: var(--color-on-surface);
   transition: background 0.15s;
 }
 
 :deep(.badge-popover-item:hover) {
-  background: var(--color-surface-300, #374151);
+  background: var(--color-surface-300);
 }
 
 :deep(.badge-popover-divider) {
   width: 1px;
   height: 14px;
-  background: var(--color-surface-300, #374151);
+  background: var(--color-surface-300);
   flex-shrink: 0;
 }
 </style>

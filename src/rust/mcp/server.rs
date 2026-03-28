@@ -73,7 +73,7 @@ impl ServerHandler for ZhiServer {
                 title: None,
                 website_url: None,
             },
-            instructions: Some("Zhi 智能代码审查工具，支持交互式对话和记忆管理".to_string()),
+            instructions: Some("Zhi 智能代码审查工具，支持交互式对话和记忆管理。IMPORTANT: The `zhi` tool is exclusively for primary/root agent ↔ human interaction. If you are a subagent, delegated worker, or automated agent, do NOT call `zhi` — return your results directly instead. Other tools (ji, sou, context7, tu, enhance, etc.) may be used normally by any agent.".to_string()),
         }
     }
 
@@ -123,7 +123,7 @@ impl ServerHandler for ZhiServer {
         if let serde_json::Value::Object(schema_map) = zhi_schema {
             tools.push(Tool {
                 name: Cow::Borrowed("zhi"),
-                description: Some(Cow::Borrowed("智能代码审查交互工具，支持预定义选项、自由文本输入和图片上传")),
+                description: Some(Cow::Borrowed("智能代码审查交互工具（阻塞式GUI弹窗，等待用户响应）。WARNING: This tool creates a BLOCKING popup and waits for human response. ONLY the root/primary agent may call this tool. Subagents, delegated workers, and automated agents MUST NOT call it — return results directly instead.")),
                 input_schema: Arc::new(schema_map),
                 annotations: None,
                 icons: None,

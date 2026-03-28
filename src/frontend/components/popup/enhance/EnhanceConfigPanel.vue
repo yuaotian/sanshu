@@ -64,17 +64,19 @@ function formatTimestamp(timestamp: string) {
 </script>
 
 <template>
-  <div class="rounded-2xl border border-stone-200/80 bg-gradient-to-br from-stone-50/80 to-amber-50/60 p-3 shadow-sm dark:border-slate-700/50 dark:from-slate-900/40 dark:to-slate-800/40">
-    <div class="mb-2 flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-slate-200">
-      <div class="i-carbon-settings-services h-4 w-4 text-slate-500" />
-      可选配置
-    </div>
+  <n-card size="small" bordered class="!rounded-[3px] shadow-sm border-border bg-container">
+    <template #header>
+      <div class="flex items-center gap-2 text-sm font-medium text-on-surface-secondary">
+        <div class="i-carbon-settings-services h-4 w-4 text-on-surface-muted" />
+        可选配置
+      </div>
+    </template>
 
     <n-collapse :accordion="isMobile" class="space-y-2">
       <n-collapse-item name="context">
         <template #header>
-          <div class="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
-            <div class="i-carbon-settings-adjust h-4 w-4 text-slate-500" />
+          <div class="flex items-center gap-2 text-sm text-on-surface-secondary">
+            <div class="i-carbon-settings-adjust h-4 w-4 text-on-surface-muted" />
             上下文选项
           </div>
         </template>
@@ -86,10 +88,10 @@ function formatTimestamp(timestamp: string) {
             添加快捷上下文
           </n-checkbox>
 
-          <div v-if="includeContext" class="rounded-xl border border-slate-200/70 bg-white/70 p-3 shadow-inner dark:border-slate-700/40 dark:bg-slate-900/40">
+          <n-card v-if="includeContext" embedded size="small" class="!rounded-[3px]">
             <slot name="context-preview" />
-          </div>
-          <div v-else class="text-xs text-slate-500 dark:text-slate-400">
+          </n-card>
+          <div v-else class="text-xs text-on-surface-muted">
             未启用上下文补充
           </div>
         </div>
@@ -97,8 +99,8 @@ function formatTimestamp(timestamp: string) {
 
       <n-collapse-item name="history">
         <template #header>
-          <div class="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
-            <div class="i-carbon-chat h-4 w-4 text-slate-500" />
+          <div class="flex items-center gap-2 text-sm text-on-surface-secondary">
+            <div class="i-carbon-chat h-4 w-4 text-on-surface-muted" />
             历史记录
           </div>
         </template>
@@ -111,7 +113,7 @@ function formatTimestamp(timestamp: string) {
           </n-checkbox>
 
           <div v-if="includeHistory" class="space-y-2">
-            <div class="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+            <div class="flex items-center justify-between text-xs text-on-surface-muted">
               <span>最近 5 条增强记录</span>
               <div class="flex items-center gap-2">
                 <n-button size="tiny" secondary @click="handleSelectAll">全选</n-button>
@@ -125,38 +127,39 @@ function formatTimestamp(timestamp: string) {
               <n-skeleton height="20px" width="85%" class="animate-pulse" />
             </div>
 
-            <div v-else-if="historyError" class="text-xs text-rose-500">
+            <div v-else-if="historyError" class="text-xs text-error">
               {{ historyError }}
             </div>
 
-            <div v-else-if="historyEntries.length === 0" class="text-xs text-slate-500 dark:text-slate-400">
+            <div v-else-if="historyEntries.length === 0" class="text-xs text-on-surface-muted">
               暂无可用历史记录
             </div>
 
             <n-checkbox-group v-else v-model:value="selectedIds" class="space-y-2">
-              <div
+              <n-card
                 v-for="entry in historyEntries"
                 :key="entry.id"
-                class="rounded-xl border border-slate-200/70 bg-white/70 p-3 text-xs text-slate-700 shadow-sm transition-colors dark:border-slate-700/40 dark:bg-slate-900/40 dark:text-slate-200"
+                size="small"
+                class="!rounded-[3px] text-xs text-on-surface-secondary"
               >
                 <div class="flex items-start gap-2">
                   <n-checkbox :value="entry.id" />
                   <div class="flex-1 space-y-1">
-                    <div class="text-[11px] text-slate-500 dark:text-slate-400">
+                    <div class="text-[11px] text-on-surface-muted">
                       {{ formatTimestamp(entry.timestamp) }}
                     </div>
                     <div>
-                      <span class="text-slate-500">原始：</span>{{ truncateText(entry.user_input) }}
+                      <span class="text-on-surface-muted">原始：</span>{{ truncateText(entry.user_input) }}
                     </div>
                     <div>
-                      <span class="text-slate-500">增强：</span>{{ truncateText(entry.ai_response_summary) }}
+                      <span class="text-on-surface-muted">增强：</span>{{ truncateText(entry.ai_response_summary) }}
                     </div>
                   </div>
                 </div>
-              </div>
+              </n-card>
             </n-checkbox-group>
           </div>
-          <div v-else class="text-xs text-slate-500 dark:text-slate-400">
+          <div v-else class="text-xs text-on-surface-muted">
             已关闭对话历史
           </div>
         </div>
@@ -164,8 +167,8 @@ function formatTimestamp(timestamp: string) {
 
       <n-collapse-item name="rules">
         <template #header>
-          <div class="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
-            <div class="i-carbon-rule h-4 w-4 text-slate-500" />
+          <div class="flex items-center gap-2 text-sm text-on-surface-secondary">
+            <div class="i-carbon-rule h-4 w-4 text-on-surface-muted" />
             增强规则
           </div>
         </template>
@@ -176,12 +179,12 @@ function formatTimestamp(timestamp: string) {
           >
             使用默认规则（中文优先）
           </n-checkbox>
-          <div class="rounded-xl border border-slate-200/70 bg-white/70 p-3 text-xs text-slate-600 shadow-inner dark:border-slate-700/40 dark:bg-slate-900/40 dark:text-slate-300">
+          <n-card embedded size="small" class="!rounded-[3px] text-xs text-on-surface-secondary">
             {{ defaultRuleText }}
-          </div>
+          </n-card>
 
           <div class="space-y-2">
-            <div class="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+            <div class="flex items-center justify-between text-xs text-on-surface-muted">
               <span>自定义规则</span>
               <span>{{ customRuleCount }} / {{ customRuleMax }}</span>
             </div>
@@ -198,5 +201,5 @@ function formatTimestamp(timestamp: string) {
         </div>
       </n-collapse-item>
     </n-collapse>
-  </div>
+  </n-card>
 </template>

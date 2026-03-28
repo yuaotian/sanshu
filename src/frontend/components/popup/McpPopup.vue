@@ -101,6 +101,8 @@ const acemcpConfigured = ref(false)
 // 索引重新同步加载状态
 const resyncLoading = ref(false)
 
+const showIndexPanel = ref(true)
+
 // 响应式状态
 const loading = ref(false)
 const submitting = ref(false)
@@ -274,6 +276,14 @@ onMounted(async () => {
   await loadMcpTools()
   // 检测 ACE 配置是否完整
   acemcpConfigured.value = await checkAcemcpConfigured()
+  // 加载索引面板显示配置
+  try {
+    const acemcpConfig = await invoke('get_acemcp_config') as any
+    showIndexPanel.value = acemcpConfig.show_index_panel ?? true
+  }
+  catch {
+    showIndexPanel.value = true
+  }
 })
 
 // 组件卸载时清理监听器
@@ -630,8 +640,8 @@ function handleOpenIndexStatus() {
 
 <template>
   <div v-if="isVisible" class="flex flex-col flex-1 min-h-0 overflow-hidden">
-    <!-- ACE 索引状态面板（智能降级：根据 sou 启用状态和 ACE 配置显示不同内容） -->
     <ZhiIndexPanel
+      v-if="showIndexPanel"
       :project-root="request?.project_root_path"
       :sou-enabled="souEnabled"
       :acemcp-configured="acemcpConfigured"
@@ -643,23 +653,24 @@ function handleOpenIndexStatus() {
       @resync="handleIndexResync"
     />
 
-    <!-- UI/UX 上下文策略指示器（全局提示，便于统一感知） -->
-    <div
+    <!-- UI/UX 上下文策略指示器 -->
+    <n-card
       v-if="showPolicyIndicator"
-      class="mx-2 mt-2 px-3 py-2.5 bg-black-100/90 rounded-xl border border-gray-700/60"
+      size="small"
+      class="mx-2 mt-2"
+      embedded
     >
       <n-tooltip trigger="hover" placement="bottom">
         <template #trigger>
           <div class="flex flex-col gap-1.5 text-xs cursor-help">
             <div class="flex items-center gap-2">
               <div :class="[policyStatus.icon, policyStatus.colorClass]" class="w-4 h-4" />
-              <span class="text-white/80">UI/UX 追加：</span>
+              <span class="text-on-surface-secondary">UI/UX 追加：</span>
               <span :class="policyStatus.colorClass" class="font-medium">{{ policyStatus.label }}</span>
             </div>
-            <!-- 全局提示时始终展示原因，避免默认策略被误解 -->
             <div
               class="text-[11px] leading-4"
-              :class="policyStatus.allowed ? 'text-white/65' : 'text-warning'"
+              :class="policyStatus.allowed ? 'text-on-surface-muted' : 'text-warning'"
             >
               {{ policyStatus.reason }}
             </div>
@@ -668,22 +679,22 @@ function handleOpenIndexStatus() {
         <div class="text-xs space-y-1 max-w-[280px]">
           <div class="font-medium">UI/UX 上下文策略详情</div>
           <div>{{ policyStatus.reason }}</div>
-          <div class="text-white/60 pt-1 border-t border-white/10">
+          <div class="text-on-surface-muted pt-1 border-t border-border">
             意图：{{ policyStatus.intent }} · 策略：{{ policyStatus.policy }}
           </div>
         </div>
       </n-tooltip>
-    </div>
+    </n-card>
 
     <!-- 内容区域 - 可滚动 -->
-    <div class="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
-      <!-- 消息内容 - 允许选中 -->
-      <div class="mx-2 mt-2 mb-1 px-4 py-3 bg-black-100 rounded-lg select-text" data-guide="popup-content">
+    <div class="flex-1 min-h-0 overflow-y-auto px-2">
+      <!-- 消息内容 -->
+      <n-card size="small" class="mt-2 mb-1 select-text" data-guide="popup-content">
         <PopupContent :request="request" :loading="loading" :current-theme="props.appConfig.theme" @quote-message="handleQuoteMessage" />
-      </div>
+      </n-card>
 
-      <!-- 输入和选项 - 允许选中 -->
-      <div class="px-3 pb-2 bg-black select-text">
+      <!-- 输入和选项 -->
+      <div class="pb-2 px-1 select-text">
         <PopupInput
           ref="inputRef" :request="request" :loading="loading" :submitting="submitting"
           :enhance-enabled="localEnhanceEnabled"
@@ -695,10 +706,10 @@ function handleOpenIndexStatus() {
     </div>
 
     <!-- 悬浮输入区域的 Teleport 目标 -->
-    <div id="floating-input-target" class="flex-shrink-0 bg-black" />
+    <div id="floating-input-target" class="flex-shrink-0" />
 
-    <!-- 底部操作栏 - 固定在底部 -->
-    <div class="flex-shrink-0 bg-black-100 border-t-2 border-black-200" data-guide="popup-actions">
+    <!-- 底部操作栏 -->
+    <div class="flex-shrink-0 border-t border-border" data-guide="popup-actions">
       <PopupActions
         :request="request" :loading="loading" :submitting="submitting" :can-submit="canSubmit"
         :can-enhance="canEnhance"

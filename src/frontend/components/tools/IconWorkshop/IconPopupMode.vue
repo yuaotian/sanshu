@@ -194,10 +194,8 @@ const mergedSwatches = computed(() => {
 
 const previewBackgroundClass = computed(() => {
   if (previewBackground.value === 'light')
-    return 'bg-white'
-  if (previewBackground.value === 'dark')
-    return 'bg-[#0a0a0c]'
-  return 'bg-[#0a0a0c]'
+    return 'bg-surface dark:bg-black-950'
+  return 'bg-black-950 dark:bg-surface'
 })
 
 const previewScaleClass = computed(() => {
@@ -1152,20 +1150,20 @@ async function handleCancel() {
     <!-- 主内容区 -->
     <div class="flex-1 overflow-hidden p-4">
       <div class="relative h-full">
-        <!-- 进度覆盖层 -->
-        <transition
-          enter-active-class="transition duration-200 ease-out"
-          enter-from-class="opacity-0 translate-y-2"
-          enter-to-class="opacity-100 translate-y-0"
-          leave-active-class="transition duration-150 ease-in"
-          leave-from-class="opacity-100 translate-y-0"
-          leave-to-class="opacity-0 translate-y-2"
+        <n-modal
+          :show="showProgressOverlay"
+          :mask-closable="false"
+          :closable="false"
+          :close-on-esc="false"
+          :auto-focus="false"
+          transform-origin="center"
         >
-          <div
-            v-if="showProgressOverlay"
-            class="absolute inset-0 z-30 flex items-center justify-center bg-surface backdrop-blur"
+          <n-card
+            class="!rounded-[3px] max-w-xl w-[min(100vw-2rem,36rem)] mx-auto shadow-lg border-border"
+            :bordered="true"
+            content-style="padding: 24px"
           >
-            <div class="w-full max-w-xl rounded-xl border border-border bg-container p-6 shadow-lg space-y-4">
+            <div class="space-y-4">
               <div class="flex items-center gap-3">
                 <div class="i-carbon-download text-xl text-primary" />
                 <div class="text-base font-medium">
@@ -1196,30 +1194,30 @@ async function handleCancel() {
                 </div>
 
                 <div v-if="saveSummary" class="grid grid-cols-2 gap-3 text-sm">
-                  <div class="rounded-lg border border-border bg-surface p-3">
+                  <n-card size="small" embedded class="!rounded-[3px]">
                     <div class="text-on-surface-secondary">
                       成功
                     </div>
                     <div class="text-lg font-semibold text-success">
                       {{ saveSummary.successCount }}
                     </div>
-                  </div>
-                  <div class="rounded-lg border border-border bg-surface p-3">
+                  </n-card>
+                  <n-card size="small" embedded class="!rounded-[3px]">
                     <div class="text-on-surface-secondary">
                       失败
                     </div>
                     <div class="text-lg font-semibold text-error">
                       {{ saveSummary.failedCount }}
                     </div>
-                  </div>
-                  <div class="col-span-2 rounded-lg border border-border bg-surface p-3">
+                  </n-card>
+                  <n-card size="small" embedded class="col-span-2 !rounded-[3px]">
                     <div class="text-on-surface-secondary">
                       保存路径
                     </div>
                     <div class="text-xs mt-1 break-all">
                       {{ saveSummary.savePath }}
                     </div>
-                  </div>
+                  </n-card>
                 </div>
 
                 <div v-if="saveError" class="text-xs text-error">
@@ -1233,8 +1231,8 @@ async function handleCancel() {
                 </div>
               </div>
             </div>
-          </div>
-        </transition>
+          </n-card>
+        </n-modal>
 
         <div class="h-full flex flex-col gap-4">
           <div class="flex-1 min-w-0 min-h-0 overflow-hidden icon-popup-scope">
@@ -1522,7 +1520,13 @@ async function handleCancel() {
                           virtual-scroll
                         />
 
-                        <div v-if="activeElementStyle" class="p-3 bg-container rounded-lg border border-border space-y-3">
+                        <n-card
+                          v-if="activeElementStyle"
+                          size="small"
+                          embedded
+                          class="!rounded-[3px] space-y-3"
+                          content-style="padding: 12px"
+                        >
                           <div class="flex items-center justify-between">
                             <span class="text-xs font-medium text-on-surface">独立样式</span>
                             <n-switch
@@ -1562,7 +1566,7 @@ async function handleCancel() {
                               </n-button>
                             </div>
                           </template>
-                        </div>
+                        </n-card>
 
                         <div v-else-if="!activeElementOptions.length" class="text-xs text-on-surface-muted text-center py-2">
                           此图标无可编辑元素
@@ -1699,7 +1703,7 @@ async function handleCancel() {
 }
 
 .editor-preview :deep([data-editor-focus='true']) {
-  filter: drop-shadow(0 0 6px rgba(126, 156, 180, 0.6));
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--color-primary) 55%, transparent));
 }
 
 /* 预览缩放（避免依赖预设类缺失） */
@@ -1728,8 +1732,8 @@ async function handleCancel() {
 /* 网格背景图案 */
 .pattern-grid {
   background-image:
-    linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+    linear-gradient(to right, color-mix(in srgb, var(--color-on-surface) 5%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--color-on-surface) 5%, transparent) 1px, transparent 1px);
   background-size: 16px 16px;
 }
 

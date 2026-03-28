@@ -231,7 +231,7 @@ onMounted(async () => {
     </div>
 
     <!-- 音效选择 -->
-    <div v-if="audioNotificationEnabled" class="pt-4 border-t border-gray-200 dark:border-gray-700">
+    <div v-if="audioNotificationEnabled" class="pt-4 border-t border-border">
       <div class="flex items-start">
         <div class="w-1.5 h-1.5 bg-warning rounded-full mr-3 mt-2 flex-shrink-0" />
         <div class="flex-1">
@@ -334,27 +334,28 @@ onMounted(async () => {
                 <span v-if="customAudioState === 'show_input'">
                   示例：/path/to/sound.mp3 或 https://example.com/notification.wav
                 </span>
-                <span v-else-if="customAudioState === 'saved'" class="text-orange-500">
+                <span v-else-if="customAudioState === 'saved'" class="text-warning">
                   请点击试听按钮测试音频，试听成功后将自动切换到自定义音效
                 </span>
-                <span v-else class="text-green-500">
+                <span v-else class="text-success">
                   ✅ 自定义音效已验证并启用
                 </span>
               </div>
             </div>
           </div>
 
-          <!-- 当前音效显示 -->
-          <div class="mt-3 p-2 bg-gray-100 rounded text-xs">
-            <span class="opacity-60">当前音效：</span>
-            <span v-if="selectedSoundType === 'preset'">
-              {{ presetSounds.find(p => p.id === selectedPreset)?.name }}
-            </span>
-            <span v-else-if="customUrl">
-              {{ customName || '自定义音效' }} ({{ customUrl }})
-            </span>
-            <span v-else class="opacity-60">未设置</span>
-          </div>
+          <n-card size="small" embedded class="mt-3">
+            <div class="text-xs">
+              <span class="opacity-60">当前音效：</span>
+              <span v-if="selectedSoundType === 'preset'">
+                {{ presetSounds.find(p => p.id === selectedPreset)?.name }}
+              </span>
+              <span v-else-if="customUrl">
+                {{ customName || '自定义音效' }} ({{ customUrl }})
+              </span>
+              <span v-else class="opacity-60">未设置</span>
+            </div>
+          </n-card>
         </div>
       </div>
     </div>

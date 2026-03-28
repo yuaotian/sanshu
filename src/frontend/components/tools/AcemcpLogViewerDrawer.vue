@@ -107,20 +107,18 @@ function clampBuffer() {
   }
 }
 
-function levelClass(level: string) {
+function levelTagType(level: string): 'default' | 'error' | 'info' | 'warning' {
   switch ((level || '').toUpperCase()) {
     case 'ERROR':
-      return 'bg-red-500/20 text-red-300'
+      return 'error'
     case 'WARN':
-      return 'bg-amber-500/20 text-amber-300'
+      return 'warning'
     case 'INFO':
-      return 'bg-slate-500/10 text-slate-200'
+      return 'info'
     case 'DEBUG':
-      return 'bg-slate-500/10 text-slate-400'
     case 'TRACE':
-      return 'bg-slate-500/10 text-slate-500'
     default:
-      return 'bg-slate-500/10 text-slate-300'
+      return 'default'
   }
 }
 
@@ -499,7 +497,7 @@ onBeforeUnmount(async () => {
 
         <div
           ref="parentRef"
-          class="h-[70vh] overflow-auto rounded-md border border-slate-700/30 bg-black/10"
+          class="h-[70vh] overflow-auto rounded-md border border-border bg-container-secondary"
         >
           <div class="relative w-full" :style="{ height: `${totalSize}px` }">
             <div
@@ -508,22 +506,27 @@ onBeforeUnmount(async () => {
               class="absolute left-0 w-full"
               :style="{ transform: `translateY(${v.start}px)` }"
             >
-              <div class="h-6 px-2 flex items-center gap-2 border-b border-slate-700/20 text-xs font-mono">
-                <span class="w-52 shrink-0 text-slate-400">
+              <div class="h-6 px-2 flex items-center gap-2 border-b border-border/30 text-xs font-mono">
+                <span class="w-52 shrink-0 text-on-surface-muted">
                   {{ filteredItems[v.index]?.timestamp }}
                 </span>
-                <span class="w-14 shrink-0 text-center rounded px-1" :class="levelClass(filteredItems[v.index]?.level)">
+                <n-tag
+                  size="small"
+                  bordered
+                  class="!w-14 shrink-0 justify-center !px-1"
+                  :type="levelTagType(filteredItems[v.index]?.level || '')"
+                >
                   {{ filteredItems[v.index]?.level }}
-                </span>
-                <span class="w-80 shrink-0 truncate text-slate-300" :title="filteredItems[v.index]?.module">
+                </n-tag>
+                <span class="w-80 shrink-0 truncate text-on-surface-secondary" :title="filteredItems[v.index]?.module">
                   {{ filteredItems[v.index]?.module }}
                 </span>
-                <span class="flex-1 truncate text-slate-100" :title="filteredItems[v.index]?.raw">
+                <span class="flex-1 truncate text-on-surface" :title="filteredItems[v.index]?.raw">
                   <template v-if="keyword.trim()">
                     <span
                       v-for="(seg, i) in splitHighlight(filteredItems[v.index]?.message || filteredItems[v.index]?.raw || '', keyword)"
                       :key="i"
-                      :class="seg.hit ? 'bg-yellow-400/20 text-yellow-200' : ''"
+                      :class="seg.hit ? 'bg-primary/10 text-primary' : ''"
                     >{{ seg.text }}</span>
                   </template>
                   <template v-else>
