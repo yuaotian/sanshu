@@ -160,6 +160,16 @@ fn build_structured_context_text(response: &McpResponse) -> String {
         context_lines.push(format!("- 选项: [{}]", options_json.join(", ")));
     }
 
+    if !response.images.is_empty() {
+        let image_refs: Vec<String> = response.images.iter().enumerate()
+            .map(|(i, img)| {
+                let name = img.filename.as_deref().unwrap_or("unnamed");
+                format!("- 图{}: {}", i + 1, name)
+            })
+            .collect();
+        context_lines.extend(image_refs);
+    }
+
     if !response.files.is_empty() {
         let references: Vec<String> = response.files.iter().enumerate()
             .map(|(i, file)| format!("- 资源{}: {}", i + 1, format_file_reference_compact(file)))

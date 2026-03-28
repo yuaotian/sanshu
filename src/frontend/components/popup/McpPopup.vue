@@ -61,6 +61,7 @@ interface PopupInputUpdatePayload {
   conditionalContext: string
   selectedOptions: string[]
   draggedImages: string[]
+  imageNames: string[]
   referencedFiles: FileReferenceAttachment[]
 }
 
@@ -111,6 +112,7 @@ const userInput = ref('')
 const rawUserInput = ref('')
 const conditionalContext = ref('')
 const draggedImages = ref<string[]>([])
+const draggedImageNames = ref<string[]>([])
 const referencedFiles = ref<FileReferenceAttachment[]>([])
 const inputRef = ref()
 
@@ -302,6 +304,7 @@ function resetForm() {
   rawUserInput.value = ''
   conditionalContext.value = ''
   draggedImages.value = []
+  draggedImageNames.value = []
   referencedFiles.value = []
   submitting.value = false
   inputRef.value?.reset()
@@ -359,13 +362,13 @@ async function handleSubmit() {
     const response = {
       user_input: userInput.value.trim() || null,
       selected_options: selectedOptions.value,
-      images: draggedImages.value.map((imageData) => {
+      images: draggedImages.value.map((imageData, index) => {
         const [header = '', data = ''] = imageData.split(',', 2)
         const mediaTypeMatch = header.match(/^data:(.*?);base64$/i)
         return {
           data,
           media_type: mediaTypeMatch?.[1] || 'image/png',
-          filename: null,
+          filename: draggedImageNames.value[index] || null,
         }
       }),
       files: referencedFiles.value,
@@ -413,6 +416,7 @@ function handleInputUpdate(data: PopupInputUpdatePayload) {
   conditionalContext.value = data.conditionalContext
   selectedOptions.value = data.selectedOptions
   draggedImages.value = data.draggedImages
+  draggedImageNames.value = data.imageNames
   referencedFiles.value = data.referencedFiles
 }
 

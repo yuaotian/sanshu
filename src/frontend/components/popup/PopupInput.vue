@@ -61,6 +61,7 @@ interface Emits {
     conditionalContext: string
     selectedOptions: string[]
     draggedImages: string[]
+    imageNames: string[]
     referencedFiles: FileReferenceAttachment[]
   }]
   imageAdd: [image: string]
@@ -81,6 +82,7 @@ const emit = defineEmits<Emits>()
 const userInput = ref('')
 const selectedOptions = ref<string[]>([])
 const uploadedImages = ref<string[]>([])
+const imageNames = ref<string[]>([])
 const referencedFiles = ref<FileReferenceAttachment[]>([])
 const isDragOver = ref(false)
 // 自定义prompt相关状态
@@ -206,6 +208,7 @@ function emitUpdate() {
     conditionalContext: conditionalContent,
     selectedOptions: [...selectedOptions.value],
     draggedImages: [...uploadedImages.value],
+    imageNames: [...imageNames.value],
     referencedFiles: [...referencedFiles.value],
   })
 }
@@ -427,16 +430,19 @@ const imageBadgeArchive = new Map<string, string>()
 
 function addImageWithBadge(dataUrl: string, name: string): boolean {
   uploadedImages.value.push(dataUrl)
+  imageNames.value.push(name)
+  const imageIndex = uploadedImages.value.length
   const badgeId = `img-${nextImageBadgeId++}`
   imageBadgeMap.set(badgeId, dataUrl)
   imageBadgeArchive.set(badgeId, dataUrl)
 
+  const label = `图${imageIndex}: ${name}`
   editorInsertBadge(editor.value, {
     badgeType: 'image',
     identity: '',
-    label: name,
+    label,
     kind: '图片',
-    serialized: name,
+    serialized: `[${label}]`,
     referenceData: '',
     imageBadgeId: badgeId,
     title: name,
@@ -454,6 +460,7 @@ function removeImageByBadgeId(badgeId: string) {
     const idx = uploadedImages.value.indexOf(dataUrl)
     if (idx > -1) {
       uploadedImages.value.splice(idx, 1)
+      imageNames.value.splice(idx, 1)
       emit('imageRemove', idx)
     }
   }
@@ -637,6 +644,7 @@ function fileToBase64(file: File): Promise<string> {
 function removeImage(index: number) {
   const dataUrl = uploadedImages.value[index]
   uploadedImages.value.splice(index, 1)
+  imageNames.value.splice(index, 1)
   if (dataUrl) removeImageBadgeByDataUrl(dataUrl)
   emit('imageRemove', index)
   emitUpdate()
@@ -933,6 +941,7 @@ function reset() {
   userInput.value = ''
   selectedOptions.value = []
   uploadedImages.value = []
+  imageNames.value = []
   referencedFiles.value = []
   imageBadgeMap.clear()
   imageBadgeArchive.clear()
