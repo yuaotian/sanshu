@@ -79,13 +79,6 @@ fn resolve_lang(request: Option<UiuxLang>, defaults: UiuxDefaults) -> UiuxLang {
     request.unwrap_or(defaults.lang)
 }
 
-fn resolve_output_format(
-    request: Option<UiuxOutputFormat>,
-    defaults: UiuxDefaults,
-) -> UiuxOutputFormat {
-    request.unwrap_or(defaults.output_format)
-}
-
 fn build_response<T: Serialize>(
     tool: &str,
     lang: UiuxLang,
@@ -107,15 +100,11 @@ struct UiuxSearchData {
     result: Option<engine::SearchResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     beautify: Option<engine::BeautifyResult>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    legacy_text: Option<String>,
 }
 
 #[derive(Serialize)]
 struct UiuxStackData {
     result: engine::SearchResult,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    legacy_text: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -127,15 +116,11 @@ struct UiuxDesignSystemData {
     persisted: Option<engine::PersistSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     beautify: Option<engine::BeautifyResult>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    legacy_text: Option<String>,
 }
 
 #[derive(Serialize)]
 struct UiuxSuggestData {
     result: engine::SuggestResult,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    legacy_text: Option<String>,
 }
 
 /// UI/UX Pro Max MCP 工具
@@ -408,7 +393,6 @@ impl UiuxTool {
 
 fn handle_search(req: UiuxSearchRequest, defaults: UiuxDefaults) -> Result<CallToolResult, McpError> {
     let lang = resolve_lang(req.lang, defaults);
-    let output_format = resolve_output_format(req.output_format, defaults);
     let mode = match req.mode {
         Some(UiuxMode::Beautify) => UiuxMode::Beautify,
         _ => UiuxMode::Search,
@@ -421,7 +405,6 @@ fn handle_search(req: UiuxSearchRequest, defaults: UiuxDefaults) -> Result<CallT
                 mode,
                 result: None,
                 beautify: None,
-                legacy_text: None,
             };
             let text = localize::error_text(lang, "UI 提示词美化已被禁用");
             return build_response(
@@ -438,19 +421,12 @@ fn handle_search(req: UiuxSearchRequest, defaults: UiuxDefaults) -> Result<CallT
             mode,
             result: None,
             beautify: Some(beautify),
-            legacy_text: None,
         };
         let text = localize::beautify_summary(lang);
         return build_response("uiux_search", lang, data, text, vec![]);
     }
 
     let result = engine::search_domain(&req.query, req.domain.as_deref(), Some(max_results));
-    let legacy_text = if matches!(output_format, UiuxOutputFormat::Text) {
-        // 保留旧版文本输出，方便过渡期对照
-        Some(engine::format_search_output(&result))
-    } else {
-        None
-    };
     let text = localize::search_summary(lang, mode, &result);
     let errors = result
         .error
@@ -461,29 +437,22 @@ fn handle_search(req: UiuxSearchRequest, defaults: UiuxDefaults) -> Result<CallT
         mode,
         result: Some(result),
         beautify: None,
-        legacy_text,
     };
     build_response("uiux_search", lang, data, text, errors)
 }
 
 fn handle_stack(req: UiuxStackRequest, defaults: UiuxDefaults) -> Result<CallToolResult, McpError> {
     let lang = resolve_lang(req.lang, defaults);
-    let output_format = resolve_output_format(req.output_format, defaults);
     let max_results = engine::cap_max_results(req.max_results, defaults.max_results_cap, DEFAULT_MAX_RESULTS);
 
     let result = engine::search_stack(&req.query, &req.stack, Some(max_results));
-    let legacy_text = if matches!(output_format, UiuxOutputFormat::Text) {
-        Some(engine::format_search_output(&result))
-    } else {
-        None
-    };
     let text = localize::stack_summary(lang, &result);
     let errors = result
         .error
         .as_ref()
         .map(|err| vec![UiuxError::new("stack_error", err)])
         .unwrap_or_default();
-    let data = UiuxStackData { result, legacy_text };
+    let data = UiuxStackData { result };
     build_response("uiux_stack", lang, data, text, errors)
 }
 
@@ -492,7 +461,6 @@ fn handle_design_system(
     defaults: UiuxDefaults,
 ) -> Result<CallToolResult, McpError> {
     let lang = resolve_lang(req.lang, defaults);
-    let output_format = resolve_output_format(req.output_format, defaults);
     let mode = match req.mode {
         Some(UiuxMode::Beautify) => UiuxMode::Beautify,
         _ => UiuxMode::DesignSystem,
@@ -505,7 +473,6 @@ fn handle_design_system(
                 design_system: None,
                 persisted: None,
                 beautify: None,
-                legacy_text: None,
             };
             let text = localize::error_text(lang, "UI 提示词美化已被禁用");
             return build_response(
@@ -524,7 +491,6 @@ fn handle_design_system(
             design_system: None,
             persisted: None,
             beautify: Some(beautify),
-            legacy_text: None,
         };
         let text = localize::beautify_summary(lang);
         return build_response("uiux_design_system", lang, data, text, vec![]);
@@ -541,12 +507,6 @@ fn handle_design_system(
     )
     .map_err(|e| McpError::internal_error(e, None))?;
 
-    let legacy_text = if matches!(output_format, UiuxOutputFormat::Text) {
-        // 保留设计系统旧版文本输出，便于人工核对
-        Some(output.formatted.clone())
-    } else {
-        None
-    };
     let text = localize::design_system_summary(
         lang,
         &output.design_system.project_name,
@@ -557,26 +517,15 @@ fn handle_design_system(
         design_system: Some(output.design_system),
         persisted: output.persisted,
         beautify: None,
-        legacy_text,
     };
     build_response("uiux_design_system", lang, data, text, vec![])
 }
 
 fn handle_suggest(req: UiuxSuggestRequest, defaults: UiuxDefaults) -> Result<CallToolResult, McpError> {
     let lang = resolve_lang(req.lang, defaults);
-    let output_format = resolve_output_format(req.output_format, defaults);
     let result = engine::suggest(&req.text);
     let text = localize::suggest_summary(lang, &result);
-    // text 输出时保留兼容字段，方便旧消费方按需读取
-    let legacy_text = if matches!(output_format, UiuxOutputFormat::Text) {
-        Some(text.clone())
-    } else {
-        None
-    };
-    let data = UiuxSuggestData {
-        result,
-        legacy_text,
-    };
+    let data = UiuxSuggestData { result };
     build_response("uiux_suggest", lang, data, text, vec![])
 }
 

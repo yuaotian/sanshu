@@ -1,101 +1,33 @@
 use anyhow::Result;
 use rmcp::model::{ErrorData as McpError, Content};
 
-use crate::mcp::types::{FileReferenceAttachment, McpResponse, McpResponseContent};
+use crate::mcp::types::{FileReferenceAttachment, McpResponse};
 use crate::log_debug;
 
 /// 解析 MCP 响应内容
 ///
-/// 支持新的结构化格式和旧格式的兼容性，并生成适当的 Content 对象
+/// 解析前端结构化响应格式，生成适当的 Content 对象
 pub fn parse_mcp_response(response: &str) -> Result<Vec<Content>, McpError> {
     let trimmed = response.trim().trim_matches('"');
     if trimmed == "CANCELLED" || trimmed == "用户取消了操作" {
         log_debug!("[parse_mcp_response] 收到取消信号");
-        return Ok(vec![Content::text("用户取消了操作".to_string())]);
+        return Ok(vec![Content::text("用户取消了操作，请询问用户下一步。".to_string())]);
     }
 
-    // 首先尝试解析为新的结构化格式
-    if let Ok(structured_response) = serde_json::from_str::<McpResponse>(response) {
-        log_debug!(
-            "[parse_mcp_response] 结构化响应: selected_options={}, images={}, files={}, request_id={:?}, source={:?}",
-            structured_response.selected_options.len(),
-            structured_response.images.len(),
-            structured_response.files.len(),
-            structured_response.metadata.request_id.as_deref(),
-            structured_response.metadata.source.as_deref()
-        );
-        return parse_structured_response(structured_response);
-    }
-
-    // 回退到旧格式兼容性解析
-    match serde_json::from_str::<Vec<McpResponseContent>>(response) {
-        Ok(content_array) => {
-            log_debug!("[parse_mcp_response] 旧格式响应数组: items={}", content_array.len());
-            let mut result = Vec::new();
-            let mut image_count = 0;
-
-            let mut user_text_parts = Vec::new();
-            let mut image_info_parts = Vec::new();
-
-            for content in content_array {
-                match content.content_type.as_str() {
-                    "text" => {
-                        if let Some(text) = content.text {
-                            user_text_parts.push(text);
-                        }
-                    }
-                    "image" => {
-                        if let Some(source) = content.source {
-                            if source.source_type == "base64" {
-                                image_count += 1;
-                                result.push(Content::image(source.data.clone(), source.media_type.clone()));
-
-                                let estimated_size = (source.data.len() * 3) / 4;
-                                let size_str = format_byte_size(estimated_size);
-                                image_info_parts.push(format!(
-                                    "=== 图片 {} ===\n类型: {}\n大小: {}",
-                                    image_count, source.media_type, size_str
-                                ));
-                            }
-                        }
-                    }
-                    _ => {
-                        if let Some(text) = content.text {
-                            user_text_parts.push(text);
-                        }
-                    }
-                }
-            }
-
-            let mut all_text_parts = Vec::new();
-            if !user_text_parts.is_empty() {
-                all_text_parts.extend(user_text_parts);
-            }
-            if !image_info_parts.is_empty() {
-                all_text_parts.extend(image_info_parts);
-            }
-            if image_count > 0 {
-                all_text_parts.push(format!(
-                    "💡 注意：用户提供了 {} 张图片。如果 AI 助手无法显示图片，图片数据已包含在上述 Base64 信息中。",
-                    image_count
-                ));
-            }
-
-            if !all_text_parts.is_empty() {
-                result.push(Content::text(all_text_parts.join("\n\n")));
-            }
-            if result.is_empty() {
-                result.push(Content::text("用户未提供任何内容".to_string()));
-            }
-
+    match serde_json::from_str::<McpResponse>(response) {
+        Ok(structured_response) => {
             log_debug!(
-                "[parse_mcp_response] 旧格式解析完成: images={}, content_items={}",
-                image_count, result.len()
+                "[parse_mcp_response] 结构化响应: selected_options={}, images={}, files={}, request_id={:?}, source={:?}",
+                structured_response.selected_options.len(),
+                structured_response.images.len(),
+                structured_response.files.len(),
+                structured_response.metadata.request_id.as_deref(),
+                structured_response.metadata.source.as_deref()
             );
-            Ok(result)
+            parse_structured_response(structured_response)
         }
         Err(_) => {
-            log_debug!("[parse_mcp_response] 非JSON响应，按纯文本处理: len={}", response.len());
+            log_debug!("[parse_mcp_response] 非结构化响应，按纯文本处理: len={}", response.len());
             Ok(vec![Content::text(response.to_string())])
         }
     }
@@ -160,28 +92,21 @@ fn build_structured_context_text(response: &McpResponse) -> String {
         context_lines.push(format!("- 选项: [{}]", options_json.join(", ")));
     }
 
-    if !response.images.is_empty() {
-        let image_refs: Vec<String> = response.images.iter().enumerate()
-            .map(|(i, img)| {
-                let name = img.filename.as_deref().unwrap_or("unnamed");
-                format!("- 图{}: {}", i + 1, name)
-            })
-            .collect();
-        context_lines.extend(image_refs);
+    let mut resource_index = 0usize;
+    for img in &response.images {
+        resource_index += 1;
+        let name = img.filename.as_deref().unwrap_or("unnamed");
+        context_lines.push(format!("- 资源{}: [image] {}", resource_index, name));
     }
-
-    if !response.files.is_empty() {
-        let references: Vec<String> = response.files.iter().enumerate()
-            .map(|(i, file)| format!("- 资源{}: {}", i + 1, format_file_reference_compact(file)))
-            .collect();
-        context_lines.extend(references);
+    for file in &response.files {
+        resource_index += 1;
+        context_lines.push(format!("- 资源{}: {}", resource_index, format_file_reference_compact(file)));
     }
 
     if !context_lines.is_empty() {
         sections.push(format!("附加上下文：\n{}", context_lines.join("\n")));
     }
 
-    // 区域 3：执行偏好（条件性提示词状态）
     if !preference_lines.is_empty() {
         let pref_text: Vec<String> = preference_lines.into_iter()
             .map(|line| format!("- {}", line))
@@ -229,20 +154,10 @@ fn is_preference_line(line: &str) -> bool {
 fn format_file_reference_compact(file: &FileReferenceAttachment) -> String {
     if file.r#type == "url" {
         let url = file.url.as_deref().unwrap_or_default();
-        format!("{} ({})", file.name, url)
+        format!("[url] {}", url)
     } else {
         let path = file.path.as_deref().unwrap_or_default();
         let kind_tag = if file.kind.as_deref() == Some("directory") { "dir" } else { "file" };
-        format!("[{}] {} ({})", kind_tag, file.name, path)
-    }
-}
-
-fn format_byte_size(bytes: usize) -> String {
-    if bytes < 1024 {
-        format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+        format!("[{}] {}", kind_tag, path)
     }
 }

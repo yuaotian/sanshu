@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { getCurrentWindow } from '@tauri-apps/api/window'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import StarterKit from '@tiptap/starter-kit'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import { useStorage } from '@vueuse/core'
@@ -250,7 +250,9 @@ function getReferenceIdentity(ref: FileReferenceAttachment): string {
 }
 
 function getSerializedReferenceText(ref: FileReferenceAttachment): string {
-  return ref.type === 'url' ? (ref.url || '') : (ref.path || '')
+  const displayName = getReferenceDisplayLabel(ref)
+  const typeTag = ref.type === 'url' ? 'url' : (ref.kind === 'directory' ? 'dir' : 'file')
+  return `[${typeTag}: ${displayName}]`
 }
 
 function getReferenceKindLabel(ref: FileReferenceAttachment): string {
@@ -431,18 +433,16 @@ const imageBadgeArchive = new Map<string, string>()
 function addImageWithBadge(dataUrl: string, name: string): boolean {
   uploadedImages.value.push(dataUrl)
   imageNames.value.push(name)
-  const imageIndex = uploadedImages.value.length
   const badgeId = `img-${nextImageBadgeId++}`
   imageBadgeMap.set(badgeId, dataUrl)
   imageBadgeArchive.set(badgeId, dataUrl)
 
-  const label = `图${imageIndex}: ${name}`
   editorInsertBadge(editor.value, {
     badgeType: 'image',
     identity: '',
-    label,
+    label: name,
     kind: '图片',
-    serialized: `[${label}]`,
+    serialized: `[image: ${name}]`,
     referenceData: '',
     imageBadgeId: badgeId,
     title: name,
