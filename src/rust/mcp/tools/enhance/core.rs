@@ -142,48 +142,35 @@ impl PromptEnhancer {
             .to_string();
         let normalized_root = Self::clean_path_prefix_and_slashes(&canonical_root);
 
-        // 优先读取 acemcp 的 projects.json，兼容旧的 .sanshu/projects.json
-        let mut candidates = Vec::new();
-        let acemcp_projects = crate::mcp::tools::acemcp::mcp::home_projects_file();
-        candidates.push(acemcp_projects);
-        let legacy_projects = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".sanshu")
-            .join("projects.json");
-        if !candidates.iter().any(|p| p == &legacy_projects) {
-            candidates.push(legacy_projects);
+        let projects_path = crate::mcp::tools::acemcp::mcp::home_projects_file();
+        if !projects_path.exists() {
+            log_debug!("projects.json 不存在，跳过 blob 加载: {:?}", projects_path);
+            return (Vec::new(), None);
         }
 
-        for projects_path in candidates {
-            if !projects_path.exists() {
-                log_debug!("projects.json 不存在，跳过 blob 加载: {:?}", projects_path);
-                continue;
+        let content = match fs::read_to_string(&projects_path) {
+            Ok(c) => c,
+            Err(e) => {
+                log_debug!("读取 projects.json 失败: {}", e);
+                return (Vec::new(), None);
             }
+        };
 
-            let content = match fs::read_to_string(&projects_path) {
-                Ok(c) => c,
-                Err(e) => {
-                    log_debug!("读取 projects.json 失败: {}", e);
-                    continue;
-                }
-            };
-
-            let projects: ProjectsFile = match serde_json::from_str(&content) {
-                Ok(p) => p,
-                Err(e) => {
-                    log_debug!("解析 projects.json 失败: {}", e);
-                    continue;
-                }
-            };
-
-            if let Some((names, matched_root)) = Self::find_project_blobs(&projects, &normalized_root) {
-                log_debug!(
-                    "已加载 blob_names: count={}, source_root={}",
-                    names.len(),
-                    matched_root
-                );
-                return (names, Some(matched_root));
+        let projects: ProjectsFile = match serde_json::from_str(&content) {
+            Ok(p) => p,
+            Err(e) => {
+                log_debug!("解析 projects.json 失败: {}", e);
+                return (Vec::new(), None);
             }
+        };
+
+        if let Some((names, matched_root)) = Self::find_project_blobs(&projects, &normalized_root) {
+            log_debug!(
+                "已加载 blob_names: count={}, source_root={}",
+                names.len(),
+                matched_root
+            );
+            return (names, Some(matched_root));
         }
 
         log_debug!("未在 projects.json 中匹配到项目: {}", normalized_root);
@@ -200,11 +187,10 @@ impl PromptEnhancer {
             return Some((names.clone(), Self::clean_path_prefix_and_slashes(normalized_root)));
         }
 
-        // 2) Windows 下：忽略大小写 + 兼容 keys 带长路径前缀的情况
+        // 2) Windows 下：忽略大小写 + 清理 key 的长路径前缀
         if cfg!(windows) {
             let target = normalized_root.to_lowercase();
             for (key, names) in projects.0.iter() {
-                // 中文注释：对 key 也做同样清理，避免 legacy projects.json 中残留 //?/ 前缀
                 let key_clean = Self::clean_path_prefix_and_slashes(key);
                 if key_clean.to_lowercase() == target {
                     return Some((names.clone(), key_clean));

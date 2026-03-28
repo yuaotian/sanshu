@@ -185,23 +185,6 @@ pub struct ResponseMetadata {
     pub source: Option<String>,
 }
 
-/// 旧格式兼容性支持
-#[derive(Debug, Deserialize)]
-pub struct McpResponseContent {
-    #[serde(rename = "type")]
-    pub content_type: String,
-    pub text: Option<String>,
-    pub source: Option<ImageSource>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ImageSource {
-    #[serde(rename = "type")]
-    pub source_type: String,
-    pub media_type: String,
-    pub data: String,
-}
-
 /// 统一的响应构建函数
 ///
 /// 用于生成标准的JSON响应格式，确保无GUI和有GUI模式输出一致

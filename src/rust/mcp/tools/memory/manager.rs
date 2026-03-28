@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use super::types::{MemoryEntry, MemoryCategory, MemoryStore, MemoryConfig};
 use super::similarity::TextSimilarity;
 use super::dedup::MemoryDeduplicator;
-use super::migration::MemoryMigrator;
 use crate::log_debug;
 
 /// 记忆管理器
@@ -42,14 +41,11 @@ impl MemoryManager {
     ///
     /// 自动执行：
     /// 1. 路径规范化和验证（支持非 Git 项目降级）
-    /// 2. 旧格式迁移（如果需要）
-    /// 3. 启动时去重（如果配置启用）
+    /// 2. 启动时去重（如果配置启用）
     pub fn new(project_path: &str) -> Result<Self> {
-        // 规范化项目路径（支持非 Git 项目降级）
         let normalize_result = Self::normalize_project_path(project_path)?;
         let memory_dir = normalize_result.path.join(".sanshu-memory");
 
-        // 创建记忆目录
         fs::create_dir_all(&memory_dir)
             .map_err(|e| anyhow::anyhow!(
                 "无法创建记忆目录: {}\n错误: {}\n这可能是因为项目目录没有写入权限。",
@@ -58,24 +54,6 @@ impl MemoryManager {
             ))?;
 
         let project_path_str = Self::clean_display_path(&normalize_result.path);
-
-        // 检查是否需要迁移
-        if MemoryMigrator::needs_migration(&memory_dir) {
-            log_debug!("检测到旧版记忆格式，开始迁移...");
-            match MemoryMigrator::migrate(&memory_dir, &project_path_str) {
-                Ok(result) => {
-                    log_debug!(
-                        "迁移完成: 读取 {} 条，去重后 {} 条，移除 {} 条重复",
-                        result.md_entries_count,
-                        result.deduped_entries_count,
-                        result.removed_duplicates
-                    );
-                }
-                Err(e) => {
-                    log_debug!("迁移失败（将使用空存储）: {}", e);
-                }
-            }
-        }
 
         // 加载或创建存储
         let store_path = memory_dir.join(Self::STORE_FILE);
