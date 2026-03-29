@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::types::{Context7Request, Context7Config, SearchResponse, SearchResult};
+use super::types::{Context7Request, Context7Config, SearchResponse, SearchResult, LibraryRedirectResponse};
 use crate::log_debug;
 use crate::log_important;
 
@@ -112,46 +112,76 @@ impl Context7Tool {
             .timeout(Duration::from_secs(30))
             .build()?;
 
-        // 构建 URL
-        let url = format!("{}/docs/code/{}", config.base_url, request.library);
-        log_debug!("Context7 请求 URL: {}", url);
+        let mut current_library = request.library.clone();
+        const MAX_REDIRECTS: u8 = 3;
 
-        // 构建请求
-        let mut req_builder = client.get(&url);
+        for attempt in 0..=MAX_REDIRECTS {
+            let url = format!("{}/docs/code/{}", config.base_url, current_library);
+            log_debug!("Context7 请求 URL: {}", url);
 
-        // 添加 API Key (如果有)
-        if let Some(api_key) = &config.api_key {
-            req_builder = req_builder.header(AUTHORIZATION, format!("Bearer {}", api_key));
-            log_debug!("使用 API Key 进行认证");
-        } else {
-            log_debug!("免费模式，无 API Key");
-        }
+            let mut req_builder = client.get(&url);
 
-        // 添加查询参数
-        if let Some(topic) = &request.topic {
-            req_builder = req_builder.query(&[("topic", topic)]);
-        }
-        if let Some(version) = &request.version {
-            req_builder = req_builder.query(&[("version", version)]);
-        }
-        if let Some(page) = request.page {
-            req_builder = req_builder.query(&[("page", page.to_string())]);
-        }
+            if let Some(api_key) = &config.api_key {
+                req_builder = req_builder.header(AUTHORIZATION, format!("Bearer {}", api_key));
+                if attempt == 0 {
+                    log_debug!("使用 API Key 进行认证");
+                }
+            } else if attempt == 0 {
+                log_debug!("免费模式，无 API Key");
+            }
 
-        // 发送请求
-        let response = req_builder.send().await?;
-        let status = response.status();
+            if let Some(topic) = &request.topic {
+                req_builder = req_builder.query(&[("topic", topic)]);
+            }
+            if let Some(version) = &request.version {
+                req_builder = req_builder.query(&[("version", version)]);
+            }
+            if let Some(page) = request.page {
+                req_builder = req_builder.query(&[("page", page.to_string())]);
+            }
 
-        log_debug!("Context7 响应状态: {}", status);
+            let response = req_builder.send().await?;
+            let status = response.status();
 
-        // 处理错误状态码
-        if !status.is_success() {
+            log_debug!("Context7 响应状态: {}", status);
+
+            if status.is_success() {
+                let response_text = response.text().await?;
+
+                if response_text.trim().is_empty() {
+                    return Ok("未找到相关文档。请尝试调整查询参数。".to_string());
+                }
+
+                let display_request = Context7Request {
+                    library: current_library,
+                    ..request.clone()
+                };
+                return Ok(Self::format_text_response(&response_text, &display_request));
+            }
+
             let error_text = response.text().await.unwrap_or_else(|_| "无法读取错误信息".to_string());
+
+            // 301 重定向：Context7 API 对已迁移的库返回 301 + redirectUrl
+            if status.as_u16() == 301 {
+                if let Ok(redirect_info) = serde_json::from_str::<LibraryRedirectResponse>(&error_text) {
+                    let new_library = redirect_info.redirect_url.trim_start_matches('/').to_string();
+                    log_important!(info,
+                        "库 '{}' 已重定向到 '{}'，自动跟随 (第 {} 次)",
+                        current_library, new_library, attempt + 1
+                    );
+                    current_library = new_library;
+                    continue;
+                }
+            }
 
             // 404 错误时触发智能降级：搜索候选库
             if status.as_u16() == 404 {
-                log_important!(info, "库 '{}' 不存在，触发智能搜索", request.library);
-                return Self::handle_not_found_with_search(config, request).await;
+                log_important!(info, "库 '{}' 不存在，触发智能搜索", current_library);
+                let search_request = Context7Request {
+                    library: current_library,
+                    ..request.clone()
+                };
+                return Self::handle_not_found_with_search(config, &search_request).await;
             }
 
             return Err(anyhow::anyhow!(
@@ -161,16 +191,7 @@ impl Context7Tool {
             ));
         }
 
-        // 读取响应文本 (Context7 API 返回纯文本 Markdown，不是 JSON)
-        let response_text = response.text().await?;
-
-        // 如果响应为空
-        if response_text.trim().is_empty() {
-            return Ok("未找到相关文档。请尝试调整查询参数。".to_string());
-        }
-
-        // 格式化输出（添加标题和元信息）
-        Ok(Self::format_text_response(&response_text, request))
+        Err(anyhow::anyhow!("重定向次数过多 (库: {})", current_library))
     }
 
     /// 格式化错误消息

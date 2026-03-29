@@ -1193,6 +1193,7 @@ defineExpose({
         <div
           class="popup-input-shell"
           :class="{ 'popup-input-shell-dragover': isDragOver }"
+          @click="editor?.commands.focus()"
         >
           <!-- 拖拽悬停提示 -->
           <div v-if="isDragOver" class="popup-drag-overlay">

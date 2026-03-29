@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useElementSize } from '@vueuse/core'
 import { useMessage } from 'naive-ui'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAcemcpSync } from '../composables/useAcemcpSync'
@@ -64,6 +65,10 @@ interface Emits {
 
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
+
+// 标题栏 fixed 定位后的高度占位
+const titleBarRef = ref<HTMLElement | null>(null)
+const { height: titleBarHeight } = useElementSize(titleBarRef)
 
 // 弹窗中的设置显示控制
 const showPopupSettings = ref(false)
@@ -217,8 +222,8 @@ onUnmounted(() => {
       v-else-if="props.showMcpPopup && props.mcpRequest"
       class="flex flex-col w-full h-screen bg-surface text-on-surface select-none overflow-hidden"
     >
-      <!-- 头部 - 固定在顶部 -->
-      <div class="sticky top-0 z-50 flex-shrink-0 bg-container-secondary border-b-2 border-border">
+      <!-- 头部 - 固定在顶部，z-index 高于 Naive UI modal 遮罩层以保证拖拽可用 -->
+      <div ref="titleBarRef" class="fixed top-0 left-0 right-0 z-[9999] bg-container-secondary border-b-2 border-border">
         <PopupHeader
           :current-theme="props.appConfig.theme"
           :loading="false"
@@ -239,6 +244,8 @@ onUnmounted(() => {
           @open-index-status="showIndexDrawer = true"
         />
       </div>
+      <!-- 标题栏占位，补偿 fixed 脱离文档流的高度 -->
+      <div :style="{ height: titleBarHeight + 'px' }" class="flex-shrink-0" />
 
       <!-- 设置界面 -->
       <div

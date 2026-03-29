@@ -1,6 +1,6 @@
 use tauri::State;
 use crate::config::AppState;
-use super::types::{Context7Request, Context7Config, TestConnectionResponse};
+use super::types::{Context7Request, Context7Config, TestConnectionResponse, LibraryRedirectResponse};
 
 /// 测试 Context7 连接
 #[tauri::command]
@@ -66,60 +66,66 @@ async fn execute_test_query(
         .build()
         .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
 
-    // 构建 URL
-    let url = format!("{}/docs/code/{}", config.base_url, request.library);
+    let mut current_library = request.library.clone();
+    const MAX_REDIRECTS: u8 = 3;
 
-    // 构建请求
-    let mut req_builder = client.get(&url);
+    for _attempt in 0..=MAX_REDIRECTS {
+        let url = format!("{}/docs/code/{}", config.base_url, current_library);
 
-    // 添加 API Key (如果有)
-    if let Some(api_key) = &config.api_key {
-        req_builder = req_builder.header(AUTHORIZATION, format!("Bearer {}", api_key));
-    }
+        let mut req_builder = client.get(&url);
 
-    // 添加查询参数
-    if let Some(topic) = &request.topic {
-        req_builder = req_builder.query(&[("topic", topic)]);
-    }
-    if let Some(page) = request.page {
-        req_builder = req_builder.query(&[("page", page.to_string())]);
-    }
-
-    // 发送请求
-    let response = req_builder.send().await
-        .map_err(|e| format!("请求失败: {}", e))?;
-
-    let status = response.status();
-
-    // 处理错误状态码
-    if !status.is_success() {
-        let error_text = response.text().await.unwrap_or_else(|_| "无法读取错误信息".to_string());
-        return Err(format_test_error(status.as_u16(), &error_text, &request.library));
-    }
-
-    // 读取响应文本 (Context7 API 返回纯文本 Markdown，不是 JSON)
-    let response_text = response.text().await
-        .map_err(|e| format!("读取响应失败: {}", e))?;
-
-    // 如果响应为空
-    if response_text.trim().is_empty() {
-        return Ok("未找到文档内容".to_string());
-    }
-
-    // 生成预览文本 (只显示前 300 个字符)
-    let preview = if response_text.len() > 300 {
-        // 尝试在合适的位置截断（避免截断单词）
-        let truncated = &response_text[..300];
-        if let Some(last_newline) = truncated.rfind('\n') {
-            format!("{}...", &truncated[..last_newline])
-        } else {
-            format!("{}...", truncated)
+        if let Some(api_key) = &config.api_key {
+            req_builder = req_builder.header(AUTHORIZATION, format!("Bearer {}", api_key));
         }
-    } else {
-        response_text
-    };
 
-    Ok(preview)
+        if let Some(topic) = &request.topic {
+            req_builder = req_builder.query(&[("topic", topic)]);
+        }
+        if let Some(page) = request.page {
+            req_builder = req_builder.query(&[("page", page.to_string())]);
+        }
+
+        let response = req_builder.send().await
+            .map_err(|e| format!("请求失败: {}", e))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let response_text = response.text().await
+                .map_err(|e| format!("读取响应失败: {}", e))?;
+
+            if response_text.trim().is_empty() {
+                return Ok("未找到文档内容".to_string());
+            }
+
+            let preview = if response_text.len() > 300 {
+                let truncated = &response_text[..300];
+                if let Some(last_newline) = truncated.rfind('\n') {
+                    format!("{}...", &truncated[..last_newline])
+                } else {
+                    format!("{}...", truncated)
+                }
+            } else {
+                response_text
+            };
+
+            return Ok(preview);
+        }
+
+        let error_text = response.text().await.unwrap_or_else(|_| "无法读取错误信息".to_string());
+
+        // 301 重定向：自动跟随到新库
+        if status.as_u16() == 301 {
+            if let Ok(redirect_info) = serde_json::from_str::<LibraryRedirectResponse>(&error_text) {
+                current_library = redirect_info.redirect_url.trim_start_matches('/').to_string();
+                continue;
+            }
+        }
+
+        return Err(format_test_error(status.as_u16(), &error_text, &current_library));
+    }
+
+    Err(format!("重定向次数过多 (库: {})", current_library))
 }
 
 /// 格式化测试错误消息

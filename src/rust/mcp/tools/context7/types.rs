@@ -80,6 +80,15 @@ pub struct TestConnectionResponse {
     pub preview: Option<String>,
 }
 
+/// 库重定向响应（301）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryRedirectResponse {
+    pub error: String,
+    pub message: String,
+    #[serde(rename = "redirectUrl")]
+    pub redirect_url: String,
+}
+
 /// 库搜索响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResponse {
