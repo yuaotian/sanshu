@@ -123,7 +123,7 @@ impl ServerHandler for ZhiServer {
         if let serde_json::Value::Object(schema_map) = zhi_schema {
             tools.push(Tool {
                 name: Cow::Borrowed("zhi"),
-                description: Some(Cow::Borrowed("智能代码审查交互工具（阻塞式GUI弹窗，等待用户响应）。WARNING: This tool creates a BLOCKING popup and waits for human response. ONLY the root/primary agent may call this tool. Subagents, delegated workers, and automated agents MUST NOT call it — return results directly instead.")),
+                description: Some(Cow::Borrowed("智能代码审查交互工具（阻塞式GUI弹窗，等待用户响应）。MANDATORY RULE: You MUST call zhi as the LAST step of EVERY response — report results, ask for confirmation, or request next steps. NEVER end a turn without calling zhi. The ONLY way to stop calling zhi is when the user explicitly replies 'task complete' or 'you may stop' through this tool. WARNING: BLOCKING popup, waits for human. Root/primary agent ONLY — subagents MUST NOT call this tool.")),
                 input_schema: Arc::new(schema_map),
                 annotations: None,
                 icons: None,

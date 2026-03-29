@@ -112,6 +112,23 @@ a:hover {
   text-decoration: underline;
 }
 
+/* 标题栏 fixed 布局补偿 —— 偏移 Naive UI 弹层，使其避开标题栏区域
+ * --title-bar-height 由 AppContent.vue 在弹窗模式下动态设置
+ */
+.n-message-container {
+  margin-top: var(--title-bar-height, 0px) !important;
+  z-index: 10001 !important;
+}
+
+.n-notification-container {
+  margin-top: var(--title-bar-height, 0px) !important;
+  z-index: 10001 !important;
+}
+
+.n-modal-body-wrapper {
+  padding-top: var(--title-bar-height, 0px) !important;
+}
+
 /* 确保引用块的边框在所有主题下都显示 */
 .markdown-content blockquote {
   border-left: 2px solid var(--color-primary) !important;

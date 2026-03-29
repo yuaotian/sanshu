@@ -70,6 +70,11 @@ const emit = defineEmits<Emits>()
 const titleBarRef = ref<HTMLElement | null>(null)
 const { height: titleBarHeight } = useElementSize(titleBarRef)
 
+// 将标题栏高度同步到 CSS 变量，供全局样式（toast/modal 偏移）使用
+watch(titleBarHeight, (h) => {
+  document.documentElement.style.setProperty('--title-bar-height', `${h}px`)
+}, { immediate: true })
+
 // 弹窗中的设置显示控制
 const showPopupSettings = ref(false)
 // 设置界面当前激活的 Tab
