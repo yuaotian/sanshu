@@ -1,9 +1,56 @@
 use anyhow::Result;
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, LogicalSize, Manager, State};
 
 use super::settings::{AppConfig, AppState, default_shortcuts, default_custom_prompts};
+
+/// 原子写入：先写临时文件再 rename，防止进程崩溃导致文件损坏
+fn atomic_write_file(path: &Path, data: &[u8]) -> Result<()> {
+    let tmp_path = path.with_extension("json.tmp");
+
+    let mut file = fs::File::create(&tmp_path)?;
+    file.write_all(data)?;
+    file.sync_all()?;
+    drop(file);
+
+    fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+/// 安全读取配置文件：文件不存在/被锁/为空/超时均降级为 None
+fn safe_read_config(path: &Path) -> Option<String> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    if !path.exists() {
+        return None;
+    }
+
+    let path = path.to_path_buf();
+    let (tx, rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let _ = tx.send(fs::read_to_string(&path));
+    });
+
+    match rx.recv_timeout(Duration::from_secs(3)) {
+        Ok(Ok(content)) if !content.trim().is_empty() => Some(content),
+        Ok(Ok(_)) => {
+            log::warn!("配置文件为空，将使用默认配置");
+            None
+        }
+        Ok(Err(e)) => {
+            log::warn!("读取配置文件失败: {}，将使用默认配置", e);
+            None
+        }
+        Err(_) => {
+            log::warn!("读取配置文件超时（可能被其他进程锁定），将使用默认配置");
+            None
+        }
+    }
+}
 
 pub fn get_config_path(_app: &AppHandle) -> Result<PathBuf> {
     // 使用与独立配置相同的路径，确保一致性
@@ -13,7 +60,6 @@ pub fn get_config_path(_app: &AppHandle) -> Result<PathBuf> {
 pub async fn save_config(state: &State<'_, AppState>, app: &AppHandle) -> Result<()> {
     let config_path = get_config_path(app)?;
 
-    // 确保目录存在
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -24,13 +70,7 @@ pub async fn save_config(state: &State<'_, AppState>, app: &AppHandle) -> Result
         .map_err(|e| anyhow::anyhow!("获取配置失败: {}", e))?;
     let config_json = serde_json::to_string_pretty(&*config)?;
 
-    // 写入文件
-    fs::write(&config_path, config_json)?;
-
-    // 强制刷新文件系统缓存
-    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&config_path) {
-        let _ = file.sync_all();
-    }
+    atomic_write_file(&config_path, config_json.as_bytes())?;
 
     log::debug!("配置已保存到: {:?}", config_path);
 
@@ -41,21 +81,23 @@ pub async fn save_config(state: &State<'_, AppState>, app: &AppHandle) -> Result
 pub async fn load_config(state: &State<'_, AppState>, app: &AppHandle) -> Result<()> {
     let config_path = get_config_path(app)?;
 
-    if config_path.exists() {
-        let config_json = fs::read_to_string(&config_path)?;
-        let mut config: AppConfig = serde_json::from_str(&config_json)?;
+    let mut config = if let Some(json) = safe_read_config(&config_path) {
+        serde_json::from_str::<AppConfig>(&json).unwrap_or_else(|e| {
+            log::warn!("配置文件解析失败，使用默认配置: {}", e);
+            AppConfig::default()
+        })
+    } else {
+        AppConfig::default()
+    };
 
-        // 合并默认快捷键配置，确保新的默认快捷键被添加
-        merge_default_shortcuts(&mut config);
-        // 合并默认提示词配置，确保新的默认提示词被添加
-        merge_default_custom_prompts(&mut config);
+    merge_default_shortcuts(&mut config);
+    merge_default_custom_prompts(&mut config);
 
-        let mut config_guard = state
-            .config
-            .lock()
-            .map_err(|e| anyhow::anyhow!("获取配置锁失败: {}", e))?;
-        *config_guard = config;
-    }
+    let mut config_guard = state
+        .config
+        .lock()
+        .map_err(|e| anyhow::anyhow!("获取配置锁失败: {}", e))?;
+    *config_guard = config;
 
     Ok(())
 }
@@ -64,8 +106,10 @@ pub async fn load_config_and_apply_window_settings(
     state: &State<'_, AppState>,
     app: &AppHandle,
 ) -> Result<()> {
-    // 先加载配置
-    load_config(state, app).await?;
+    // 先加载配置（失败不阻塞窗口显示）
+    if let Err(e) = load_config(state, app).await {
+        log::warn!("加载配置失败，使用默认配置: {}", e);
+    }
 
     // 然后应用窗口设置
     let (always_on_top, window_config) = {
@@ -137,13 +181,12 @@ pub async fn load_config_and_apply_window_settings(
             false
         };
 
-        // 所有设置完成后再显示窗口，避免在主显示器上闪烁
-        if let Err(e) = window.show() {
-            log::warn!("显示窗口失败: {}", e);
-        }
+        // window.show() 由前端在渲染完成后调用，避免黑屏闪烁
         if positioned {
             log::info!("✅ 窗口已在上次所在显示器上居中显示");
         }
+    } else {
+        log::error!("找不到 main 窗口，无法应用设置");
     }
 
     Ok(())
@@ -153,20 +196,19 @@ pub async fn load_config_and_apply_window_settings(
 pub fn load_standalone_config() -> Result<AppConfig> {
     let config_path = get_standalone_config_path()?;
 
-    if config_path.exists() {
-        let config_json = fs::read_to_string(config_path)?;
-        let mut config: AppConfig = serde_json::from_str(&config_json)?;
-
-        // 合并默认快捷键配置
-        merge_default_shortcuts(&mut config);
-        // 合并默认提示词配置
-        merge_default_custom_prompts(&mut config);
-
-        Ok(config)
+    let mut config = if let Some(json) = safe_read_config(&config_path) {
+        serde_json::from_str::<AppConfig>(&json).unwrap_or_else(|e| {
+            log::warn!("配置文件解析失败（{}），使用默认配置", e);
+            AppConfig::default()
+        })
     } else {
-        // 如果配置文件不存在，返回默认配置
-        Ok(AppConfig::default())
-    }
+        AppConfig::default()
+    };
+
+    merge_default_shortcuts(&mut config);
+    merge_default_custom_prompts(&mut config);
+
+    Ok(config)
 }
 
 /// 独立加载Telegram配置（用于MCP模式下的配置检查）

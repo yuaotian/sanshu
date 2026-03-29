@@ -3,27 +3,9 @@ import {
     presetAttributify,
     presetIcons,
     presetTypography,
-    presetWebFonts,
     presetWind3,
 } from 'unocss'
 import { semanticColors } from './src/frontend/theme/colors'
-
-const FONT_PROXY = process.env.FONT_PROXY || ''
-
-async function proxyFetch(url: string): Promise<string> {
-  if (!FONT_PROXY) {
-    const { $fetch } = await import('ofetch')
-    return $fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36' }, retry: 3 })
-  }
-
-  const { ProxyAgent } = await import('undici')
-  const dispatcher = new ProxyAgent(FONT_PROXY)
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36' },
-    dispatcher,
-  } as any)
-  return res.text()
-}
 
 export default defineConfig({
   presets: [
@@ -33,7 +15,6 @@ export default defineConfig({
     presetIcons({
       collections: {
         'carbon': () => import('@iconify-json/carbon/icons.json').then(i => i.default),
-        // FontAwesome 图标集合
         'fa6-solid': () => import('@iconify-json/fa6-solid/icons.json').then(i => i.default),
         'fa6-regular': () => import('@iconify-json/fa6-regular/icons.json').then(i => i.default),
       },
@@ -41,14 +22,6 @@ export default defineConfig({
         'display': 'inline-block',
         'vertical-align': 'middle',
       },
-    }),
-    presetWebFonts({
-      fonts: {
-        sans: 'Inter:400,500,600,700',
-        mono: 'JetBrains Mono:400,500,600',
-      },
-      customFetch: proxyFetch,
-      timeouts: { warning: 3000, failure: 15000 },
     }),
   ],
   theme: {

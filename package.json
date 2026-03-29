@@ -25,6 +25,8 @@
     "test:ui:build": "cd src/frontend/test && vite build"
   },
   "dependencies": {
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
     "@tanstack/vue-virtual": "^3.13.18",
     "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-shell": "^2.3.5",
