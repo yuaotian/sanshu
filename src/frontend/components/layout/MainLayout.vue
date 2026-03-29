@@ -128,7 +128,7 @@ const veryLongVariableName = { key1: 'value1', key2: 'value2', key3: 'value3', k
 
 ## 链接
 
-这是一个 [示例链接](https://example.com)，外部链接应被禁用。
+这是一个 [GitHub](https://github.com) 链接，点击后应在外部浏览器打开。
 
 普通段落文本用于测试行距和字号是否符合 Naive UI 规范。`,
       predefined_options: ['测试选项功能', '测试文本输入', '测试图片上传', '测试Markdown渲染'],

@@ -102,7 +102,7 @@ const acemcpConfigured = ref(false)
 // 索引重新同步加载状态
 const resyncLoading = ref(false)
 
-const showIndexPanel = ref(true)
+const showIndexPanel = ref(false)
 
 // 响应式状态
 const loading = ref(false)
@@ -281,10 +281,10 @@ onMounted(async () => {
   // 加载索引面板显示配置
   try {
     const acemcpConfig = await invoke('get_acemcp_config') as any
-    showIndexPanel.value = acemcpConfig.show_index_panel ?? true
+    showIndexPanel.value = acemcpConfig.show_index_panel ?? false
   }
   catch {
-    showIndexPanel.value = true
+    showIndexPanel.value = false
   }
 })
 

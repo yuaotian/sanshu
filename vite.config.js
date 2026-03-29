@@ -3,10 +3,21 @@ import process from 'node:process'
 import UnoCSS from 'unocss/vite'
 import { defineConfig } from 'vite'
 
+function stripCrossOrigin() {
+  return {
+    name: 'strip-crossorigin',
+    enforce: 'post',
+    transformIndexHtml(html) {
+      return html.replace(/ crossorigin/g, '')
+    },
+  }
+}
+
 export default defineConfig({
   plugins: [
     vue(),
     UnoCSS(),
+    stripCrossOrigin(),
   ],
   clearScreen: false,
   // Tauri应用需要使用相对路径

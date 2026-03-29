@@ -30,7 +30,8 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; font-src 'self' data: https:; connect-src 'self' ipc: https: http: ws: wss:; media-src 'self' data: blob:; object-src 'none'",
+      "dangerousDisableAssetCspModification": ["style-src"],
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: blob: https: http:; font-src 'self' data: https:; connect-src 'self' ipc: https: http: ws: wss:; media-src 'self' data: blob:; object-src 'none'",
       "capabilities": [
         {
           "identifier": "main-capability",

@@ -25,8 +25,6 @@
     "test:ui:build": "cd src/frontend/test && vite build"
   },
   "dependencies": {
-    "@fontsource/inter": "^5.2.8",
-    "@fontsource/jetbrains-mono": "^5.2.8",
     "@tanstack/vue-virtual": "^3.13.18",
     "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-shell": "^2.3.5",
@@ -58,6 +56,7 @@
     "eslint": "^9.29.0",
     "eslint-plugin-format": "^1.0.1",
     "naive-ui": "^2.41.1",
+    "ofetch": "^1.5.1",
     "typescript": "^6.0.2",
     "unocss": "^66.2.1",
     "vite": "^6.3.5"

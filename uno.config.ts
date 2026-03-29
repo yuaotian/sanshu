@@ -1,11 +1,29 @@
 import {
-    defineConfig,
-    presetAttributify,
-    presetIcons,
-    presetTypography,
-    presetWind3,
+  defineConfig,
+  presetAttributify,
+  presetIcons,
+  presetTypography,
+  presetWebFonts,
+  presetWind3,
 } from 'unocss'
 import { semanticColors } from './src/frontend/theme/colors'
+
+const FONT_PROXY = process.env.FONT_PROXY || ''
+
+async function proxyFetch(url: string): Promise<string> {
+  if (!FONT_PROXY) {
+    const { $fetch } = await import('ofetch')
+    return $fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36' }, retry: 3 })
+  }
+
+  const { ProxyAgent } = await import('undici')
+  const dispatcher = new ProxyAgent(FONT_PROXY)
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36' },
+    dispatcher,
+  } as any)
+  return res.text()
+}
 
 export default defineConfig({
   presets: [
@@ -23,23 +41,32 @@ export default defineConfig({
         'vertical-align': 'middle',
       },
     }),
+    presetWebFonts({
+      fonts: {
+        sans: 'Inter:400,500,600,700',
+        mono: 'JetBrains Mono:400,500,600',
+      },
+      customFetch: proxyFetch,
+      timeouts: { warning: 3000, failure: 15000 },
+    }),
   ],
   theme: {
     colors: {
-      // 语义化颜色系统 - 重新定义基础颜色让它们适配主题
       ...semanticColors,
-      // 添加表面色的直接映射
       surface: 'var(--color-surface)',
-      // 语义化文字/容器色 - 通过 CSS 变量适配主题
-      'on-surface': {
-        DEFAULT: 'var(--color-on-surface)',
-        secondary: 'var(--color-on-surface-secondary)',
-        muted: 'var(--color-on-surface-muted)',
+      on: {
+        surface: {
+          DEFAULT: 'var(--color-on-surface)',
+          secondary: 'var(--color-on-surface-secondary)',
+          muted: 'var(--color-on-surface-muted)',
+        },
       },
-      'container': {
+      container: {
         DEFAULT: 'var(--color-container)',
         secondary: 'var(--color-container-secondary)',
       },
+      border: 'var(--color-border)',
+      divider: 'var(--color-divider)',
     },
     fontSize: {
       'xs': 'var(--font-size-xs, 0.75rem)',
@@ -63,12 +90,10 @@ export default defineConfig({
   shortcuts: [
   ],
   rules: [
-    // 自定义规则
     [/^animate-in$/, () => ({ animation: 'fadeIn 0.2s ease-in-out' })],
     [/^fade-in$/, () => ({ opacity: '1' })],
   ],
   safelist: [
-    // 语义化颜色类名 - 基于新的颜色系统
     'bg-surface',
     'text-surface',
     'border-surface',
@@ -111,7 +136,6 @@ export default defineConfig({
     'border-black-900',
     'border-black-950',
     'border-white',
-    // 灰度色阶
     'bg-gray-50',
     'bg-gray-100',
     'bg-gray-200',
@@ -145,7 +169,6 @@ export default defineConfig({
     'border-gray-800',
     'border-gray-900',
     'border-gray-950',
-    // 主色调
     'bg-primary-50',
     'bg-primary-100',
     'bg-primary-200',
@@ -162,7 +185,6 @@ export default defineConfig({
     'text-primary-700',
     'border-primary-200',
     'border-primary-500',
-    // 功能色
     'bg-success',
     'bg-warning',
     'bg-error',
@@ -171,21 +193,17 @@ export default defineConfig({
     'text-warning',
     'text-error',
     'text-info',
-    // UI/UX Pro Max 工具专有颜色 (动态生成)
     'bg-pink-100',
     'text-pink-600',
     'dark:text-pink-400',
     'dark:bg-pink-900',
     'dark:bg-pink-800',
-    // 动画
     'animate-pulse',
-    // 滚动条样式类
     'scrollbar-thin',
     'scrollbar-primary',
     'scrollbar-hidden',
     'scrollbar-thick',
     'scrollbar-code',
-    // 图标类
     'i-carbon-settings-services',
     'i-carbon-data-base',
     'i-carbon-color-palette',
@@ -221,7 +239,6 @@ export default defineConfig({
     'i-carbon-settings-adjust',
     'i-carbon-trash-can',
     'i-carbon-document-text',
-    // 网络状态相关图标
     'i-carbon-network-3',
     'i-carbon-location',
     'i-carbon-direct-link',

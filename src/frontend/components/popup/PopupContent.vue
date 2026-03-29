@@ -2,6 +2,7 @@
 import hljs from 'highlight.js'
 import MarkdownIt from 'markdown-it'
 import { useMessage } from 'naive-ui'
+import { open } from '@tauri-apps/plugin-shell'
 import { nextTick, onMounted, onUpdated, watch } from 'vue'
 import type { McpRequest } from '../../types/popup'
 import { sanitizeHtml } from '../../utils/sanitize'
@@ -103,38 +104,39 @@ const md = new MarkdownIt({
   },
 })
 
-// 自定义链接渲染器 - 移除外链的点击功能，保持视觉样式
+// 自定义链接渲染器 - 外部链接用系统浏览器打开
 md.renderer.rules.link_open = function (tokens, idx, options, env, renderer) {
   const token = tokens[idx]
   const href = token.attrGet('href')
 
-  // 检查是否是外部链接
   if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
-    // 移除href属性，保持其他属性
     token.attrSet('href', '#')
-    token.attrSet('onclick', 'return false;')
-    token.attrSet('style', 'cursor: default; text-decoration: none;')
-    token.attrSet('title', `外部链接已禁用: ${href}`)
+    token.attrSet('data-external-url', href)
+    token.attrSet('title', href)
   }
 
   return renderer.renderToken(tokens, idx, options)
 }
 
-// 自定义自动链接渲染器 - 处理linkify生成的链接
 md.renderer.rules.autolink_open = function (tokens, idx, options, env, renderer) {
   const token = tokens[idx]
   const href = token.attrGet('href')
 
-  // 检查是否是外部链接
   if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
-    // 移除href属性，保持其他属性
     token.attrSet('href', '#')
-    token.attrSet('onclick', 'return false;')
-    token.attrSet('style', 'cursor: default; text-decoration: none;')
-    token.attrSet('title', `外部链接已禁用: ${href}`)
+    token.attrSet('data-external-url', href)
+    token.attrSet('title', href)
   }
 
   return renderer.renderToken(tokens, idx, options)
+}
+
+function handleExternalLinkClick(e: Event) {
+  const target = (e.target as HTMLElement).closest('a[data-external-url]')
+  if (!target) return
+  e.preventDefault()
+  const url = target.getAttribute('data-external-url')
+  if (url) open(url)
 }
 
 function renderMarkdown(content: string) {
@@ -324,7 +326,7 @@ onUpdated(() => {
       <!-- 主要内容 -->
       <div
         v-if="request.is_markdown"
-        class="markdown-content prose prose-sm max-w-none prose-headings:font-semibold prose-headings:leading-tight prose-h1:!mt-3 prose-h1:!mb-1.5 prose-h1:!text-base prose-h1:!font-semibold prose-h2:!mt-2.5 prose-h2:!mb-1 prose-h2:!text-sm prose-h2:!font-semibold prose-h3:!mt-2 prose-h3:!mb-1 prose-h3:!text-sm prose-h3:!font-medium prose-h4:!mt-1.5 prose-h4:!mb-0.5 prose-h4:!text-xs prose-h4:!font-medium prose-p:my-1 prose-p:leading-relaxed prose-p:text-sm prose-ul:my-1 prose-ul:text-sm prose-ul:pl-4 prose-ol:my-1 prose-ol:text-sm prose-ol:pl-4 prose-li:my-0.5 prose-li:text-sm prose-li:leading-relaxed prose-blockquote:my-1.5 prose-blockquote:text-sm prose-blockquote:pl-3 prose-blockquote:ml-0 prose-blockquote:italic prose-blockquote:border-l-2 prose-blockquote:border-primary-500 prose-pre:border prose-pre:rounded-[3px] prose-pre:p-3 prose-pre:my-2 prose-pre:overflow-x-auto prose-pre:text-xs scrollbar-code prose-code:px-1 prose-code:py-0.5 prose-code:text-xs prose-code:rounded-[2px] prose-code:cursor-pointer prose-code:font-mono prose-a:text-primary-500 prose-a:no-underline prose-a:cursor-default" :class="[
+        class="markdown-content prose prose-sm max-w-none prose-headings:font-semibold prose-headings:leading-tight prose-h1:!mt-3 prose-h1:!mb-1.5 prose-h1:!text-base prose-h1:!font-semibold prose-h2:!mt-2.5 prose-h2:!mb-1 prose-h2:!text-sm prose-h2:!font-semibold prose-h3:!mt-2 prose-h3:!mb-1 prose-h3:!text-sm prose-h3:!font-medium prose-h4:!mt-1.5 prose-h4:!mb-0.5 prose-h4:!text-xs prose-h4:!font-medium prose-p:my-1 prose-p:leading-relaxed prose-p:text-sm prose-ul:my-1 prose-ul:text-sm prose-ul:pl-4 prose-ol:my-1 prose-ol:text-sm prose-ol:pl-4 prose-li:my-0.5 prose-li:text-sm prose-li:leading-relaxed prose-blockquote:my-1.5 prose-blockquote:text-sm prose-blockquote:pl-3 prose-blockquote:ml-0 prose-blockquote:italic prose-blockquote:border-l-2 prose-blockquote:border-primary-500 prose-pre:border prose-pre:rounded-[3px] prose-pre:p-3 prose-pre:my-2 prose-pre:overflow-x-auto prose-pre:text-xs scrollbar-code prose-code:px-1 prose-code:py-0.5 prose-code:text-xs prose-code:rounded-[2px] prose-code:cursor-pointer prose-code:font-mono prose-a:text-primary-500 prose-a:no-underline prose-a:cursor-pointer" :class="[
           currentTheme === 'light' ? 'prose-slate' : 'prose-invert',
           'prose-headings:text-on-surface',
           currentTheme === 'light' ? 'prose-p:text-on-surface-secondary' : 'prose-p:text-on-surface prose-p:opacity-85',
@@ -335,6 +337,7 @@ onUpdated(() => {
           currentTheme === 'light' ? 'prose-em:text-on-surface-muted prose-em:italic' : 'prose-em:text-on-surface-secondary prose-em:italic',
         ]"
         v-html="renderMarkdown(request.message)"
+        @click="handleExternalLinkClick"
       />
       <div v-else class="whitespace-pre-wrap leading-relaxed text-on-surface">
         {{ request.message }}
@@ -377,9 +380,13 @@ onUpdated(() => {
   color: var(--color-on-surface);
 }
 
-:deep(.markdown-content a[onclick='return false;']) {
-  opacity: 0.6;
-  cursor: not-allowed;
+:deep(.markdown-content a[data-external-url]) {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+:deep(.markdown-content a[data-external-url]:hover) {
+  opacity: 0.8;
 }
 
 :deep(.markdown-content hr) {

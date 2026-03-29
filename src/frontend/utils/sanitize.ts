@@ -15,6 +15,7 @@ htmlPurify.setConfig({
     'href', 'target', 'rel', 'src', 'alt', 'title',
     'class', 'id', 'width', 'height',
     'align', 'valign', 'colspan', 'rowspan',
+    'data-external-url', 'data-highlight-theme',
   ],
   ALLOW_DATA_ATTR: false,
   ADD_ATTR: ['target'],

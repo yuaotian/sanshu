@@ -50,7 +50,7 @@ const config = ref({
 const loadingConfig = ref(false)
 const showProxyModal = ref(false)
 const logFilePath = ref('')
-const showIndexPanel = ref(true)
+const showIndexPanel = ref(false)
 const lastSavedConnection = ref({
   base_url: '',
   token: '',
@@ -194,7 +194,7 @@ async function loadAcemcpConfig() {
       // 嵌套项目索引配置
       index_nested_projects: res.index_nested_projects ?? true,
     }
-    showIndexPanel.value = res.show_index_panel ?? true
+    showIndexPanel.value = res.show_index_panel ?? false
     lastSavedConnection.value = {
       base_url: normalizeBaseUrl(res.base_url || ''),
       token: (res.token || '').trim(),
