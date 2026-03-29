@@ -1,5 +1,7 @@
 <script setup lang="ts">
+import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
+import { onMounted, ref } from 'vue'
 import ThemeIcon from './ThemeIcon.vue'
 
 interface Props {
@@ -23,6 +25,25 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<Emits>()
 
 const appWindow = getCurrentWebviewWindow()
+const alwaysOnTop = ref(false)
+
+onMounted(async () => {
+  try {
+    alwaysOnTop.value = await invoke('get_always_on_top') as boolean
+  }
+  catch {}
+})
+
+async function handleToggleAlwaysOnTop() {
+  try {
+    const newValue = !alwaysOnTop.value
+    await invoke('set_always_on_top', { enabled: newValue })
+    alwaysOnTop.value = newValue
+  }
+  catch (e) {
+    console.warn('置顶切换失败:', e)
+  }
+}
 
 function handleThemeToggle() {
   const next = props.currentTheme === 'light' ? 'dark' : 'light'
@@ -56,8 +77,22 @@ async function handleClose() {
         <!-- 分隔线（仅在有插槽内容时可见） -->
         <div v-if="$slots.default" class="w-px h-3 shrink-0" style="background-color: color-mix(in srgb, var(--color-on-surface) 25%, transparent)" />
 
-        <!-- 主题切换 + 窗口控制 -->
+        <!-- 置顶 + 主题切换 + 窗口控制 -->
         <n-space :size="2">
+          <n-button
+            size="tiny"
+            quaternary
+            circle
+            :title="alwaysOnTop ? '取消置顶' : '窗口置顶'"
+            @click="handleToggleAlwaysOnTop"
+          >
+            <template #icon>
+              <div
+                :class="alwaysOnTop ? 'i-carbon-pin-filled text-primary-500' : 'i-carbon-pin text-on-surface-secondary'"
+                class="w-3.5 h-3.5"
+              />
+            </template>
+          </n-button>
           <n-button
             size="tiny"
             quaternary

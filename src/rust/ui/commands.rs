@@ -1,4 +1,4 @@
-use crate::config::{save_config, load_config, AppState, ReplyConfig, WindowConfig, CustomPrompt, CustomPromptConfig, ShortcutConfig, ShortcutBinding};
+use crate::config::{save_config, save_custom_prompts, load_config, AppState, ReplyConfig, WindowConfig, CustomPrompt, CustomPromptConfig, ShortcutConfig, ShortcutBinding};
 use crate::constants::{window, ui, validation};
 use crate::mcp::types::{build_continue_response, build_send_response, ImageAttachment, PopupRequest};
 use crate::mcp::handlers::create_tauri_popup;
@@ -762,10 +762,9 @@ pub async fn add_custom_prompt(
         config.custom_prompt_config.prompts.push(prompt);
     }
 
-    // 保存配置到文件
-    save_config(&state, &app)
+    save_custom_prompts(&state, &app)
         .await
-        .map_err(|e| format!("保存配置失败: {}", e))?;
+        .map_err(|e| format!("保存提示词失败: {}", e))?;
 
     Ok(())
 }
@@ -791,10 +790,9 @@ pub async fn update_custom_prompt(
         }
     }
 
-    // 保存配置到文件
-    save_config(&state, &app)
+    save_custom_prompts(&state, &app)
         .await
-        .map_err(|e| format!("保存配置失败: {}", e))?;
+        .map_err(|e| format!("保存提示词失败: {}", e))?;
 
     Ok(())
 }
@@ -821,10 +819,9 @@ pub async fn delete_custom_prompt(
         }
     }
 
-    // 保存配置到文件
-    save_config(&state, &app)
+    save_custom_prompts(&state, &app)
         .await
-        .map_err(|e| format!("保存配置失败: {}", e))?;
+        .map_err(|e| format!("保存提示词失败: {}", e))?;
 
     Ok(())
 }
@@ -844,10 +841,9 @@ pub async fn set_custom_prompt_enabled(
         config.custom_prompt_config.enabled = enabled;
     }
 
-    // 保存配置到文件
-    save_config(&state, &app)
+    save_custom_prompts(&state, &app)
         .await
-        .map_err(|e| format!("保存配置失败: {}", e))?;
+        .map_err(|e| format!("保存提示词失败: {}", e))?;
 
     Ok(())
 }
@@ -891,16 +887,9 @@ pub async fn update_custom_prompt_order(
         }
     }
 
-    log::debug!("开始保存配置文件...");
-    let save_start = std::time::Instant::now();
-
-    // 保存配置到文件
-    save_config(&state, &app)
+    save_custom_prompts(&state, &app)
         .await
-        .map_err(|e| format!("保存配置失败: {}", e))?;
-
-    let save_duration = save_start.elapsed();
-    log::debug!("配置保存完成，耗时: {:?}", save_duration);
+        .map_err(|e| format!("保存提示词失败: {}", e))?;
 
     Ok(())
 }
@@ -928,10 +917,9 @@ pub async fn update_conditional_prompt_state(
         }
     }
 
-    // 保存配置到文件
-    save_config(&state, &app)
+    save_custom_prompts(&state, &app)
         .await
-        .map_err(|e| format!("保存配置失败: {}", e))?;
+        .map_err(|e| format!("保存提示词失败: {}", e))?;
 
     Ok(())
 }

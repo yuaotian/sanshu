@@ -233,7 +233,6 @@ onUnmounted(() => {
           :current-theme="props.appConfig.theme"
           :loading="false"
           :show-main-layout="showPopupSettings"
-          :always-on-top="props.appConfig.window.alwaysOnTop"
           :project-name="projectName"
           :mcp-enabled="showMcpIndexStatus"
           :mcp-status-summary="statusSummary"
@@ -245,7 +244,6 @@ onUnmounted(() => {
           @theme-change="$emit('themeChange', $event)"
           @open-main-layout="togglePopupSettings"
           @open-log-viewer="openLogViewer"
-          @toggle-always-on-top="$emit('toggleAlwaysOnTop')"
           @open-index-status="showIndexDrawer = true"
         />
       </div>

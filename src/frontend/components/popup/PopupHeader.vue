@@ -5,7 +5,6 @@ interface Props {
   currentTheme?: string
   loading?: boolean
   showMainLayout?: boolean
-  alwaysOnTop?: boolean
   projectName?: string
   mcpEnabled?: boolean
   mcpStatusSummary?: string
@@ -20,7 +19,6 @@ interface Emits {
   themeChange: [theme: string]
   openMainLayout: []
   openLogViewer: []
-  toggleAlwaysOnTop: []
   openIndexStatus: []
 }
 
@@ -28,7 +26,6 @@ const props = withDefaults(defineProps<Props>(), {
   currentTheme: 'dark',
   loading: false,
   showMainLayout: false,
-  alwaysOnTop: false,
   projectName: '',
   mcpEnabled: false,
   mcpStatusSummary: '',
@@ -52,10 +49,6 @@ function handleOpenMainLayout() {
 
 function handleOpenLogViewer() {
   emit('openLogViewer')
-}
-
-function handleToggleAlwaysOnTop() {
-  emit('toggleAlwaysOnTop')
 }
 
 function handleOpenIndexStatus() {
@@ -123,20 +116,6 @@ function isAuthFailure(): boolean {
 
     <!-- 功能按钮组 -->
     <n-space :size="2">
-      <n-button
-        size="tiny"
-        quaternary
-        circle
-        :title="props.alwaysOnTop ? '取消置顶' : '窗口置顶'"
-        @click="handleToggleAlwaysOnTop"
-      >
-        <template #icon>
-          <div
-            :class="props.alwaysOnTop ? 'i-carbon-pin-filled' : 'i-carbon-pin'"
-            class="w-3.5 h-3.5 text-on-surface-secondary"
-          />
-        </template>
-      </n-button>
       <n-button
         size="tiny"
         quaternary

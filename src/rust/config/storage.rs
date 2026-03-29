@@ -91,6 +91,7 @@ pub async fn load_config(state: &State<'_, AppState>, app: &AppHandle) -> Result
     };
 
     merge_default_shortcuts(&mut config);
+    load_custom_prompts_into(&mut config);
     merge_default_custom_prompts(&mut config);
 
     let mut config_guard = state
@@ -206,6 +207,7 @@ pub fn load_standalone_config() -> Result<AppConfig> {
     };
 
     merge_default_shortcuts(&mut config);
+    load_custom_prompts_into(&mut config);
     merge_default_custom_prompts(&mut config);
 
     Ok(config)
@@ -219,11 +221,67 @@ pub fn load_standalone_telegram_config() -> Result<super::settings::TelegramConf
 
 /// 获取独立配置文件路径（不依赖Tauri）
 fn get_standalone_config_path() -> Result<PathBuf> {
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| anyhow::anyhow!("无法获取配置目录"))?
-        .join("sanshu");
+    Ok(get_config_dir()?.join("config.json"))
+}
 
-    Ok(config_dir.join("config.json"))
+fn get_config_dir() -> Result<PathBuf> {
+    dirs::config_dir()
+        .ok_or_else(|| anyhow::anyhow!("无法获取配置目录"))
+        .map(|d| d.join("sanshu"))
+}
+
+fn get_custom_prompts_path() -> Result<PathBuf> {
+    Ok(get_config_dir()?.join("custom_prompts.json"))
+}
+
+/// 保存自定义提示词到独立文件
+pub async fn save_custom_prompts(state: &State<'_, AppState>, _app: &AppHandle) -> Result<()> {
+    let prompts_path = get_custom_prompts_path()?;
+
+    if let Some(parent) = prompts_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let prompt_config = {
+        let config = state.config.lock()
+            .map_err(|e| anyhow::anyhow!("获取配置失败: {}", e))?;
+        config.custom_prompt_config.clone()
+    };
+
+    let json = serde_json::to_string_pretty(&prompt_config)?;
+    atomic_write_file(&prompts_path, json.as_bytes())?;
+
+    log::debug!("自定义提示词已保存到: {:?}", prompts_path);
+    Ok(())
+}
+
+/// 加载自定义提示词（优先从独立文件，不存在则从 config.json 迁移）
+pub fn load_custom_prompts_into(config: &mut AppConfig) {
+    let prompts_path = match get_custom_prompts_path() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    if let Some(json) = safe_read_config(&prompts_path) {
+        match serde_json::from_str::<super::settings::CustomPromptConfig>(&json) {
+            Ok(prompt_config) => {
+                config.custom_prompt_config = prompt_config;
+            }
+            Err(e) => {
+                log::warn!("自定义提示词文件解析失败: {}，保留主配置中的数据", e);
+            }
+        }
+    } else if !config.custom_prompt_config.prompts.is_empty() {
+        // custom_prompts.json 不存在但 config.json 有数据 → 迁移
+        if let Some(parent) = prompts_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&config.custom_prompt_config) {
+            if atomic_write_file(&prompts_path, json.as_bytes()).is_ok() {
+                log::info!("已从 config.json 迁移自定义提示词到独立文件");
+            }
+        }
+    }
 }
 
 /// 合并默认快捷键配置，确保新的默认快捷键被添加到现有配置中
