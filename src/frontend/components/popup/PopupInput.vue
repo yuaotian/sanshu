@@ -426,6 +426,29 @@ function tryParsePasteAsReference(text: string): boolean {
 
 // ============ 图片 Badge ============
 
+const GENERIC_IMAGE_NAMES = new Set(['image', 'screenshot', 'clipboard', '截图', '粘贴图片'])
+
+function uniqueImageName(rawName: string): string {
+  const dotIdx = rawName.lastIndexOf('.')
+  const stem = dotIdx > 0 ? rawName.slice(0, dotIdx) : rawName
+  const ext = dotIdx > 0 ? rawName.slice(dotIdx) : ''
+
+  const isGeneric = GENERIC_IMAGE_NAMES.has(stem.toLowerCase())
+  const isDuplicate = imageNames.value.includes(rawName)
+
+  if (!isGeneric && !isDuplicate) return rawName
+
+  const ts = new Date()
+  const tag = `${String(ts.getHours()).padStart(2, '0')}${String(ts.getMinutes()).padStart(2, '0')}${String(ts.getSeconds()).padStart(2, '0')}`
+  const base = isGeneric ? `截图-${tag}` : `${stem}-${tag}`
+  let candidate = `${base}${ext}`
+  let seq = 2
+  while (imageNames.value.includes(candidate)) {
+    candidate = `${base}-${seq++}${ext}`
+  }
+  return candidate
+}
+
 let nextImageBadgeId = 0
 const imageBadgeMap = new Map<string, string>()
 const imageBadgeArchive = new Map<string, string>()
@@ -518,7 +541,7 @@ async function handleDroppedPaths(paths: string[]) {
     if (isImagePath(rawPath)) {
       try {
         const rawDataUrl: string = await invoke('read_image_file_as_data_url', { path: rawPath })
-        const name = rawPath.split(/[/\\]/).pop() || 'image'
+        const name = uniqueImageName(rawPath.split(/[/\\]/).pop() || 'image.png')
         let dataUrl = rawDataUrl
         let summary = ''
         if (imageCompressionEnabled.value) {
@@ -612,7 +635,7 @@ async function handleImageFiles(files: FileList | File[]): Promise<void> {
 
     try {
       const rawBase64 = await fileToBase64(file)
-      const name = file.name || `粘贴图片-${uploadedImages.value.length + 1}`
+      const name = uniqueImageName(file.name || 'image.png')
       let dataUrl = rawBase64
       let summary = ''
       if (imageCompressionEnabled.value) {
@@ -1167,13 +1190,18 @@ defineExpose({
               :key="`image-${index}`"
               class="relative group"
             >
-              <n-image
-                :src="image"
-                width="40"
-                height="40"
-                object-fit="cover"
-                class="!rounded-[3px] border border-border hover:border-primary transition-colors cursor-pointer"
-              />
+              <n-tooltip :delay="300">
+                <template #trigger>
+                  <n-image
+                    :src="image"
+                    width="40"
+                    height="40"
+                    object-fit="cover"
+                    class="!rounded-[3px] border border-border hover:border-primary transition-colors cursor-pointer"
+                  />
+                </template>
+                {{ imageNames[index] || '图片' }}
+              </n-tooltip>
               <n-button
                 class="absolute -top-1.5 -right-1.5 z-10 opacity-0 group-hover:opacity-100 transition-opacity"
                 size="tiny"
