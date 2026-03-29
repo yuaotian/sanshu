@@ -34,36 +34,34 @@ export function useAppInitialization(mcpHandler: ReturnType<typeof import('./use
    */
   async function initializeApp() {
     try {
-      // 检查是否为首次启动
       const isFirstRun = checkFirstRun()
 
-      // 主题已在useTheme初始化时加载，这里不需要重复加载
-
-      // 加载字体设置
-      await Promise.all([
-        loadFontConfig(),
-        loadFontOptions(),
+      // 并行加载字体和检测模式（互不依赖）
+      const [, modeResult] = await Promise.all([
+        Promise.all([loadFontConfig(), loadFontOptions()]),
+        checkMcpMode(),
       ])
 
-      // 检查是否为MCP模式或图标模式
-      const { isMcp, mcpContent, isIconMode, iconParams } = await checkMcpMode()
+      const { isMcp, mcpContent, isIconMode, iconParams } = modeResult
 
-      // 如果是图标模式，设置状态
       if (isIconMode && iconParams) {
-        console.log('📦 进入图标搜索弹窗模式:', iconParams)
         mcpHandler.setIconMode(true, iconParams)
       }
 
-      // 无论是否为MCP模式，都加载窗口设置
-      await settings.loadWindowSettings()
-      await settings.loadWindowConfig()
+      // 加载窗口设置（显示窗口前必须完成）
+      await Promise.all([
+        settings.loadWindowSettings(),
+        settings.loadWindowConfig(),
+      ])
 
-      // 设置窗口焦点监听器，用于配置同步
+      // 基础设置完成，立即显示窗口（后续初始化可后台进行）
+      isInitializing.value = false
+      await getCurrentWindow().show()
+
+      // 以下为非阻塞初始化，窗口已可见
       await settings.setupWindowFocusListener()
 
-      // 在MCP模式下，确保前端状态与后端窗口状态同步
       if (isMcp) {
-        console.log('MCP模式检测到，同步窗口状态...')
         try {
           await settings.syncWindowStateFromBackend()
         }
@@ -72,23 +70,14 @@ export function useAppInitialization(mcpHandler: ReturnType<typeof import('./use
         }
       }
 
-      // 初始化MCP工具配置（在非MCP模式和非图标模式下）
       if (!isMcp && !isIconMode) {
         await initMcpTools()
         await setupMcpEventListener()
       }
 
-      // 如果是首次启动，标记已初始化（主题已在上面加载过）
       if (isFirstRun) {
-        console.log('检测到首次启动，标记应用已初始化')
         markAsInitialized()
       }
-
-      // 结束初始化状态
-      isInitializing.value = false
-
-      // 前端渲染就绪后再显示窗口，避免黑屏闪烁
-      await getCurrentWindow().show()
 
       return { isMcp, mcpContent, isIconMode }
     }

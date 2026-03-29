@@ -15,8 +15,8 @@ pub struct AppConfig {
     pub mcp_config: McpConfig, // MCP工具配置
     #[serde(default = "default_telegram_config")]
     pub telegram_config: TelegramConfig, // Telegram Bot配置
-    #[serde(default = "default_custom_prompt_config")]
-    pub custom_prompt_config: CustomPromptConfig, // 自定义prompt配置
+    #[serde(default = "default_custom_prompt_config", skip_serializing)]
+    pub custom_prompt_config: CustomPromptConfig, // 独立存储于 custom_prompts.json
     #[serde(default = "default_shortcut_config")]
     pub shortcut_config: ShortcutConfig, // 自定义快捷键配置
     #[serde(default = "default_proxy_config")]
