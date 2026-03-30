@@ -94,8 +94,8 @@ onBeforeUnmount(() => {
 <template>
   <div ref="scrollContainer" class="flex-1 overflow-y-auto min-h-0 pr-2 relative">
     <!-- 初始骨架屏 -->
-    <div v-if="loading && !hasResults" class="columns-4 sm:columns-5 md:columns-6 lg:columns-8 gap-3">
-      <div v-for="i in 32" :key="`skeleton-${i}`" class="mb-3 break-inside-avoid">
+    <div v-if="loading && !hasResults" class="icon-grid">
+      <div v-for="i in 32" :key="`skeleton-${i}`">
         <IconCardSkeleton />
       </div>
     </div>
@@ -103,7 +103,7 @@ onBeforeUnmount(() => {
     <template v-else-if="hasResults">
       <transition-group
         tag="div"
-        class="columns-4 sm:columns-5 md:columns-6 lg:columns-8 gap-3"
+        class="icon-grid"
         enter-active-class="transition-all duration-300 ease-out"
         enter-from-class="opacity-0 translate-y-2"
         enter-to-class="opacity-100 translate-y-0"
@@ -114,7 +114,6 @@ onBeforeUnmount(() => {
         <div
           v-for="icon in icons"
           :key="icon.id"
-          class="mb-3 break-inside-avoid"
         >
           <IconCard
             :icon="icon"
@@ -214,3 +213,10 @@ onBeforeUnmount(() => {
   </div>
 </template>
 
+<style scoped>
+.icon-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+  gap: 12px;
+}
+</style>

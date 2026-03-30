@@ -115,11 +115,11 @@ export const MCP_TOOLS_CONFIG: ToolPromptConfig[] = [
 
   // ji (记) - 记忆管理
   {
-    id: 'memory',
+    id: 'ji',
     name: '记忆管理',
     description: '全局记忆管理工具，用于存储和管理重要的开发规范、用户偏好和最佳实践',
     prompt: {
-      base: '**记忆管理**：对话开始时加载 `memory` 记忆，用户说"请记住"时存储关键信息',
+      base: '**记忆管理**：对话开始时加载 `ji` 记忆，用户说"请记住"时存储关键信息',
       whenToUse: [
         '对话开始时：调用 `回忆` 加载项目记忆',
         '用户说"请记住"时：总结后调用 `记忆` 存储',

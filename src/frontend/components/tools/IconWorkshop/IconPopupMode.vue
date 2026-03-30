@@ -1040,11 +1040,18 @@ async function startSave(request: IconSaveRequest, isEditorSave = false) {
     savePath: request.savePath,
   }
 
+  const successItems = items.filter(item => item.success)
+  const failedItems = items.filter(item => !item.success)
+
   pendingResponse.value = {
     saved_count: successCount,
     save_path: request.savePath,
-    saved_names: items.filter(item => item.success).map(item => item.name),
+    saved_names: successItems.map(item => item.name),
+    saved_paths: successItems.flatMap(item => item.savedPaths || []),
     cancelled: false,
+    error_message: failedItems.length > 0
+      ? failedItems.map(item => `${item.name}: ${item.error || '未知错误'}`).join('; ')
+      : null,
   }
 
   needsConfirm.value = true
@@ -1097,7 +1104,9 @@ async function handleCancel() {
       saved_count: 0,
       save_path: '',
       saved_names: [],
+      saved_paths: [],
       cancelled: true,
+      error_message: null,
     }
     await invoke('send_mcp_response', { response })
     await invoke('exit_app')
@@ -1111,146 +1120,123 @@ async function handleCancel() {
 
 <template>
   <div class="h-screen flex flex-col bg-surface text-on-surface">
-    <!-- 窗口标题栏 -->
+    <!-- 窗口标题栏（集成操作按钮） -->
     <div class="flex-shrink-0 bg-container border-b border-border">
-      <WindowTitleBar title="图标工坊" />
-    </div>
-
-    <!-- 顶部导航栏 -->
-    <div class="flex-shrink-0 border-b border-border flex items-center justify-between px-4 py-2 bg-container">
-      <div class="flex items-center gap-2">
-        <div class="i-carbon-image text-xl text-primary" />
-        <span class="font-medium">图标工坊</span>
-      </div>
-
-      <div class="flex items-center gap-2">
+      <WindowTitleBar title="图标工坊" :custom-close="true" @close="handleCancel">
         <n-button
-          secondary
-          size="small"
+          quaternary
+          size="tiny"
           :disabled="!selectedIcons.length || showProgressOverlay"
           @click="openEditorModal"
         >
           <template #icon>
             <div class="i-carbon-color-palette" />
           </template>
-          SVG 编辑器
+          编辑器
         </n-button>
-        <n-button
-          secondary
-          type="error"
-          size="small"
-          :disabled="isSaving || needsConfirm"
-          @click="handleCancel"
-        >
-          取消 / 关闭
-        </n-button>
-      </div>
+      </WindowTitleBar>
     </div>
 
     <!-- 主内容区 -->
-    <div class="flex-1 overflow-hidden p-4">
-      <div class="relative h-full">
-        <n-modal
-          :show="showProgressOverlay"
-          :mask-closable="false"
-          :closable="false"
-          :close-on-esc="false"
-          :auto-focus="false"
-          transform-origin="center"
+    <div class="flex-1 min-h-0 overflow-hidden p-3">
+      <n-modal
+        :show="showProgressOverlay"
+        :mask-closable="false"
+        :closable="false"
+        :close-on-esc="false"
+        :auto-focus="false"
+        transform-origin="center"
+      >
+        <n-card
+          class="!rounded-[3px] max-w-xl w-[min(100vw-2rem,36rem)] mx-auto shadow-lg border-border"
+          :bordered="true"
+          content-style="padding: 24px"
         >
-          <n-card
-            class="!rounded-[3px] max-w-xl w-[min(100vw-2rem,36rem)] mx-auto shadow-lg border-border"
-            :bordered="true"
-            content-style="padding: 24px"
-          >
-            <div class="space-y-4">
-              <div class="flex items-center gap-3">
-                <div class="i-carbon-download text-xl text-primary" />
-                <div class="text-base font-medium">
-                  {{ isSaving ? '正在保存图标...' : '保存完成' }}
-                </div>
-              </div>
-
-              <div v-if="isSaving" class="space-y-3">
-                <div class="flex items-center justify-between text-sm text-on-surface-secondary">
-                  <span>当前进度</span>
-                  <span>{{ saveProgress }}%</span>
-                </div>
-                <n-progress
-                  type="line"
-                  :percentage="saveProgress"
-                  :show-indicator="false"
-                  processing
-                />
-                <div class="text-sm text-on-surface-secondary">
-                  正在处理：{{ savingIconName || '准备中' }}
-                </div>
-              </div>
-
-              <div v-else class="space-y-3">
-                <div class="flex items-center gap-2 text-sm text-on-surface-secondary">
-                  <div class="i-carbon-checkmark-outline text-success" />
-                  <span>保存任务已完成</span>
-                </div>
-
-                <div v-if="saveSummary" class="grid grid-cols-2 gap-3 text-sm">
-                  <n-card size="small" embedded class="!rounded-[3px]">
-                    <div class="text-on-surface-secondary">
-                      成功
-                    </div>
-                    <div class="text-lg font-semibold text-success">
-                      {{ saveSummary.successCount }}
-                    </div>
-                  </n-card>
-                  <n-card size="small" embedded class="!rounded-[3px]">
-                    <div class="text-on-surface-secondary">
-                      失败
-                    </div>
-                    <div class="text-lg font-semibold text-error">
-                      {{ saveSummary.failedCount }}
-                    </div>
-                  </n-card>
-                  <n-card size="small" embedded class="col-span-2 !rounded-[3px]">
-                    <div class="text-on-surface-secondary">
-                      保存路径
-                    </div>
-                    <div class="text-xs mt-1 break-all">
-                      {{ saveSummary.savePath }}
-                    </div>
-                  </n-card>
-                </div>
-
-                <div v-if="saveError" class="text-xs text-error">
-                  {{ saveError }}
-                </div>
-
-                <div class="flex justify-end">
-                  <n-button type="primary" size="small" @click="handleConfirmClose">
-                    确认并关闭
-                  </n-button>
-                </div>
+          <div class="space-y-4">
+            <div class="flex items-center gap-3">
+              <div class="i-carbon-download text-xl text-primary" />
+              <div class="text-base font-medium">
+                {{ isSaving ? '正在保存图标...' : '保存完成' }}
               </div>
             </div>
-          </n-card>
-        </n-modal>
 
-        <div class="h-full flex flex-col gap-4">
-          <div class="flex-1 min-w-0 min-h-0 overflow-hidden icon-popup-scope">
-            <IconWorkshop
-              mode="popup"
-              :active="true"
-              :initial-query="props.initialQuery"
-              :initial-style="props.initialStyle"
-              :initial-save-path="props.initialSavePath"
-              :project-root="props.projectRoot"
-              :external-save="true"
-              @save="handlePopupSave"
-              @selection-change="handleSelectionChange"
-              @icon-dblclick="handleIconDblClick"
-              @icon-contextmenu="handleIconContextMenu"
-            />
+            <div v-if="isSaving" class="space-y-3">
+              <div class="flex items-center justify-between text-sm text-on-surface-secondary">
+                <span>当前进度</span>
+                <span>{{ saveProgress }}%</span>
+              </div>
+              <n-progress
+                type="line"
+                :percentage="saveProgress"
+                :show-indicator="false"
+                processing
+              />
+              <div class="text-sm text-on-surface-secondary">
+                正在处理：{{ savingIconName || '准备中' }}
+              </div>
+            </div>
+
+            <div v-else class="space-y-3">
+              <div class="flex items-center gap-2 text-sm text-on-surface-secondary">
+                <div class="i-carbon-checkmark-outline text-success" />
+                <span>保存任务已完成</span>
+              </div>
+
+              <div v-if="saveSummary" class="grid grid-cols-2 gap-3 text-sm">
+                <n-card size="small" embedded class="!rounded-[3px]">
+                  <div class="text-on-surface-secondary">
+                    成功
+                  </div>
+                  <div class="text-lg font-semibold text-success">
+                    {{ saveSummary.successCount }}
+                  </div>
+                </n-card>
+                <n-card size="small" embedded class="!rounded-[3px]">
+                  <div class="text-on-surface-secondary">
+                    失败
+                  </div>
+                  <div class="text-lg font-semibold text-error">
+                    {{ saveSummary.failedCount }}
+                  </div>
+                </n-card>
+                <n-card size="small" embedded class="col-span-2 !rounded-[3px]">
+                  <div class="text-on-surface-secondary">
+                    保存路径
+                  </div>
+                  <div class="text-xs mt-1 break-all">
+                    {{ saveSummary.savePath }}
+                  </div>
+                </n-card>
+              </div>
+
+              <div v-if="saveError" class="text-xs text-error">
+                {{ saveError }}
+              </div>
+
+              <div class="flex justify-end">
+                <n-button type="primary" size="small" @click="handleConfirmClose">
+                  确认并关闭
+                </n-button>
+              </div>
+            </div>
           </div>
-        </div>
+        </n-card>
+      </n-modal>
+
+      <div class="h-full icon-popup-scope">
+        <IconWorkshop
+          mode="popup"
+          :active="true"
+          :initial-query="props.initialQuery"
+          :initial-style="props.initialStyle"
+          :initial-save-path="props.initialSavePath"
+          :project-root="props.projectRoot"
+          :external-save="true"
+          @save="handlePopupSave"
+          @selection-change="handleSelectionChange"
+          @icon-dblclick="handleIconDblClick"
+          @icon-contextmenu="handleIconContextMenu"
+        />
       </div>
     </div>
 

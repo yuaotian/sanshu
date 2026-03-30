@@ -62,11 +62,24 @@ function handleImageError(event: Event) {
   console.warn('LOGO图标加载失败，已隐藏')
 }
 
+// 测试图标工坊弹窗
+async function showTestIconPopup() {
+  try {
+    await invoke('create_test_icon_popup')
+    message.success('测试图标工坊窗口已创建')
+  }
+  catch (error) {
+    console.error('创建测试图标工坊失败:', error)
+    message.error(`创建测试图标工坊失败: ${error}`)
+  }
+}
+
 // 测试popup功能 - 创建独立的popup窗口
 async function showTestMcpPopup() {
   try {
     // 创建测试请求数据
     const testRequest = {
+      popup_type: 'zhi',
       id: `test-${Date.now()}`,
       message: `# 一级标题
 
@@ -176,6 +189,17 @@ const veryLongVariableName = { key1: 'value1', key2: 'value2', key3: 'value3', k
             >
               <template #icon>
                 <div class="i-carbon-test-tool w-4 h-4" />
+              </template>
+            </n-button>
+            <n-button
+              size="small"
+              type="tertiary"
+              circle
+              title="测试图标工坊"
+              @click="showTestIconPopup"
+            >
+              <template #icon>
+                <div class="i-carbon-image w-4 h-4" />
               </template>
             </n-button>
           </div>

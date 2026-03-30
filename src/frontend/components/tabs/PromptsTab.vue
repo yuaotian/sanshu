@@ -11,7 +11,7 @@ const promptContent = computed(() => {
   // 将后端数据格式转换为前端格式
   // 后端使用 'ji' 作为记忆工具标识符，前端使用 'memory'
   const frontendTools = mcpTools.value.map(tool => ({
-    id: tool.id === 'ji' ? 'memory' : tool.id,
+    id: tool.id,
     name: tool.name,
     description: tool.description,
     enabled: tool.enabled,

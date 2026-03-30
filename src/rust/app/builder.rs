@@ -77,6 +77,7 @@ pub fn build_tauri_app() -> Builder<tauri::Wry> {
             build_mcp_send_response,
             build_mcp_continue_response,
             create_test_popup,
+            create_test_icon_popup,
             
             // acemcp命令（迁移至 tools::acemcp::commands）
             crate::mcp::tools::acemcp::commands::get_acemcp_config,

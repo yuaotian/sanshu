@@ -2,6 +2,7 @@ use crate::config::{save_config, save_custom_prompts, load_config, AppState, Rep
 use crate::constants::{window, ui, validation};
 use crate::mcp::types::{build_continue_response, build_send_response, ImageAttachment, PopupRequest};
 use crate::mcp::handlers::create_tauri_popup;
+use crate::mcp::utils::generate_request_id;
 use tauri::{AppHandle, Manager, State};
 
 #[tauri::command]
@@ -512,40 +513,6 @@ pub fn get_cli_args() -> Result<serde_json::Value, String> {
         );
     }
 
-    // 检查是否为图标搜索模式（通过环境变量）
-    if std::env::var("SANSHU_ICON_MODE").ok().as_deref() == Some("true") {
-        result.insert(
-            "icon_mode".to_string(),
-            serde_json::Value::Bool(true),
-        );
-        
-        // 读取图标搜索相关参数
-        if let Ok(query) = std::env::var("SANSHU_ICON_QUERY") {
-            result.insert(
-                "icon_query".to_string(),
-                serde_json::Value::String(query),
-            );
-        }
-        if let Ok(style) = std::env::var("SANSHU_ICON_STYLE") {
-            result.insert(
-                "icon_style".to_string(),
-                serde_json::Value::String(style),
-            );
-        }
-        if let Ok(save_path) = std::env::var("SANSHU_ICON_SAVE_PATH") {
-            result.insert(
-                "icon_save_path".to_string(),
-                serde_json::Value::String(save_path),
-            );
-        }
-        if let Ok(project_root) = std::env::var("SANSHU_ICON_PROJECT_ROOT") {
-            result.insert(
-                "icon_project_root".to_string(),
-                serde_json::Value::String(project_root),
-            );
-        }
-    }
-
     Ok(serde_json::Value::Object(result))
 }
 
@@ -713,14 +680,29 @@ pub fn build_mcp_continue_response(
 /// 创建测试popup窗口
 #[tauri::command]
 pub async fn create_test_popup(request: serde_json::Value) -> Result<String, String> {
-    // 将JSON值转换为PopupRequest
     let popup_request: PopupRequest = serde_json::from_value(request)
         .map_err(|e| format!("解析请求参数失败: {}", e))?;
 
-    // 调用现有的popup创建函数
     match create_tauri_popup(&popup_request) {
         Ok(response) => Ok(response),
         Err(e) => Err(format!("创建测试popup失败: {}", e))
+    }
+}
+
+/// 创建测试图标工坊弹窗
+#[tauri::command]
+pub async fn create_test_icon_popup() -> Result<String, String> {
+    let request = PopupRequest::Icon {
+        id: generate_request_id(),
+        project_root_path: None,
+        query: Some("arrow".to_string()),
+        style: Some("all".to_string()),
+        save_path: None,
+    };
+
+    match create_tauri_popup(&request) {
+        Ok(response) => Ok(response),
+        Err(e) => Err(format!("创建测试图标弹窗失败: {}", e))
     }
 }
 

@@ -15,10 +15,11 @@ pub async fn handle_telegram_only_mcp_request(request_file: &str) -> Result<()> 
     let request_json = std::fs::read_to_string(request_file)?;
     let request: PopupRequest = serde_json::from_str(&request_json)?;
 
-    log_debug!("[telegram-mcp] 请求解析成功: id={}, msg_len={}, options={:?}", 
-        request.id, 
-        request.message.len(),
-        request.predefined_options.as_ref().map(|o| o.len()).unwrap_or(0)
+    log_debug!("[telegram-mcp] 请求解析成功: id={}, popup_type={}, msg_len={}, options={:?}", 
+        request.id(),
+        request.popup_type_name(),
+        request.message().len(),
+        request.predefined_options().map(|o| o.len()).unwrap_or(0)
     );
 
     // 加载完整配置
@@ -52,12 +53,12 @@ pub async fn handle_telegram_only_mcp_request(request_file: &str) -> Result<()> 
     )?;
 
     // 发送消息到Telegram
-    let predefined_options = request.predefined_options.clone().unwrap_or_default();
+    let predefined_options = request.predefined_options().cloned().unwrap_or_default();
 
     log_important!(info, "[telegram-mcp] 开始发送消息: options_count={}", predefined_options.len());
 
     // 发送选项消息
-    core.send_options_message(&request.message, &predefined_options, request.is_markdown)
+    core.send_options_message(request.message(), &predefined_options, request.is_markdown())
         .await?;
 
     // 短暂延迟确保消息顺序
@@ -84,7 +85,7 @@ async fn start_telegram_mcp_listener(
     let mut options_message_id: Option<i32> = None;
     let mut poll_count = 0u32;
 
-    log_debug!("[telegram-mcp] 监听循环启动: request_id={}", request.id);
+    log_debug!("[telegram-mcp] 监听循环启动: request_id={}", request.id());
 
     // 获取当前最新的消息ID作为基准
     if let Ok(updates) = core.bot.get_updates().limit(10).await {
@@ -272,7 +273,7 @@ async fn handle_send_pressed(
     request: &PopupRequest,
 ) -> Result<()> {
     log_important!(info, "[telegram-mcp] 用户点击发送: request_id={}, selected_count={}, input_len={}",
-        request.id, selected_options.len(), user_input.len());
+        request.id(), selected_options.len(), user_input.len());
 
     // 使用统一的响应构建函数
     let selected_list: Vec<String> = selected_options.iter().cloned().collect();
@@ -288,7 +289,7 @@ async fn handle_send_pressed(
         selected_list.clone(),
         vec![],
         vec![],
-        Some(request.id.clone()),
+        Some(request.id().to_string()),
         "telegram",
     );
 
@@ -313,11 +314,11 @@ async fn handle_continue_pressed(
     core: &TelegramCore,
     request: &PopupRequest,
 ) -> Result<()> {
-    log_important!(info, "[telegram-mcp] 用户点击继续: request_id={}", request.id);
+    log_important!(info, "[telegram-mcp] 用户点击继续: request_id={}", request.id());
 
     // 使用统一的继续响应构建函数
     let response = build_continue_response(
-        Some(request.id.clone()),
+        Some(request.id().to_string()),
         "telegram_continue",
     );
 

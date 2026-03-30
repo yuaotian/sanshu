@@ -9,10 +9,12 @@ interface Props {
   showMinimize?: boolean
   showClose?: boolean
   currentTheme?: string
+  customClose?: boolean
 }
 
 interface Emits {
   themeChange: [theme: string]
+  close: []
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -20,6 +22,7 @@ const props = withDefaults(defineProps<Props>(), {
   showMinimize: true,
   showClose: true,
   currentTheme: 'dark',
+  customClose: false,
 })
 
 const emit = defineEmits<Emits>()
@@ -55,7 +58,9 @@ async function handleMinimize() {
 }
 
 async function handleClose() {
-  await appWindow.close()
+  emit('close')
+  if (!props.customClose)
+    await appWindow.close()
 }
 </script>
 

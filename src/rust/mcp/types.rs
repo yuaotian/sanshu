@@ -122,26 +122,87 @@ pub struct TuRequest {
 /// 图标保存结果响应
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IconSaveResponse {
-    /// 保存的图标数量
     pub saved_count: u32,
-    /// 保存路径
     pub save_path: String,
-    /// 保存的图标名称列表
     pub saved_names: Vec<String>,
-    /// 用户是否取消
     pub cancelled: bool,
+    /// 每个图标的完整文件路径（供 agent 使用）
+    #[serde(default)]
+    pub saved_paths: Vec<String>,
+    /// 错误详情（部分保存失败时）
+    #[serde(default)]
+    pub error_message: Option<String>,
 }
 
+/// 统一弹窗请求枚举
+///
+/// 所有 MCP 工具弹窗通过同一通道（`--mcp-request` + 临时 JSON 文件）传递，
+/// 由 `popup_type` 字段区分具体弹窗类型。
 #[derive(Debug, Serialize, Deserialize)]
-pub struct PopupRequest {
-    pub id: String,
-    pub message: String,
-    pub predefined_options: Option<Vec<String>>,
-    pub is_markdown: bool,
-    pub project_root_path: Option<String>,
-    pub uiux_intent: Option<String>,
-    pub uiux_context_policy: Option<String>,
-    pub uiux_reason: Option<String>,
+#[serde(tag = "popup_type")]
+pub enum PopupRequest {
+    /// zhi 交互弹窗
+    #[serde(rename = "zhi")]
+    Zhi {
+        id: String,
+        message: String,
+        predefined_options: Option<Vec<String>>,
+        #[serde(default = "default_is_markdown")]
+        is_markdown: bool,
+        project_root_path: Option<String>,
+        uiux_intent: Option<String>,
+        uiux_context_policy: Option<String>,
+        uiux_reason: Option<String>,
+    },
+    /// tu 图标工坊弹窗
+    #[serde(rename = "icon")]
+    Icon {
+        id: String,
+        #[serde(default)]
+        project_root_path: Option<String>,
+        #[serde(default)]
+        query: Option<String>,
+        #[serde(default)]
+        style: Option<String>,
+        #[serde(default)]
+        save_path: Option<String>,
+    },
+}
+
+impl PopupRequest {
+    pub fn id(&self) -> &str {
+        match self {
+            PopupRequest::Zhi { id, .. } | PopupRequest::Icon { id, .. } => id,
+        }
+    }
+
+    pub fn popup_type_name(&self) -> &str {
+        match self {
+            PopupRequest::Zhi { .. } => "zhi",
+            PopupRequest::Icon { .. } => "icon",
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            PopupRequest::Zhi { message, .. } => message,
+            _ => "",
+        }
+    }
+
+    pub fn predefined_options(&self) -> Option<&Vec<String>> {
+        match self {
+            PopupRequest::Zhi { predefined_options, .. } => predefined_options.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub fn is_markdown(&self) -> bool {
+        match self {
+            PopupRequest::Zhi { is_markdown, .. } => *is_markdown,
+            _ => true,
+        }
+    }
 }
 
 /// 新的结构化响应数据格式
