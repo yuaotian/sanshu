@@ -1040,11 +1040,18 @@ async function startSave(request: IconSaveRequest, isEditorSave = false) {
     savePath: request.savePath,
   }
 
+  const successItems = items.filter(item => item.success)
+  const failedItems = items.filter(item => !item.success)
+
   pendingResponse.value = {
     saved_count: successCount,
     save_path: request.savePath,
-    saved_names: items.filter(item => item.success).map(item => item.name),
+    saved_names: successItems.map(item => item.name),
+    saved_paths: successItems.flatMap(item => item.savedPaths || []),
     cancelled: false,
+    error_message: failedItems.length > 0
+      ? failedItems.map(item => `${item.name}: ${item.error || '未知错误'}`).join('; ')
+      : null,
   }
 
   needsConfirm.value = true
@@ -1097,7 +1104,9 @@ async function handleCancel() {
       saved_count: 0,
       save_path: '',
       saved_names: [],
+      saved_paths: [],
       cancelled: true,
+      error_message: null,
     }
     await invoke('send_mcp_response', { response })
     await invoke('exit_app')

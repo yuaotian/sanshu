@@ -79,6 +79,7 @@ async function showTestMcpPopup() {
   try {
     // 创建测试请求数据
     const testRequest = {
+      popup_type: 'zhi',
       id: `test-${Date.now()}`,
       message: `# 一级标题
 

@@ -236,7 +236,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="relative flex flex-col gap-4 overflow-hidden" :class="mode === 'popup' ? 'h-full' : 'max-h-[calc(85vh-120px)]'">
+  <div class="relative flex flex-col gap-4" :class="mode === 'popup' ? 'h-full overflow-hidden' : ''">
     <!-- 搜索区域 -->
     <div class="flex flex-col gap-3 px-1 pt-1">
       <!-- 搜索栏 -->
@@ -382,6 +382,7 @@ onMounted(async () => {
       :total="total"
       :is-empty="isEmpty"
       :show-empty-state="showEmptyState"
+      :class="mode === 'normal' ? 'min-h-60' : ''"
       @toggle="toggleSelect"
       @copy="handleCopy"
       @dblclick="handleIconDblClick"

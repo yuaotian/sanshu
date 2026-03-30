@@ -1,8 +1,8 @@
 use crate::config::{save_config, save_custom_prompts, load_config, AppState, ReplyConfig, WindowConfig, CustomPrompt, CustomPromptConfig, ShortcutConfig, ShortcutBinding};
 use crate::constants::{window, ui, validation};
-use crate::mcp::types::{build_continue_response, build_send_response, ImageAttachment, PopupRequest, TuRequest};
+use crate::mcp::types::{build_continue_response, build_send_response, ImageAttachment, PopupRequest};
 use crate::mcp::handlers::create_tauri_popup;
-use crate::mcp::handlers::icon_popup::create_icon_popup;
+use crate::mcp::utils::generate_request_id;
 use tauri::{AppHandle, Manager, State};
 
 #[tauri::command]
@@ -513,40 +513,6 @@ pub fn get_cli_args() -> Result<serde_json::Value, String> {
         );
     }
 
-    // 检查是否为图标搜索模式（通过环境变量）
-    if std::env::var("SANSHU_ICON_MODE").ok().as_deref() == Some("true") {
-        result.insert(
-            "icon_mode".to_string(),
-            serde_json::Value::Bool(true),
-        );
-        
-        // 读取图标搜索相关参数
-        if let Ok(query) = std::env::var("SANSHU_ICON_QUERY") {
-            result.insert(
-                "icon_query".to_string(),
-                serde_json::Value::String(query),
-            );
-        }
-        if let Ok(style) = std::env::var("SANSHU_ICON_STYLE") {
-            result.insert(
-                "icon_style".to_string(),
-                serde_json::Value::String(style),
-            );
-        }
-        if let Ok(save_path) = std::env::var("SANSHU_ICON_SAVE_PATH") {
-            result.insert(
-                "icon_save_path".to_string(),
-                serde_json::Value::String(save_path),
-            );
-        }
-        if let Ok(project_root) = std::env::var("SANSHU_ICON_PROJECT_ROOT") {
-            result.insert(
-                "icon_project_root".to_string(),
-                serde_json::Value::String(project_root),
-            );
-        }
-    }
-
     Ok(serde_json::Value::Object(result))
 }
 
@@ -726,16 +692,16 @@ pub async fn create_test_popup(request: serde_json::Value) -> Result<String, Str
 /// 创建测试图标工坊弹窗
 #[tauri::command]
 pub async fn create_test_icon_popup() -> Result<String, String> {
-    let request = TuRequest {
+    let request = PopupRequest::Icon {
+        id: generate_request_id(),
+        project_root_path: None,
         query: Some("arrow".to_string()),
         style: Some("all".to_string()),
         save_path: None,
-        project_root: None,
     };
 
-    match create_icon_popup(&request) {
-        Ok(response) => serde_json::to_string(&response)
-            .map_err(|e| format!("序列化响应失败: {}", e)),
+    match create_tauri_popup(&request) {
+        Ok(response) => Ok(response),
         Err(e) => Err(format!("创建测试图标弹窗失败: {}", e))
     }
 }

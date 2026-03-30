@@ -104,28 +104,28 @@ export function useMcpHandler() {
     try {
       const args = await invoke('get_cli_args') as Record<string, any>
 
-      // 检查是否为图标搜索模式
-      if (args?.icon_mode) {
-        console.log('📦 检测到图标搜索模式')
-        return {
-          isMcp: false,
-          mcpContent: null,
-          isIconMode: true,
-          iconParams: {
-            query: args.icon_query || '',
-            style: args.icon_style || 'all',
-            savePath: args.icon_save_path || 'assets/icons',
-            projectRoot: args.icon_project_root || '',
-          },
-        }
-      }
-
-      // 检查是否为 MCP 请求模式
+      // 检查是否为 MCP 请求模式（统一通道：zhi / icon 都走 --mcp-request）
       if (args?.mcp_request) {
-        // 读取MCP请求文件
-        const content = await invoke('read_mcp_request', { filePath: args.mcp_request })
+        const content = await invoke('read_mcp_request', { filePath: args.mcp_request }) as Record<string, any> | null
 
         if (content) {
+          // 根据 popup_type 分流
+          if (content.popup_type === 'icon') {
+            console.log('📦 检测到图标工坊模式（via --mcp-request）')
+            return {
+              isMcp: false,
+              mcpContent: null,
+              isIconMode: true,
+              iconParams: {
+                query: content.query || '',
+                style: content.style || 'all',
+                savePath: content.save_path || 'assets/icons',
+                projectRoot: content.project_root_path || '',
+              },
+            }
+          }
+
+          // 默认为 zhi 交互弹窗
           await showMcpDialog(content)
         }
         return { isMcp: true, mcpContent: content, isIconMode: false, iconParams: null }
