@@ -101,6 +101,7 @@ export const MCP_TOOLS_CONFIG: ToolPromptConfig[] = [
       howToUse: [
         '每次响应末尾必须调用 `zhi`（汇报/确认/提问），不调用即违规',
         '唯一退出：用户通过 `zhi` 回复"可以结束"时才停止',
+        '每次调用必须传 `project_root_path`（git 根目录），用于状态显示和历史记录',
         '**Subagent restriction**: 子代理(subagent/delegated agent)禁止调用 zhi，仅主代理(root/primary agent)可使用',
       ],
     },

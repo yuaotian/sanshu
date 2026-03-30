@@ -423,6 +423,6 @@ onUpdated(() => {
 }
 
 :deep(.code-block-wrapper pre) {
-  padding-top: 2rem !important;
+  padding-top: 0.75rem !important;
 }
 </style>
