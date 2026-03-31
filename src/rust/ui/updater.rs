@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use crate::config::AppState;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const GITHUB_API_URL: &str = "https://api.github.com/repos/Yueby/sanshu/releases/latest";
 
