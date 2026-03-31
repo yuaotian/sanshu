@@ -1,8 +1,8 @@
 <script setup lang="ts">
+import { open } from '@tauri-apps/plugin-shell'
 import hljs from 'highlight.js'
 import MarkdownIt from 'markdown-it'
 import { useMessage } from 'naive-ui'
-import { open } from '@tauri-apps/plugin-shell'
 import { nextTick, onMounted, onUpdated, watch } from 'vue'
 import type { McpRequest } from '../../types/popup'
 import { sanitizeHtml } from '../../utils/sanitize'

@@ -6,6 +6,7 @@ pub mod font_commands;
 pub mod exit;
 pub mod window_events;
 pub mod exit_handler;
+pub mod updater;
 
 pub use commands::*;
 pub use window::*;
@@ -14,3 +15,4 @@ pub use audio_assets::*;
 pub use exit::*;
 pub use window_events::*;
 pub use exit_handler::*;
+pub use updater::*;

@@ -43,9 +43,10 @@ pub fn parse_mcp_response(response: &str) -> Result<Vec<Content>, McpError> {
 fn parse_structured_response(response: McpResponse) -> Result<Vec<Content>, McpError> {
     let mut result = Vec::new();
 
-    // 图片作为独立 Content 对象（agent 可直接展示）
     for image in &response.images {
         result.push(Content::image(image.data.clone(), image.media_type.clone()));
+        let name = image.filename.as_deref().unwrap_or("unnamed");
+        result.push(Content::text(format!("[Image: {}]", name)));
     }
 
     let combined_text = build_structured_context_text(&response);
@@ -66,20 +67,13 @@ fn parse_structured_response(response: McpResponse) -> Result<Vec<Content>, McpE
 /// 让 agent 能清晰区分用户意图、附件信息和执行约束
 fn build_structured_context_text(response: &McpResponse) -> String {
     let mut sections = Vec::new();
-    let mut user_message_parts = Vec::new();
-    let mut preference_lines = Vec::new();
 
+    // 区域 1：用户消息（纯净，不含条件性上下文）
     if let Some(user_input) = response.user_input.as_ref() {
-        let (user_message, preferences) = split_user_message_and_preferences(user_input);
-        if !user_message.is_empty() {
-            user_message_parts.push(user_message);
+        let trimmed = user_input.trim();
+        if !trimmed.is_empty() {
+            sections.push(trimmed.to_string());
         }
-        preference_lines.extend(preferences);
-    }
-
-    // 区域 1：用户消息
-    if !user_message_parts.is_empty() {
-        sections.push(user_message_parts.join("\n"));
     }
 
     // 区域 2：附加上下文（选项 + 文件引用）
@@ -92,63 +86,29 @@ fn build_structured_context_text(response: &McpResponse) -> String {
         context_lines.push(format!("- 选项: [{}]", options_json.join(", ")));
     }
 
-    let mut resource_index = 0usize;
-    for img in &response.images {
-        resource_index += 1;
-        let name = img.filename.as_deref().unwrap_or("unnamed");
-        context_lines.push(format!("- 资源{}: [image] {}", resource_index, name));
-    }
-    for file in &response.files {
-        resource_index += 1;
-        context_lines.push(format!("- 资源{}: {}", resource_index, format_file_reference_compact(file)));
+    for (i, file) in response.files.iter().enumerate() {
+        context_lines.push(format!("- 资源{}: {}", i + 1, format_file_reference_compact(file)));
     }
 
     if !context_lines.is_empty() {
         sections.push(format!("附加上下文：\n{}", context_lines.join("\n")));
     }
 
-    if !preference_lines.is_empty() {
-        let pref_text: Vec<String> = preference_lines.into_iter()
-            .map(|line| format!("- {}", line))
-            .collect();
-        sections.push(format!("执行偏好：\n{}", pref_text.join("\n")));
+    // 区域 3：条件性执行偏好（独立字段，不再从 user_input 启发式拆分）
+    if let Some(ctx) = response.conditional_context.as_ref() {
+        let trimmed = ctx.trim();
+        if !trimmed.is_empty() {
+            let pref_lines: Vec<String> = trimmed.lines()
+                .map(|line| format!("- {}", line.trim()))
+                .filter(|line| line.len() > 2)
+                .collect();
+            if !pref_lines.is_empty() {
+                sections.push(format!("执行偏好：\n{}", pref_lines.join("\n")));
+            }
+        }
     }
 
     sections.join("\n\n")
-}
-
-/// 将用户输入文本拆分为纯消息和偏好指令
-///
-/// ✔ / ❌ 开头的行被识别为条件性提示词状态，从用户消息中分离出来
-fn split_user_message_and_preferences(user_input: &str) -> (String, Vec<String>) {
-    let mut message_lines = Vec::new();
-    let mut preference_lines = Vec::new();
-
-    for line in user_input.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            if !message_lines.is_empty() {
-                message_lines.push(String::new());
-            }
-            continue;
-        }
-
-        if is_preference_line(trimmed) {
-            preference_lines.push(trimmed.to_string());
-        } else {
-            message_lines.push(trimmed.to_string());
-        }
-    }
-
-    while message_lines.last().is_some_and(|line| line.is_empty()) {
-        message_lines.pop();
-    }
-
-    (message_lines.join("\n"), preference_lines)
-}
-
-fn is_preference_line(line: &str) -> bool {
-    line.starts_with('✔') || line.starts_with('❌')
 }
 
 fn format_file_reference_compact(file: &FileReferenceAttachment) -> String {

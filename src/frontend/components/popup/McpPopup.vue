@@ -359,8 +359,10 @@ async function handleSubmit() {
   submitting.value = true
 
   try {
+    const rawInput = rawUserInput.value.trim() || null
+    const condCtx = conditionalContext.value.trim() || null
     const response = {
-      user_input: userInput.value.trim() || null,
+      user_input: rawInput,
       selected_options: selectedOptions.value,
       images: draggedImages.value.map((imageData, index) => {
         const [header = '', data = ''] = imageData.split(',', 2)
@@ -372,6 +374,7 @@ async function handleSubmit() {
         }
       }),
       files: referencedFiles.value,
+      conditional_context: condCtx,
       metadata: {
         timestamp: new Date().toISOString(),
         request_id: props.request?.id || null,
@@ -443,6 +446,7 @@ async function handleContinue() {
       selected_options: [] as string[],
       images: [] as any[],
       files: [] as FileReferenceAttachment[],
+      conditional_context: null as string | null,
       metadata: {
         timestamp: new Date().toISOString(),
         request_id: props.request?.id || null,
@@ -498,6 +502,7 @@ async function handleEnhance() {
       user_input: buildLocalEnhancePrompt(rawInput),
       selected_options: [],
       images: [],
+      conditional_context: null,
       metadata: {
         timestamp: new Date().toISOString(),
         request_id: props.request?.id || null,

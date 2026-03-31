@@ -150,6 +150,8 @@ pub fn build_tauri_app() -> Builder<tauri::Wry> {
 
             // 版本信息
             get_current_version,
+            check_for_updates,
+            download_and_apply_update,
 
             // 代理配置命令
             crate::network::commands::get_proxy_config,

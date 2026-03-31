@@ -222,8 +222,8 @@ onUnmounted(() => {
       v-else-if="props.showMcpPopup && props.mcpRequest"
       class="flex flex-col w-full h-screen bg-surface text-on-surface select-none overflow-hidden"
     >
-      <!-- 头部 - 固定在顶部，z-index 高于 Naive UI modal 遮罩层以保证拖拽可用 -->
-      <div ref="titleBarRef" class="fixed top-0 left-0 right-0 z-[9999] bg-container-secondary border-b-2 border-border">
+      <!-- 头部 - 固定在顶部 -->
+      <div ref="titleBarRef" class="fixed top-0 left-0 right-0 z-10 bg-container-secondary border-b-2 border-border">
         <PopupHeader
           :current-theme="props.appConfig.theme"
           :loading="false"
