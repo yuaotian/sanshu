@@ -84,6 +84,7 @@ export interface McpResponse {
   selected_options: string[]
   images: ImageAttachment[]
   files: FileReferenceAttachment[]
+  conditional_context: string | null
   metadata: ResponseMetadata
 }
 

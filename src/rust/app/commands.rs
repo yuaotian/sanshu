@@ -16,4 +16,5 @@ pub use crate::ui::{
     font_commands::*,
     exit::*,
     exit_handler::*,
+    updater::*,
 };

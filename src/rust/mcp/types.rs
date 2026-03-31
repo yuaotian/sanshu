@@ -213,6 +213,8 @@ pub struct McpResponse {
     pub images: Vec<ImageAttachment>,
     #[serde(default)]
     pub files: Vec<FileReferenceAttachment>,
+    #[serde(default)]
+    pub conditional_context: Option<String>,
     pub metadata: ResponseMetadata,
 }
 

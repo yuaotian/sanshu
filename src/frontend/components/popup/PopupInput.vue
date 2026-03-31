@@ -8,7 +8,7 @@ import { EditorContent, useEditor } from '@tiptap/vue-3'
 import { useStorage } from '@vueuse/core'
 import { useSortable } from '@vueuse/integrations/useSortable'
 import { useMessage } from 'naive-ui'
-import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useKeyboard } from '../../composables/useKeyboard'
 import { useMcpToolsReactive } from '../../composables/useMcpTools'
 import type { CustomPrompt, FileReferenceAttachment, McpRequest } from '../../types/popup'
@@ -200,10 +200,9 @@ function toggleFloating() {
 // 发送更新事件
 function emitUpdate() {
   const conditionalContent = generateConditionalContent()
-  const finalUserInput = userInput.value + conditionalContent
 
   emit('update', {
-    userInput: finalUserInput,
+    userInput: userInput.value,
     rawUserInput: userInput.value,
     conditionalContext: conditionalContent,
     selectedOptions: [...selectedOptions.value],
@@ -249,12 +248,6 @@ function getReferenceIdentity(ref: FileReferenceAttachment): string {
     : (ref.path || '').trim().toLowerCase()
 }
 
-function getSerializedReferenceText(ref: FileReferenceAttachment): string {
-  const displayName = getReferenceDisplayLabel(ref)
-  const typeTag = ref.type === 'url' ? 'url' : (ref.kind === 'directory' ? 'dir' : 'file')
-  return `[${typeTag}: ${displayName}]`
-}
-
 function getReferenceKindLabel(ref: FileReferenceAttachment): string {
   if (ref.type === 'url') return 'URL'
   if (ref.kind === 'directory') return '目录'
@@ -278,70 +271,81 @@ function addFileReference(file: FileReferenceAttachment): boolean {
   return true
 }
 
-// ---- TipTap JSON 序列化 ----
+// ---- TipTap JSON 单遍遍历：序列化 + 引用/图片同步 ----
 
-function serializeNode(node: any): string {
-  if (node.type === 'text') return node.text || ''
-  if (node.type === 'inlineBadge') return node.attrs?.serialized || ''
-  if (node.type === 'hardBreak') return '\n'
-  if (node.type === 'paragraph') {
-    const inner = (node.content || []).map(serializeNode).join('')
-    return `${inner}\n`
+function computeBadgeTag(attrs: { badgeType: string, label: string, kind?: string }): string {
+  const { badgeType, label } = attrs
+  if (badgeType === 'image') return `[image: ${label}]`
+  if (badgeType === 'url') return `[url: ${label}]`
+  if (attrs.kind === '目录') return `[dir: ${label}]`
+  return `[file: ${label}]`
+}
+
+interface EditorState {
+  text: string
+  refIds: Set<string>
+  imgIds: Set<string>
+}
+
+function extractFromNode(node: any, state: EditorState) {
+  if (node.type === 'text') {
+    state.text += node.text || ''
+    return
   }
-  return (node.content || []).map(serializeNode).join('')
-}
-
-function serializeEditorContent(): string {
-  if (!editor.value) return ''
-  const json = editor.value.getJSON()
-  return serializeNode(json).replace(/\n$/, '')
-}
-
-function walkNodes(node: any, callback: (node: any) => void) {
-  callback(node)
+  if (node.type === 'hardBreak') {
+    state.text += '\n'
+    return
+  }
+  if (node.type === 'inlineBadge') {
+    state.text += node.attrs ? computeBadgeTag(node.attrs) : ''
+    const attrs = node.attrs
+    if (attrs?.badgeType === 'image' && attrs?.imageBadgeId) {
+      const imgId = attrs.imageBadgeId
+      state.imgIds.add(imgId)
+      if (!imageBadgeMap.has(imgId) && imageBadgeArchive.has(imgId)) {
+        const archivedUrl = imageBadgeArchive.get(imgId)!
+        imageBadgeMap.set(imgId, archivedUrl)
+        if (!uploadedImages.value.includes(archivedUrl)) {
+          uploadedImages.value.push(archivedUrl)
+        }
+      }
+    }
+    else if (attrs?.identity) {
+      state.refIds.add(attrs.identity)
+      if (!referencedFiles.value.some(ref => getReferenceIdentity(ref) === attrs.identity) && attrs.referenceData) {
+        try { referencedFiles.value.push(JSON.parse(attrs.referenceData)) }
+        catch {}
+      }
+    }
+    return
+  }
   if (node.content) {
     for (const child of node.content) {
-      walkNodes(child, callback)
+      extractFromNode(child, state)
     }
+  }
+  if (node.type === 'paragraph') {
+    state.text += '\n'
   }
 }
 
-// ---- 数据同步 ----
+function extractEditorState(): EditorState {
+  const state: EditorState = { text: '', refIds: new Set(), imgIds: new Set() }
+  if (!editor.value) return state
+  extractFromNode(editor.value.getJSON(), state)
+  state.text = state.text.replace(/\n$/, '')
+  return state
+}
 
-function syncDataWithEditor() {
+function syncFromEditor() {
   if (!editor.value) return
-  const json = editor.value.getJSON()
-  const presentRefIds = new Set<string>()
-  const presentImgIds = new Set<string>()
+  const state = extractEditorState()
+  userInput.value = state.text
 
-  walkNodes(json, (node: any) => {
-    if (node.type === 'inlineBadge') {
-      const attrs = node.attrs
-      if (attrs?.badgeType === 'image' && attrs?.imageBadgeId) {
-        const imgId = attrs.imageBadgeId
-        presentImgIds.add(imgId)
-        if (!imageBadgeMap.has(imgId) && imageBadgeArchive.has(imgId)) {
-          const archivedUrl = imageBadgeArchive.get(imgId)!
-          imageBadgeMap.set(imgId, archivedUrl)
-          if (!uploadedImages.value.includes(archivedUrl)) {
-            uploadedImages.value.push(archivedUrl)
-          }
-        }
-      }
-      else if (attrs?.identity) {
-        presentRefIds.add(attrs.identity)
-        if (!referencedFiles.value.some(ref => getReferenceIdentity(ref) === attrs.identity) && attrs.referenceData) {
-          try { referencedFiles.value.push(JSON.parse(attrs.referenceData)) }
-          catch {}
-        }
-      }
-    }
-  })
-
-  referencedFiles.value = referencedFiles.value.filter(ref => presentRefIds.has(getReferenceIdentity(ref)))
+  referencedFiles.value = referencedFiles.value.filter(ref => state.refIds.has(getReferenceIdentity(ref)))
 
   for (const [id, dataUrl] of [...imageBadgeMap]) {
-    if (!presentImgIds.has(id)) {
+    if (!state.imgIds.has(id)) {
       imageBadgeMap.delete(id)
       const idx = uploadedImages.value.indexOf(dataUrl)
       if (idx > -1) {
@@ -350,24 +354,25 @@ function syncDataWithEditor() {
       }
     }
   }
+
+  emitUpdate()
 }
 
-function syncFromEditor() {
-  if (!editor.value) return
-  userInput.value = serializeEditorContent()
-  syncDataWithEditor()
-  emitUpdate()
+function serializeEditorContent(): string {
+  return extractEditorState().text
 }
 
 // ---- Badge 插入 ----
 
 function buildRefBadgeAttrs(ref: FileReferenceAttachment): InlineBadgeAttrs {
+  const label = getReferenceDisplayLabel(ref)
+  const kind = getReferenceKindLabel(ref)
   return {
     badgeType: ref.type,
     identity: getReferenceIdentity(ref),
-    label: getReferenceDisplayLabel(ref),
-    kind: getReferenceKindLabel(ref),
-    serialized: getSerializedReferenceText(ref),
+    label,
+    kind,
+    serialized: computeBadgeTag({ badgeType: ref.type, label, kind }),
     referenceData: JSON.stringify(ref),
     imageBadgeId: null,
     title: ref.type === 'url' ? (ref.url || '') : (ref.path || ''),
@@ -440,7 +445,7 @@ function uniqueImageName(rawName: string): string {
 
   const ts = new Date()
   const tag = `${String(ts.getHours()).padStart(2, '0')}${String(ts.getMinutes()).padStart(2, '0')}${String(ts.getSeconds()).padStart(2, '0')}`
-  const base = isGeneric ? `截图-${tag}` : `${stem}-${tag}`
+  const base = isGeneric ? `screenshot-${tag}` : `${stem}-${tag}`
   let candidate = `${base}${ext}`
   let seq = 2
   while (imageNames.value.includes(candidate)) {
@@ -452,6 +457,7 @@ function uniqueImageName(rawName: string): string {
 let nextImageBadgeId = 0
 const imageBadgeMap = new Map<string, string>()
 const imageBadgeArchive = new Map<string, string>()
+const IMAGE_ARCHIVE_LIMIT = 20
 
 function addImageWithBadge(dataUrl: string, name: string): boolean {
   uploadedImages.value.push(dataUrl)
@@ -460,12 +466,21 @@ function addImageWithBadge(dataUrl: string, name: string): boolean {
   imageBadgeMap.set(badgeId, dataUrl)
   imageBadgeArchive.set(badgeId, dataUrl)
 
+  if (imageBadgeArchive.size > IMAGE_ARCHIVE_LIMIT) {
+    for (const [oldId] of imageBadgeArchive) {
+      if (!imageBadgeMap.has(oldId)) {
+        imageBadgeArchive.delete(oldId)
+        if (imageBadgeArchive.size <= IMAGE_ARCHIVE_LIMIT) break
+      }
+    }
+  }
+
   editorInsertBadge(editor.value, {
     badgeType: 'image',
     identity: '',
     label: name,
     kind: '图片',
-    serialized: `[image: ${name}]`,
+    serialized: computeBadgeTag({ badgeType: 'image', label: name }),
     referenceData: '',
     imageBadgeId: badgeId,
     title: name,
@@ -684,10 +699,6 @@ async function loadCustomPrompts() {
       customPrompts.value = (promptConfig.prompts || []).sort((a: CustomPrompt, b: CustomPrompt) => a.sort_order - b.sort_order)
       customPromptEnabled.value = promptConfig.enabled ?? true
       sortablePrompts.value = [...normalPrompts.value]
-
-      if (customPrompts.value.length > 0) {
-        initializeDragSort()
-      }
     }
   }
   catch (error) {
@@ -792,36 +803,9 @@ function generateConditionalContent(): string {
   return conditionalText ? `\n\n${conditionalText}` : ''
 }
 
-// 移除拖拽排序初始化函数
-
-async function initializeDragSort() {
-  await nextTick()
-  await nextTick()
-
-  setTimeout(() => {
-    let targetContainer = promptContainer.value
-
-    if (!targetContainer) {
-      targetContainer = document.querySelector('[data-prompt-container]') as HTMLElement
-    }
-
-    if (!targetContainer) {
-      const containers = document.querySelectorAll('.flex.flex-wrap')
-      for (let i = 0; i < containers.length; i++) {
-        const container = containers[i] as HTMLElement
-        if (container.querySelector('.sortable-item')) {
-          targetContainer = container
-          break
-        }
-      }
-    }
-
-    if (targetContainer) {
-      promptContainer.value = targetContainer
-      start()
-    }
-  }, 500)
-}
+watch(promptContainer, (el) => {
+  if (el) start()
+}, { flush: 'post' })
 
 // 保存prompt排序
 async function savePromptOrder() {

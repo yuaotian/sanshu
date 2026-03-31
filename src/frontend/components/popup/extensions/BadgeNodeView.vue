@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { invoke } from '@tauri-apps/api/core';
-import { NodeViewWrapper } from '@tiptap/vue-3';
-import { useMessage } from 'naive-ui';
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { invoke } from '@tauri-apps/api/core'
+import { NodeViewWrapper } from '@tiptap/vue-3'
+import { useMessage } from 'naive-ui'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 const props = defineProps<{
   node: {
@@ -102,8 +102,18 @@ function onClickOutside(e: MouseEvent) {
   }
 }
 
-onMounted(() => document.addEventListener('click', onClickOutside, true))
-onBeforeUnmount(() => document.removeEventListener('click', onClickOutside, true))
+watch(showMenu, (open) => {
+  if (open) {
+    document.addEventListener('click', onClickOutside, true)
+  }
+  else {
+    document.removeEventListener('click', onClickOutside, true)
+  }
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', onClickOutside, true)
+})
 </script>
 
 <template>
