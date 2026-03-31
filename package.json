@@ -28,6 +28,7 @@
   "dependencies": {
     "@tanstack/vue-virtual": "^3.13.18",
     "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-shell": "^2.3.5",
     "@tiptap/core": "^3.20.5",
     "@tiptap/pm": "^3.20.5",
