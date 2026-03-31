@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use crate::config::AppState;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const GITHUB_API_URL: &str = "https://api.github.com/repos/Yueby/sanshu/releases/latest";
 
@@ -177,7 +177,7 @@ pub async fn download_and_apply_update(app: AppHandle, state: State<'_, AppState
     Ok("更新完成，请重启应用".to_string())
 }
 
-fn extract_zip(archive: &PathBuf, dest: &PathBuf) -> Result<(), String> {
+fn extract_zip(archive: &Path, dest: &Path) -> Result<(), String> {
     let file = std::fs::File::open(archive).map_err(|e| format!("打开 zip 失败: {}", e))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("解析 zip 失败: {}", e))?;
 
@@ -199,7 +199,7 @@ fn extract_zip(archive: &PathBuf, dest: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-fn replace_binaries(temp_dir: &PathBuf, app_dir: &PathBuf) -> Result<(), String> {
+fn replace_binaries(temp_dir: &Path, app_dir: &Path) -> Result<(), String> {
     for entry in std::fs::read_dir(temp_dir).map_err(|e| format!("读取临时目录失败: {}", e))? {
         let entry = entry.map_err(|e| format!("读取条目失败: {}", e))?;
         let file_name = entry.file_name().to_string_lossy().to_string();
