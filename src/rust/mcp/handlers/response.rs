@@ -49,9 +49,14 @@ fn parse_structured_response(response: McpResponse) -> Result<Vec<Content>, McpE
         result.push(Content::text(format!("[Image: {}]", name)));
     }
 
-    let combined_text = build_structured_context_text(&response);
-    if !combined_text.is_empty() {
-        result.push(Content::text(combined_text));
+    let main_text = build_main_text(&response);
+    if !main_text.is_empty() {
+        result.push(Content::text(main_text));
+    }
+
+    let pref_text = build_preference_text(&response);
+    if !pref_text.is_empty() {
+        result.push(Content::text(pref_text));
     }
 
     if result.is_empty() {
@@ -61,14 +66,10 @@ fn parse_structured_response(response: McpResponse) -> Result<Vec<Content>, McpE
     Ok(result)
 }
 
-/// 构建结构化上下文文本
-///
-/// 将响应数据组织为 agent 友好的分区格式，
-/// 让 agent 能清晰区分用户意图、附件信息和执行约束
-fn build_structured_context_text(response: &McpResponse) -> String {
+/// 用户消息 + 附加上下文（选项/文件引用）
+fn build_main_text(response: &McpResponse) -> String {
     let mut sections = Vec::new();
 
-    // 区域 1：用户消息（纯净，不含条件性上下文）
     if let Some(user_input) = response.user_input.as_ref() {
         let trimmed = user_input.trim();
         if !trimmed.is_empty() {
@@ -76,7 +77,6 @@ fn build_structured_context_text(response: &McpResponse) -> String {
         }
     }
 
-    // 区域 2：附加上下文（选项 + 文件引用）
     let mut context_lines = Vec::new();
 
     if !response.selected_options.is_empty() {
@@ -94,6 +94,11 @@ fn build_structured_context_text(response: &McpResponse) -> String {
         sections.push(format!("附加上下文：\n{}", context_lines.join("\n")));
     }
 
+    sections.join("\n\n")
+}
+
+/// 执行偏好（独立 Content::text，与用户消息分隔）
+fn build_preference_text(response: &McpResponse) -> String {
     if let Some(ctx) = response.conditional_context.as_ref() {
         let trimmed = ctx.trim();
         if !trimmed.is_empty() {
@@ -102,12 +107,11 @@ fn build_structured_context_text(response: &McpResponse) -> String {
                 .filter(|line| line.len() > 2)
                 .collect();
             if !pref_lines.is_empty() {
-                sections.push(format!("\n执行偏好：\n{}", pref_lines.join("\n")));
+                return format!("执行偏好：\n{}", pref_lines.join("\n"));
             }
         }
     }
-
-    sections.join("\n\n")
+    String::new()
 }
 
 fn format_file_reference_compact(file: &FileReferenceAttachment) -> String {
