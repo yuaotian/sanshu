@@ -72,9 +72,8 @@ src-tauri/Cargo.lock
 # macOS specific
 *.app/
 
-# scripts
+# temp
 temp/
-scripts/
 *.exe
 # *.md
 !ACEMCP.md
