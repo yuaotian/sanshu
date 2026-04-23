@@ -1,8 +1,7 @@
 # UI/UX Pro Max 规则
 
 来源：
-- skills/ui-ux-pro-max/SKILL.md
-- skills/ui-ux-pro-max/data/*.csv
+- src/rust/assets/resources/ui-ux-pro-max-skill.md
 
 规则类别（按优先级）：
 1. 可访问性（CRITICAL）
@@ -24,10 +23,11 @@
 - 风格选择：风格需匹配产品类型；全站一致；避免用 emoji 作为图标。
 - 图表与数据：图表类型匹配数据形态；提供可访问色板与表格替代。
 
-备注：具体细则与数据规则可在 data/*.csv 中检索与扩展。
+备注：当前主知识源已收敛为 `src/rust/assets/resources/ui-ux-pro-max-skill.md`，由新 `uiux` 单工具统一编排 sou 检索与本地 markdown 降级。
 
 ## 触发与使用（MCP 版）
 
-- 当用户请求涉及 **前端页面 / UI 设计 / 视觉美化 / 组件布局 / 设计系统** 等场景时，先调用 `uiux_suggest` 判断是否建议使用。
-- 若 `uiux_suggest` 返回应建议使用，则通过 `zhi` 弹窗向用户确认，再调用 `uiux_search` 或 `uiux_design_system` 输出结果。
+- 当用户请求涉及 **前端页面 / UI 设计 / 视觉美化 / 组件布局 / 设计系统** 等场景时，直接使用单一工具 `uiux`。
+- `uiux` 优先通过 `sou` 检索项目内的真实页面/组件上下文，以及 `src/rust/assets/resources/ui-ux-pro-max-skill.md` 中的 UI/UX 描述知识；如果 `sou` 不可用，则自动降级到本地 markdown 检索。
+- 推荐显式传入 `action=beautify|describe|audit|design_system`，默认 `beautify`。
 - 保持用户控制：未经 `zhi` 明确确认，不自动执行 UI/UX 相关工具调用。

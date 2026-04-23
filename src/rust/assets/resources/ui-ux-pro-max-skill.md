@@ -522,33 +522,24 @@
 
 ## 使用说明
 
-### 搜索命令
+### 当前推荐调用方式
 
-```bash
-# 搜索产品类型推荐
-python3 .shared/ui-ux-pro-max/scripts/search.py "saas dashboard" --domain product
+当前运行时入口已收敛为单一 MCP 工具 `uiux`，推荐通过如下参数驱动：
 
-# 搜索UI风格
-python3 .shared/ui-ux-pro-max/scripts/search.py "glassmorphism" --domain style
-
-# 搜索字体配对
-python3 .shared/ui-ux-pro-max/scripts/search.py "elegant luxury" --domain typography
-
-# 搜索色彩方案
-python3 .shared/ui-ux-pro-max/scripts/search.py "healthcare" --domain color
-
-# 搜索落地页模式
-python3 .shared/ui-ux-pro-max/scripts/search.py "hero conversion" --domain landing
-
-# 搜索图表类型
-python3 .shared/ui-ux-pro-max/scripts/search.py "trend time-series" --domain chart
-
-# 搜索UX指南
-python3 .shared/ui-ux-pro-max/scripts/search.py "animation accessibility" --domain ux
-
-# 搜索技术栈指南 (默认: html-tailwind)
-python3 .shared/ui-ux-pro-max/scripts/search.py "responsive layout" --stack html-tailwind
+```json
+{
+  "query": "glassmorphism 金融仪表盘 页面美化",
+  "action": "beautify",
+  "project_root_path": "/path/to/project",
+  "current_file_path": "/path/to/project/src/pages/dashboard.vue",
+  "append_project_context": true
+}
 ```
+
+说明：
+- `uiux` 会优先通过 `sou` 检索项目页面/组件上下文与本资料
+- `sou` 不可用时，会自动降级为本地 markdown 检索
+- 常见 `action`：`beautify` / `describe` / `audit` / `design_system`
 
 ### 可用技术栈
 

@@ -372,13 +372,12 @@ impl ServerHandler for ZhiServer {
                     }
                 }
             }
-            // 兼容 Antigravity：UI/UX 工具名使用下划线分隔
-            name if name.starts_with("uiux_") => {
+            "uiux" => {
                 if !self.is_tool_enabled("uiux") {
                     log_important!(warn, "[MCP] 工具已禁用: call_id={}, tool=uiux", call_id);
                     Err(McpError::internal_error("UI/UX 工具已被禁用".to_string(), None))
                 } else {
-                    UiuxTool::call_tool(name, arguments_value).await
+                    UiuxTool::call_tool("uiux", arguments_value).await
                 }
             }
             name if name == "skill_run" || name.starts_with("skill_") => {

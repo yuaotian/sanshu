@@ -11,7 +11,6 @@ use tokio::process::Command;
 use crate::config::load_standalone_config;
 use crate::{log_debug, log_important};
 use crate::mcp::types::SkillRunRequest;
-use crate::mcp::tools::UiuxTool;
 
 /// 技能运行时工具
 /// 负责发现 skills、动态注册 MCP 工具并执行 Python 入口
@@ -96,6 +95,14 @@ impl SkillsTool {
             return Err(McpError::invalid_params("缺少 skill_name".to_string(), None));
         }
 
+        if skill_name.eq_ignore_ascii_case("ui-ux-pro-max") {
+            log_important!(warn, "[skills] 已拒绝旧入口 ui-ux-pro-max，请改用 uiux MCP 工具");
+            return Err(McpError::invalid_params(
+                "ui-ux-pro-max 技能入口已下线，请改用 uiux MCP 工具".to_string(),
+                None,
+            ));
+        }
+
         // 读取技能清单（按需加载，避免启动时全量解析）
         let skills = scan_skills(project_root);
         log_debug!("[skills] 扫描到 {} 个技能", skills.len());
@@ -116,15 +123,6 @@ impl SkillsTool {
             .clone()
             .or_else(|| skill.config.as_ref().and_then(|c| c.default_action.clone()))
             .unwrap_or_else(|| "search".to_string());
-
-        // 特殊处理 ui-ux-pro-max 技能
-        if skill.name == "ui-ux-pro-max" {
-            log_debug!("[skills] 委托给 UiuxTool: action={}", action_name);
-            let result = UiuxTool::call_from_skill(&action_name, &request).await;
-            log_important!(info, "[skills] UiuxTool 完成: skill={}, duration={}ms, success={}", 
-                skill.name, start.elapsed().as_millis(), result.is_ok());
-            return result;
-        }
 
         let (entry_rel, args) = resolve_action_args(&skill, &action_name, &mut request)
             .map_err(|e| {
@@ -271,6 +269,10 @@ fn scan_skills(project_root: &Path) -> Vec<SkillInfo> {
                         .or_else(|| path.file_name().and_then(|s| s.to_str()).map(|s| s.to_string()))
                         .unwrap_or_else(|| "unknown-skill".to_string());
                     let normalized = normalize_skill_name(&name);
+                    if normalized == "ui-ux-pro-max" {
+                        log_debug!("[skills] 跳过内置 ui-ux-pro-max 技能，统一改由 uiux MCP 对外暴露");
+                        continue;
+                    }
                     if skills_map.contains_key(&normalized) {
                         log_debug!("[skills] 跳过重复技能: {}", normalized);
                         continue;

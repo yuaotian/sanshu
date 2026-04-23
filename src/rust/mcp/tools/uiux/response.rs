@@ -43,7 +43,7 @@ impl<T> UiuxResponse<T> {
                 tool: tool.to_string(),
                 lang: lang.as_str().to_string(),
                 request_id: None,
-                version: "v1".to_string(),
+                version: "v2".to_string(),
             },
             data,
             text,

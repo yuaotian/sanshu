@@ -166,11 +166,14 @@
 
 ### 3. 🎨 UI/UX Pro Max 隐藏参数
 
-`uiux` 工具支持一些不在常规提示词中的高级参数，可通过 `custom` 动作调用：
+`uiux` 已收敛为单一 MCP 工具，推荐显式传入以下高级参数：
 
-- **persist**: `true/false` (默认 false)。是否将生成的设计系统或组件保存为本地文件。
-- **output_dir**: 指定保存路径（默认为 `src/design` 或 `src/components`）。
-- **domain**: 在搜索素材时限制特定域名（如 `dribbble.com`）。
+- **action**: `beautify | describe | audit | design_system`（默认 `beautify`）
+- **project_root_path**: 项目根目录，提供后可优先走 `sou` 检索真实页面/组件上下文
+- **current_file_path**: 当前页面/组件路径，用于优先召回当前文件相关上下文
+- **context_query**: 自定义项目上下文检索词；不传则由 `uiux` 自动生成
+- **append_project_context**: `true/false`（默认 `true`），控制是否把项目上下文一并带入结果
+- **output_format**: 兼容字段，当前统一输出 JSON
 
 ### 🧠 zhi (智/审) - 智能代码审查与交互
 
@@ -261,11 +264,13 @@
 - `save_path` 为相对项目根目录路径
 - 工具名称为 `tu`，界面显示为“图标工坊”
 
-### 🧩 skill (技能运行时) - Skill MCP（内置 UI/UX Pro Max）
+### 🧩 skill (技能运行时) - Skill MCP
 
 > **"万技归一，随用随载"**
 
-技能运行时用于发现、加载并执行本地 skills。当前内置 `ui-ux-pro-max` 技能（位于 `skills/ui-ux-pro-max`），支持 UI/UX 设计系统与搜索能力。
+技能运行时用于发现、加载并执行本地 skills。
+说明：内置 `ui-ux-pro-max` 已退出主流程，统一改由核心 MCP 工具 `uiux` 对外提供能力；`skill` 运行时继续保留给其他本地 skills 使用。
+原 `skills/ui-ux-pro-max` legacy 入口文件已移除，不再作为历史调用路径保留。
 
 **技能发现目录（默认扫描）**：
 - 项目内：`.codex/skills`、`.claude/skills`、`.continue/skills`、`.opencode/skills`、`.trae/skills`、`.windsurf/skills`、`.cursor/skills`、`.gemini/skills`、`.roo/skills`、`.kiro/skills`、`.qoder/skills`、`.codebuddy/skills`、`.agent/skills`、`.shared/skills`、`skills/`
@@ -275,31 +280,19 @@
 - 仅支持 Python 入口
 - 默认使用系统 PATH，可通过配置 `skill_python_path` 指定 Python 路径
 
-**使用方式（独立工具）**：
+**当前 UI/UX 推荐使用方式**：
 
 ```json
 {
-  "action": "search",
-  "query": "beauty spa wellness service"
+  "query": "beauty spa wellness service elegant",
+  "action": "beautify",
+  "project_root_path": "/path/to/project",
+  "current_file_path": "/path/to/project/src/pages/home.vue",
+  "append_project_context": true
 }
 ```
 
-**使用方式（通用工具）**：
-
-```json
-{
-  "skill_name": "ui-ux-pro-max",
-  "action": "design_system",
-  "query": "beauty spa wellness service"
-}
-```
-
-**ui-ux-pro-max 支持的动作**：
-- `search`：通用检索
-- `design_system`：生成设计系统推荐
-- `custom`：允许传递自定义参数
-
-技能入口由 `skill.config.json` 声明，未提供清单时会按约定式入口兜底（例如 `scripts/search.py`）。
+技能入口仍由 `skill.config.json` 声明；内置 UI/UX 能力已不再通过 skill 入口暴露。
 
 ---
 

@@ -739,6 +739,36 @@ pub fn default_custom_prompts() -> Vec<CustomPrompt> {
             current_state: true, // 默认开启（与 TOOL_CONTEXT7 默认状态保持一致）
             linked_mcp_tool: Some("context7".to_string()), // 关联到 context7 MCP 工具
         },
+        CustomPrompt {
+            id: "default_13".to_string(),
+            name: "是否通过三术确认关键节点".to_string(),
+            content: "".to_string(),
+            description: Some("提醒 AI 通过 zhi 展示关键提问、方案确认和完成确认".to_string()),
+            sort_order: 13,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            r#type: "conditional".to_string(),
+            condition_text: Some("是否通过三术确认关键节点".to_string()),
+            template_true: Some("✔️请记住，所有关键提问、方案确认和完成确认都必须通过 zhi 展示".to_string()),
+            template_false: Some("".to_string()),
+            current_state: true, // zhi 是核心工具，默认提醒开启
+            linked_mcp_tool: Some("zhi".to_string()),
+        },
+        CustomPrompt {
+            id: "default_14".to_string(),
+            name: "是否优先使用 UI/UX 单工具".to_string(),
+            content: "".to_string(),
+            description: Some("提醒 AI 涉及页面美化、UI 描述、设计系统或审查时优先使用 uiux".to_string()),
+            sort_order: 14,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            r#type: "conditional".to_string(),
+            condition_text: Some("是否优先使用 UI/UX 单工具".to_string()),
+            template_true: Some("✔️请记住，涉及页面美化、UI 描述、设计系统或 UI 审查时，优先使用单一 uiux 工具，并参考它返回的 prompt、uiux_hits 与 project_context".to_string()),
+            template_false: Some("".to_string()),
+            current_state: true, // uiux 是当前主链路，默认提醒开启
+            linked_mcp_tool: Some("uiux".to_string()),
+        },
     ]
 }
 

@@ -1,15 +1,7 @@
-// UI/UX Pro Max 文案本地化
-// 仅提供 zh/en 简洁文案，避免过度设计
+// UI/UX 文案本地化
+// 仅保留单工具 uiux 所需的简洁文案
 
-use super::engine::{SearchResult, SuggestResult};
-use super::types::{UiuxLang, UiuxMode};
-
-pub fn localize_text(lang: UiuxLang, zh: &str, en: &str) -> String {
-    match lang {
-        UiuxLang::Zh => zh.to_string(),
-        UiuxLang::En => en.to_string(),
-    }
-}
+use super::types::{UiuxAction, UiuxLang};
 
 pub fn error_text(lang: UiuxLang, message: &str) -> String {
     match lang {
@@ -18,59 +10,43 @@ pub fn error_text(lang: UiuxLang, message: &str) -> String {
     }
 }
 
-pub fn search_summary(lang: UiuxLang, mode: UiuxMode, result: &SearchResult) -> String {
-    if let Some(err) = &result.error {
-        return error_text(lang, err);
-    }
+pub fn success_summary(
+    lang: UiuxLang,
+    action: UiuxAction,
+    has_project_context: bool,
+    degraded: bool,
+) -> String {
+    let action_text = match (lang, action) {
+        (UiuxLang::Zh, UiuxAction::Beautify) => "UI 美化提示词",
+        (UiuxLang::Zh, UiuxAction::Describe) => "UI 描述提示词",
+        (UiuxLang::Zh, UiuxAction::Audit) => "UI 审查提示词",
+        (UiuxLang::Zh, UiuxAction::DesignSystem) => "设计系统提示词",
+        (UiuxLang::En, UiuxAction::Beautify) => "UI beautify prompt",
+        (UiuxLang::En, UiuxAction::Describe) => "UI description prompt",
+        (UiuxLang::En, UiuxAction::Audit) => "UI audit prompt",
+        (UiuxLang::En, UiuxAction::DesignSystem) => "design system prompt",
+    };
 
-    match mode {
-        UiuxMode::Beautify => localize_text(lang, "已生成 UI 美化建议。", "UI beautify suggestions generated."),
-        _ => {
-            let zh = format!("已获取检索结果，领域：{}，共 {} 条。", result.domain, result.count);
-            let en = format!("Search completed. Domain: {}. Results: {}.", result.domain, result.count);
-            localize_text(lang, &zh, &en)
+    match lang {
+        UiuxLang::Zh => {
+            let mut text = format!("已生成 {}。", action_text);
+            if has_project_context {
+                text.push_str(" 已追加项目上下文。");
+            }
+            if degraded {
+                text.push_str(" 当前已降级到本地 markdown 检索。");
+            }
+            text
         }
-    }
-}
-
-pub fn stack_summary(lang: UiuxLang, result: &SearchResult) -> String {
-    if let Some(err) = &result.error {
-        return error_text(lang, err);
-    }
-
-    let stack = result.stack.clone().unwrap_or_else(|| "-".to_string());
-    let zh = format!("已获取栈指南：{}，共 {} 条。", stack, result.count);
-    let en = format!("Stack guidelines: {}. Results: {}.", stack, result.count);
-    localize_text(lang, &zh, &en)
-}
-
-pub fn design_system_summary(lang: UiuxLang, project_name: &str, persisted: bool) -> String {
-    if persisted {
-        let zh = format!("已生成并写入设计系统：{}。", project_name);
-        let en = format!("Design system generated and persisted: {}.", project_name);
-        localize_text(lang, &zh, &en)
-    } else {
-        let zh = format!("已生成设计系统建议：{}。", project_name);
-        let en = format!("Design system recommendations generated: {}.", project_name);
-        localize_text(lang, &zh, &en)
-    }
-}
-
-pub fn beautify_summary(lang: UiuxLang) -> String {
-    localize_text(lang, "已生成 UI 美化建议。", "UI beautify suggestions generated.")
-}
-
-pub fn suggest_summary(lang: UiuxLang, result: &SuggestResult) -> String {
-    if result.should_suggest {
-        let keywords = if result.matched_keywords.is_empty() {
-            "-".to_string()
-        } else {
-            result.matched_keywords.join(", ")
-        };
-        let zh = format!("建议使用 UI/UX 工具，匹配关键词：{}。", keywords);
-        let en = format!("UI/UX tool suggested. Matched keywords: {}.", keywords);
-        localize_text(lang, &zh, &en)
-    } else {
-        localize_text(lang, "暂无明显 UI/UX 需求。", "No strong UI/UX signal detected.")
+        UiuxLang::En => {
+            let mut text = format!("{} generated.", action_text);
+            if has_project_context {
+                text.push_str(" Project context appended.");
+            }
+            if degraded {
+                text.push_str(" Fallback switched to local markdown retrieval.");
+            }
+            text
+        }
     }
 }
