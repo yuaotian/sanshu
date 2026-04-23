@@ -2386,7 +2386,6 @@ fn append_error(dst: &mut Option<String>, msg: String) {
 struct ProjectUploadResult {
     elapsed_ms: u64,
     planned_files: usize,
-    tested_files: usize,
     total_files: usize,
     skipped_files: usize,
     blob_count: usize,
@@ -2421,7 +2420,6 @@ async fn upload_project_for_speed_test(
     let start = std::time::Instant::now();
 
     let mut batch: Vec<UploadBlob> = Vec::with_capacity(batch_size);
-    let mut tested_files = 0usize;
     let mut skipped_files = 0usize;
     let mut blob_count = 0usize;
     let mut total_bytes = 0u64;
@@ -2446,7 +2444,6 @@ async fn upload_project_for_speed_test(
             }
         };
 
-        tested_files += 1;
         let blobs = split_content_for_speed_test(&file.path, &content, max_lines_per_blob);
         blob_count += blobs.len();
 
@@ -2469,7 +2466,6 @@ async fn upload_project_for_speed_test(
     Ok(ProjectUploadResult {
         elapsed_ms,
         planned_files: files_to_test,
-        tested_files,
         total_files,
         skipped_files,
         blob_count,
