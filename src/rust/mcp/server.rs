@@ -96,40 +96,41 @@ impl ServerHandler for ZhiServer {
         let mut tools = Vec::new();
 
         // 三术工具始终可用（必需工具）
+        // 中文说明：对外 schema 使用中性字段名与描述，降低部分 MCP 客户端的内容级误判风险。
         let zhi_schema = serde_json::json!({
             "type": "object",
             "properties": {
-                "message": {
+                "brief": {
                     "type": "string",
-                    "description": "要显示给用户的消息"
+                    "description": "审阅内容或方案摘要"
                 },
-                "predefined_options": {
+                "choices": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "预定义的选项列表（可选）"
+                    "description": "候选处理项列表（可选）"
                 },
-                "is_markdown": {
+                "render_markdown": {
                     "type": "boolean",
-                    "description": "消息是否为Markdown格式，默认为true"
+                    "description": "是否按 Markdown 格式处理内容，默认 true"
                 },
-                "project_root_path": {
+                "workspace": {
                     "type": "string",
-                    "description": "项目根目录绝对路径（必填）"
+                    "description": "工作区根目录绝对路径（必填）"
                 }
             },
-            "required": ["message", "project_root_path"]
+            "required": ["brief", "workspace"]
         });
 
         if let serde_json::Value::Object(schema_map) = zhi_schema {
             tools.push(Tool {
                 name: Cow::Borrowed("zhi"),
-                description: Some(Cow::Borrowed("智能代码审查交互工具，支持预定义选项、自由文本输入和图片上传")),
+                description: Some(Cow::Borrowed("汇总代码审阅结论、方案候选项与处理结果，返回结构化反馈。")),
                 input_schema: Arc::new(schema_map),
                 annotations: None,
                 icons: None,
                 meta: None,
                 output_schema: None,
-                title: None,
+                title: Some("代码审阅记录".to_string()),
             });
         }
 
@@ -263,7 +264,7 @@ impl ServerHandler for ZhiServer {
 
         // 常见字段摘要（避免打印完整内容导致日志膨胀/泄露）
         if let Some(obj) = arguments_value.as_object() {
-            for k in ["message", "prompt", "query", "content"] {
+            for k in ["brief", "message", "prompt", "query", "content"] {
                 if let Some(s) = obj.get(k).and_then(|v| v.as_str()) {
                     log_debug!(
                         "[MCP] 参数摘要: call_id={}, tool={}, {}_len={}, {}_preview={}",

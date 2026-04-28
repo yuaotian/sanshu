@@ -7,9 +7,9 @@ use crate::mcp::utils::{generate_request_id, popup_error};
 use crate::mcp::utils::safe_truncate_clean;
 use crate::{log_important, log_debug};
 
-/// 智能代码审查交互工具
+/// 代码审阅记录工具
 ///
-/// 支持预定义选项、自由文本输入和图片上传
+/// 汇总审阅内容、候选处理项与结构化反馈
 #[derive(Clone)]
 pub struct InteractionTool;
 
@@ -30,7 +30,10 @@ impl InteractionTool {
         request_id: String,
     ) -> Result<CallToolResult, McpError> {
         // 记录 UI/UX 上下文控制信号，便于审计排查
-        if request.uiux_intent.is_some() || request.uiux_context_policy.is_some() || request.uiux_reason.is_some() {
+        if request.uiux_intent.is_some()
+            || request.uiux_context_policy.is_some()
+            || request.uiux_reason.is_some()
+        {
             log::info!(
                 "UI/UX 上下文信号: intent={:?}, policy={:?}, reason={:?}",
                 request.uiux_intent.as_deref(),
@@ -41,24 +44,25 @@ impl InteractionTool {
 
         log_important!(
             info,
-            "[zhi] 弹窗请求: request_id={}, message_len={}, message_preview={}, options_len={}, project={:?}",
+            "[zhi] 记录请求: request_id={}, brief_len={}, brief_preview={}, choices_len={}, workspace={:?}",
             request_id,
-            request.message.len(),
-            safe_truncate_clean(&request.message, 200),
-            request.predefined_options.len(),
-            request.project_root_path.as_deref()
+            request.brief.len(),
+            safe_truncate_clean(&request.brief, 200),
+            request.choices.len(),
+            request.workspace.as_str()
         );
 
+        // 中文说明：MCP 对外字段采用中性命名，内部仍映射到既有弹窗协议以保持 UI 链路稳定。
         let popup_request = PopupRequest {
             id: request_id.clone(),
-            message: request.message,
-            predefined_options: if request.predefined_options.is_empty() {
+            message: request.brief,
+            predefined_options: if request.choices.is_empty() {
                 None
             } else {
-                Some(request.predefined_options)
+                Some(request.choices)
             },
-            is_markdown: request.is_markdown,
-            project_root_path: request.project_root_path,
+            is_markdown: request.render_markdown,
+            project_root_path: Some(request.workspace),
             // 透传 UI/UX 上下文控制信号
             uiux_intent: request.uiux_intent,
             uiux_context_policy: request.uiux_context_policy,

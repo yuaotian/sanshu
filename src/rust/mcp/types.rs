@@ -3,17 +3,16 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ZhiRequest {
-    #[schemars(description = "要显示给用户的消息")]
-    pub message: String,
-    #[schemars(description = "预定义的选项列表（可选）")]
+    #[schemars(description = "审阅内容或方案摘要")]
+    pub brief: String,
+    #[schemars(description = "候选处理项列表（可选）")]
     #[serde(default)]
-    pub predefined_options: Vec<String>,
-    #[schemars(description = "消息是否为Markdown格式，默认为true")]
-    #[serde(default = "default_is_markdown")]
-    pub is_markdown: bool,
-    #[schemars(description = "项目根路径（可选，用于索引状态可视化）")]
-    #[serde(default)]
-    pub project_root_path: Option<String>,
+    pub choices: Vec<String>,
+    #[schemars(description = "是否按 Markdown 格式处理内容，默认 true")]
+    #[serde(default = "default_render_markdown")]
+    pub render_markdown: bool,
+    #[schemars(description = "工作区根目录绝对路径（必填）")]
+    pub workspace: String,
     #[schemars(description = "UI/UX 意图标记：none|beautify|page_refactor|uiux_search")]
     #[serde(default)]
     pub uiux_intent: Option<String>,
@@ -25,7 +24,7 @@ pub struct ZhiRequest {
     pub uiux_reason: Option<String>,
 }
 
-fn default_is_markdown() -> bool {
+fn default_render_markdown() -> bool {
     true
 }
 
