@@ -18,9 +18,55 @@ use crate::mcp::utils::safe_truncate_clean;
 use crate::mcp::utils::generate_request_id;
 use crate::{log_important, log_debug};
 
+const WINDSURF_ZHI_ALIAS: &str = "work_note";
+const MCP_PROFILE_ENV: &str = "SANSHU_MCP_PROFILE";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum McpClientProfile {
+    Standard,
+    Windsurf,
+}
+
+impl McpClientProfile {
+    fn detect() -> Self {
+        if let Ok(raw) = std::env::var(MCP_PROFILE_ENV) {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "windsurf" | "compat" | "alias" => return Self::Windsurf,
+                "standard" | "zhi" => return Self::Standard,
+                "" => {}
+                other => {
+                    log_important!(
+                        warn,
+                        "未知 MCP profile: {}={}，将继续按可执行文件名自动判断",
+                        MCP_PROFILE_ENV,
+                        other
+                    );
+                }
+            }
+        }
+
+        // 中文说明：`sanshu` 是面向不支持中文命令的 MCP 客户端的 ASCII 入口。
+        if std::env::current_exe()
+            .ok()
+            .and_then(|path| path.file_stem().and_then(|name| name.to_str()).map(str::to_string))
+            .map(|stem| stem.eq_ignore_ascii_case("sanshu"))
+            .unwrap_or(false)
+        {
+            return Self::Windsurf;
+        }
+
+        Self::Standard
+    }
+
+    fn is_windsurf(self) -> bool {
+        matches!(self, Self::Windsurf)
+    }
+}
+
 #[derive(Clone)]
 pub struct ZhiServer {
     enabled_tools: HashMap<String, bool>,
+    mcp_profile: McpClientProfile,
 }
 
 impl Default for ZhiServer {
@@ -39,8 +85,10 @@ impl ZhiServer {
                 crate::config::default_mcp_tools()
             }
         };
+        let mcp_profile = McpClientProfile::detect();
+        log_important!(info, "MCP profile: {:?}", mcp_profile);
 
-        Self { enabled_tools }
+        Self { enabled_tools, mcp_profile }
     }
 
     /// 检查工具是否启用 - 动态读取最新配置
@@ -58,6 +106,30 @@ impl ZhiServer {
                 self.enabled_tools.get(tool_name).copied().unwrap_or(true)
             }
         }
+    }
+
+    fn zhi_public_tool_name(&self) -> &'static str {
+        if self.mcp_profile.is_windsurf() {
+            WINDSURF_ZHI_ALIAS
+        } else {
+            "zhi"
+        }
+    }
+
+    fn zhi_public_title(&self) -> &'static str {
+        if self.mcp_profile.is_windsurf() {
+            "Work Note"
+        } else {
+            "代码审阅记录"
+        }
+    }
+
+    fn zhi_public_description(&self) -> &'static str {
+        "记录方案摘要、候选项与处理结果，返回结构化数据。"
+    }
+
+    fn is_zhi_entry(tool_name: &str) -> bool {
+        tool_name == "zhi" || tool_name == WINDSURF_ZHI_ALIAS
     }
 }
 
@@ -98,6 +170,7 @@ impl ServerHandler for ZhiServer {
 
         // 三术工具始终可用（必需工具）
         // 中文说明：对外 schema 使用中性字段名与描述，降低部分 MCP 客户端的内容级误判风险。
+        let zhi_tool_name = self.zhi_public_tool_name();
         let zhi_schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -124,14 +197,14 @@ impl ServerHandler for ZhiServer {
 
         if let serde_json::Value::Object(schema_map) = zhi_schema {
             tools.push(Tool {
-                name: Cow::Borrowed("zhi"),
-                description: Some(Cow::Borrowed("汇总代码审阅结论、方案候选项与处理结果，返回结构化反馈。")),
+                name: Cow::Borrowed(zhi_tool_name),
+                description: Some(Cow::Borrowed(self.zhi_public_description())),
                 input_schema: Arc::new(schema_map),
                 annotations: None,
                 icons: None,
                 meta: None,
                 output_schema: None,
-                title: Some("代码审阅记录".to_string()),
+                title: Some(self.zhi_public_title().to_string()),
             });
         }
 
@@ -281,7 +354,7 @@ impl ServerHandler for ZhiServer {
         }
 
         let result: Result<CallToolResult, McpError> = match tool_name.as_str() {
-            "zhi" => {
+            tool if Self::is_zhi_entry(tool) => {
                 match serde_json::from_value::<ZhiRequest>(arguments_value) {
                     Ok(zhi_request) => {
                         // 调用三术工具（将 call_id 作为 request.id 贯穿到 GUI/响应）
@@ -290,8 +363,9 @@ impl ServerHandler for ZhiServer {
                     Err(e) => {
                         log_important!(
                             warn,
-                            "[MCP] 参数解析失败: call_id={}, tool=zhi, error={}",
+                            "[MCP] 参数解析失败: call_id={}, tool={}, error={}",
                             call_id,
+                            tool,
                             e
                         );
                         Err(McpError::invalid_params(format!("参数解析失败: {}", e), None))

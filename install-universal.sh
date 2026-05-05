@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 三术 MCP 工具安装脚本 - 支持 macOS、Linux
-# 只需要构建和安装两个CLI工具即可运行MCP
+# 只需要构建和安装 CLI 工具即可运行 MCP
 
 set -e
 
@@ -58,8 +58,11 @@ if [[ "$OS" == "macos" ]]; then
     echo "📋 安装 CLI 工具到 $INSTALL_DIR..."
     sudo cp "target/release/等一下" "$INSTALL_DIR/"
     sudo cp "target/release/三术" "$INSTALL_DIR/"
+    # 中文说明：sanshu 是三术的 ASCII 兼容副本，供不稳定支持中文命令的 MCP 客户端使用。
+    sudo cp "target/release/三术" "$INSTALL_DIR/sanshu"
     sudo chmod +x "$INSTALL_DIR/等一下"
     sudo chmod +x "$INSTALL_DIR/三术"
+    sudo chmod +x "$INSTALL_DIR/sanshu"
 
     echo "✅ CLI 工具已安装到 $INSTALL_DIR"
 
@@ -75,8 +78,11 @@ elif [[ "$OS" == "linux" ]]; then
     # 复制CLI工具
     cp "target/release/等一下" "$BIN_DIR/"
     cp "target/release/三术" "$BIN_DIR/"
+    # 中文说明：sanshu 是三术的 ASCII 兼容副本，供不稳定支持中文命令的 MCP 客户端使用。
+    cp "target/release/三术" "$BIN_DIR/sanshu"
     chmod +x "$BIN_DIR/等一下"
     chmod +x "$BIN_DIR/三术"
+    chmod +x "$BIN_DIR/sanshu"
 
     echo "✅ CLI 工具已安装到 $BIN_DIR"
 
@@ -99,7 +105,8 @@ echo "🎉 三术 MCP 工具安装完成！"
 echo ""
 echo "📋 使用方法："
 echo "  💻 MCP 服务器模式:"
-echo "    三术                            - 启动 MCP 服务器"
+echo "    sanshu                          - 启动 MCP 服务器（推荐，ASCII 兼容入口）"
+echo "    三术                            - 启动 MCP 服务器（中文兼容入口）"
 echo ""
 echo "  🎨 弹窗界面模式:"
 echo "    等一下                          - 启动设置界面"
@@ -111,17 +118,17 @@ echo ""
 cat << 'EOF'
 {
   "mcpServers": {
-    "三术": {
-      "command": "三术"
+    "sanshu": {
+      "command": "sanshu"
     }
   }
 }
 EOF
 echo ""
 echo "💡 重要说明："
-echo "  • 两个CLI工具必须在同一目录下才能正常工作"
-echo "  • '三术' 是MCP服务器，'等一下' 是弹窗界面"
-echo "  • 无需安装完整应用，只需要这两个CLI工具即可"
+echo "  • CLI 工具必须在同一目录下才能正常工作"
+echo "  • 'sanshu' 是推荐 MCP 服务器入口，'三术' 是中文兼容入口，'等一下' 是弹窗界面"
+echo "  • 无需安装完整应用，只需要这些 CLI 工具即可"
 echo ""
 
 if [[ "$OS" == "macos" ]]; then

@@ -43,20 +43,26 @@ Write-Host "🔨 构建二进制文件..." -ForegroundColor Yellow
 cargo build --release
 
 # 检查构建结果
-$BinaryPath = "target\release\三术.exe"
-if (-not (Test-Path $BinaryPath)) {
-    Write-Host "❌ 二进制文件构建失败: $BinaryPath" -ForegroundColor Red
-    exit 1
+$UiBinaryPath = "target\release\等一下.exe"
+$McpBinaryPath = "target\release\三术.exe"
+foreach ($PathToCheck in @($UiBinaryPath, $McpBinaryPath)) {
+    if (-not (Test-Path $PathToCheck)) {
+        Write-Host "❌ 二进制文件构建失败: $PathToCheck" -ForegroundColor Red
+        exit 1
+    }
 }
 
-Write-Host "✅ 二进制文件构建成功: $BinaryPath" -ForegroundColor Green
+Write-Host "✅ 二进制文件构建成功:" -ForegroundColor Green
+Write-Host "   UI:  $UiBinaryPath" -ForegroundColor Green
+Write-Host "   MCP: $McpBinaryPath" -ForegroundColor Green
 
 # 如果只构建不安装，则在这里退出
 if ($BuildOnly) {
     Write-Host ""
     Write-Host "🎉 三术 构建完成！" -ForegroundColor Green
     Write-Host ""
-    Write-Host "📋 二进制文件位置: $BinaryPath" -ForegroundColor Cyan
+    Write-Host "📋 UI 二进制文件位置:  $UiBinaryPath" -ForegroundColor Cyan
+    Write-Host "📋 MCP 二进制文件位置: $McpBinaryPath" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "如需安装，请重新运行脚本而不使用 -BuildOnly 参数。"
     exit 0
@@ -71,14 +77,15 @@ Write-Host "📁 创建安装目录: $InstallDir" -ForegroundColor Yellow
 New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
 
 # 复制二进制文件
-$MainExe = "$BinDir\sanshu.exe"
+$AsciiMcpExe = "$BinDir\sanshu.exe"
 $UiExe = "$BinDir\等一下.exe"
 $McpExe = "$BinDir\三术.exe"
 
 Write-Host "📋 安装二进制文件..." -ForegroundColor Yellow
-Copy-Item $BinaryPath $MainExe -Force
-Copy-Item $BinaryPath $UiExe -Force
-Copy-Item $BinaryPath $McpExe -Force
+# 中文说明：sanshu.exe 是三术.exe 的 ASCII 兼容副本，供不稳定支持中文命令的 MCP 客户端使用。
+Copy-Item $UiBinaryPath $UiExe -Force
+Copy-Item $McpBinaryPath $McpExe -Force
+Copy-Item $McpBinaryPath $AsciiMcpExe -Force
 
 Write-Host "✅ 二进制文件已安装到: $BinDir" -ForegroundColor Green
 
@@ -109,7 +116,7 @@ $ShortcutPath = "$StartMenuDir\三术.lnk"
 try {
     $WshShell = New-Object -ComObject WScript.Shell
     $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
-    $Shortcut.TargetPath = $MainExe
+    $Shortcut.TargetPath = $UiExe
     $Shortcut.WorkingDirectory = $InstallDir
     $Shortcut.Description = "三术 - 道生一，一生二，二生三，三生万物"
     # 图标已移除，使用默认图标
@@ -128,20 +135,22 @@ Write-Host "  🖥️  GUI模式: 从开始菜单打开 '三术'" -ForegroundCol
 Write-Host "  💻 命令行模式:" -ForegroundColor White
 Write-Host "    等一下                          - 启动 UI 界面" -ForegroundColor White
 Write-Host "    等一下 --mcp-request file       - MCP 弹窗模式" -ForegroundColor White
-Write-Host "    三术                            - 启动 MCP 服务器" -ForegroundColor White
+Write-Host "    sanshu                          - 启动 MCP 服务器（推荐，ASCII 兼容入口）" -ForegroundColor White
+Write-Host "    三术                            - 启动 MCP 服务器（中文兼容入口）" -ForegroundColor White
 Write-Host ""
 Write-Host "📝 配置 MCP 客户端：" -ForegroundColor Cyan
 Write-Host "将以下内容添加到您的 MCP 客户端配置中：" -ForegroundColor White
 Write-Host ""
-Write-Host @"
+$McpClientConfig = @'
 {
   "mcpServers": {
-    "三术": {
-      "command": "三术"
+    "sanshu": {
+      "command": "sanshu"
     }
   }
 }
-"@ -ForegroundColor Gray
+'@
+Write-Host $McpClientConfig -ForegroundColor Gray
 Write-Host ""
 Write-Host "📁 安装位置: $InstallDir" -ForegroundColor Cyan
 Write-Host "🔗 命令行工具: $BinDir" -ForegroundColor Cyan

@@ -748,6 +748,17 @@ fn extract_zip(archive_path: &PathBuf, extract_to: &PathBuf) -> Result<Vec<PathB
     Ok(extracted_files)
 }
 
+/// 返回 MCP 中文入口对应的 ASCII 兼容别名。
+///
+/// 中文说明：部分 MCP 客户端或终端对中文命令解析不稳定，因此更新时需要同步生成 `sanshu` 入口。
+fn mcp_ascii_alias(file_name: &str) -> Option<&'static str> {
+    match file_name {
+        "三术.exe" => Some("sanshu.exe"),
+        "三术" => Some("sanshu"),
+        _ => None,
+    }
+}
+
 /// Windows 平台替换所有文件（使用批处理脚本延迟替换）
 ///
 /// # 参数
@@ -823,6 +834,35 @@ fn replace_all_files_windows(
         script_lines.push("".to_string());
 
         log::info!("📝 添加文件替换命令: {} -> {}", source_path, target_path_str);
+
+        if let Some(alias_file_name) = mcp_ascii_alias(file_name) {
+            let alias_target_path = app_dir.join(alias_file_name);
+            let alias_target_path_str = alias_target_path.display().to_string();
+            let alias_backup_path = app_dir.join(format!("{}.bak", alias_file_name));
+            let alias_backup_path_str = alias_backup_path.display().to_string();
+
+            // 中文说明：`sanshu.exe` 与 `三术.exe` 内容一致，用于兼容不稳定支持中文命令的 MCP 客户端。
+            script_lines.push(format!("if exist \"{}\" (", alias_target_path_str));
+            script_lines.push(format!(
+                "    copy /y \"{}\" \"{}\" >nul",
+                alias_target_path_str,
+                alias_backup_path_str
+            ));
+            script_lines.push(")".to_string());
+            script_lines.push(format!("copy /y \"{}\" \"{}\"", source_path, alias_target_path_str));
+            script_lines.push(format!("if errorlevel 1 ("));
+            script_lines.push(format!("    echo 复制 {} 失败", alias_file_name));
+            script_lines.push(format!(") else ("));
+            script_lines.push(format!("    echo 已更新: {}", alias_file_name));
+            script_lines.push(format!(")"));
+            script_lines.push("".to_string());
+
+            log::info!(
+                "📝 添加 MCP ASCII 别名替换命令: {} -> {}",
+                source_path,
+                alias_target_path_str
+            );
+        }
     }
 
     // 清理临时目录
@@ -909,6 +949,39 @@ fn replace_all_files_unix(app_dir: &PathBuf, files: &[PathBuf]) -> Result<(), St
         }
 
         log::info!("✅ 已更新: {}", file_name);
+
+        if let Some(alias_file_name) = mcp_ascii_alias(file_name) {
+            let alias_target_path = app_dir.join(alias_file_name);
+
+            // 中文说明：`sanshu` 与 `三术` 内容一致，优先给 MCP 客户端使用 ASCII 命令名。
+            if alias_target_path.exists() {
+                let alias_backup_path = app_dir.join(format!("{}.bak", alias_file_name));
+                fs::copy(&alias_target_path, &alias_backup_path)
+                    .map_err(|e| format!("备份别名文件失败 {}: {}", alias_file_name, e))?;
+                log::info!(
+                    "💾 已备份别名: {} -> {}",
+                    alias_target_path.display(),
+                    alias_backup_path.display()
+                );
+            }
+
+            fs::copy(file, &alias_target_path)
+                .map_err(|e| format!("复制别名文件失败 {}: {}", alias_file_name, e))?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&alias_target_path)
+                    .map_err(|e| format!("获取别名文件权限失败: {}", e))?
+                    .permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&alias_target_path, perms)
+                    .map_err(|e| format!("设置别名执行权限失败: {}", e))?;
+                log::info!("🔐 已设置别名执行权限: {}", alias_target_path.display());
+            }
+
+            log::info!("✅ 已更新 MCP ASCII 别名: {}", alias_file_name);
+        }
     }
 
     log::info!("✅ Unix 平台所有文件替换完成");

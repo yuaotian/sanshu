@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 三术 MCP 工具 - 最简化安装脚本
-# 只需构建两个CLI工具即可运行MCP
+# 只需构建 CLI 工具即可运行 MCP
 
 set -e
 
@@ -34,7 +34,9 @@ mkdir -p "$BIN_DIR"
 
 cp "target/release/等一下" "$BIN_DIR/"
 cp "target/release/三术" "$BIN_DIR/"
-chmod +x "$BIN_DIR/等一下" "$BIN_DIR/三术"
+# 中文说明：sanshu 是三术的 ASCII 兼容副本，供不稳定支持中文命令的 MCP 客户端使用。
+cp "target/release/三术" "$BIN_DIR/sanshu"
+chmod +x "$BIN_DIR/等一下" "$BIN_DIR/三术" "$BIN_DIR/sanshu"
 
 echo "✅ 安装完成！CLI 工具已安装到 $BIN_DIR"
 
@@ -48,8 +50,9 @@ fi
 
 echo ""
 echo "📋 使用方法："
-echo "  三术        - 启动 MCP 服务器"
+echo "  sanshu      - 启动 MCP 服务器（推荐，ASCII 兼容入口）"
+echo "  三术        - 启动 MCP 服务器（中文兼容入口）"
 echo "  等一下      - 启动弹窗界面"
 echo ""
 echo "📝 MCP 客户端配置："
-echo '{"mcpServers": {"三术": {"command": "三术"}}}'
+echo '{"mcpServers": {"sanshu": {"command": "sanshu"}}}'

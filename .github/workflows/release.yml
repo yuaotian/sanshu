@@ -228,15 +228,20 @@ jobs:
             TARGET_DIR="target/release"
           fi
 
+          # 随 CLI 包附带根目录说明与提示词，便于用户离线查看和配置。
+          cp README.md sanshu_prompt_word.md sanshu_prompt_word_cli.md cli-package/
+
           # 复制并压缩
           if [[ "${{ matrix.platform }}" == "windows-latest" ]]; then
             cp "$TARGET_DIR/等一下.exe" cli-package/
             cp "$TARGET_DIR/三术.exe" cli-package/
+            cp "$TARGET_DIR/三术.exe" cli-package/sanshu.exe
             cd cli-package
             7z a ../sanshu-cli-${TAG_NAME}-${{ matrix.name }}.zip *
           else
             cp "$TARGET_DIR/等一下" cli-package/
             cp "$TARGET_DIR/三术" cli-package/
+            cp "$TARGET_DIR/三术" cli-package/sanshu
             cd cli-package
             tar -czf ../sanshu-cli-${TAG_NAME}-${{ matrix.name }}.tar.gz *
           fi
