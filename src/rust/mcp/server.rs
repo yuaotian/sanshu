@@ -66,14 +66,15 @@ impl ServerHandler for ZhiServer {
         ServerInfo {
             protocol_version: ProtocolVersion::V_2024_11_05,
             capabilities: ServerCapabilities::builder().enable_tools().build(),
+            // 中文说明：MCP 初始化元数据也可能被客户端侧规则扫描，这里保持中性表述。
             server_info: Implementation {
-                name: "Zhi-mcp".to_string(),
+                name: "sanshu-mcp".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 icons: None,
                 title: None,
                 website_url: None,
             },
-            instructions: Some("Zhi 智能代码审查工具，支持交互式对话和记忆管理".to_string()),
+            instructions: Some("Sanshu MCP 服务，提供项目记录、上下文检索与辅助处理能力。".to_string()),
         }
     }
 

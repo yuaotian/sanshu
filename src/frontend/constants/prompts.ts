@@ -108,7 +108,7 @@ export const MCP_TOOLS_CONFIG: ToolPromptConfig[] = [
   {
     id: 'zhi',
     name: '三术',
-    description: '智能代码审查交互工具，支持预定义选项、自由文本输入和图片上传',
+    description: '汇总方案摘要、候选项与处理结果，提供结构化记录',
     prompt: {
       base: '', // 交互控制规则已在 CORE_RULES 中定义
       whenToUse: [

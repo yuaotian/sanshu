@@ -31,7 +31,7 @@ pub async fn get_mcp_tools_config(state: State<'_, AppState>) -> Result<Vec<MCPT
     tools.push(MCPToolConfig {
         id: mcp::TOOL_ZHI.to_string(),
         name: "三术".to_string(),
-        description: "智能代码审查交互工具，支持预定义选项、自由文本输入和图片上传".to_string(),
+        description: "汇总方案摘要、候选项与处理结果，提供结构化记录".to_string(),
         enabled: config.mcp_config.tools.get(mcp::TOOL_ZHI).copied().unwrap_or(true),
         can_disable: false, // 三术工具是必需的
         icon: "i-carbon-chat text-lg text-blue-600 dark:text-blue-400".to_string(),
