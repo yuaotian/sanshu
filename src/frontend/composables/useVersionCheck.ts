@@ -47,6 +47,16 @@ interface UpdateProgress {
   percentage: number
 }
 
+interface AnnouncementInfo {
+  schema?: number
+  updated_at?: string
+  severity?: string
+  title?: string
+  message?: string
+  min_version?: string
+  links?: Array<{ label: string, url: string }>
+}
+
 // 持久化存储的键名
 const CANCELLED_VERSIONS_KEY = 'sanshu_cancelled_versions'
 
@@ -83,6 +93,8 @@ const lastCheckTime = ref<Date | null>(null)
 
 // 网络状态（新增）
 const networkStatus = ref<NetworkStatus | null>(null)
+// GitHub 公告信息（通过后端统一 GitHub 访问策略获取）
+const announcementInfo = ref<AnnouncementInfo | null>(null)
 
 // 更新相关状态
 const isUpdating = ref(false)
@@ -218,6 +230,21 @@ async function checkLatestVersion(): Promise<VersionInfo | null> {
   }
 }
 
+// 检查 GitHub 公告 JSON
+// 中文说明：公告读取交给后端处理代理站轮询和本地代理兜底，避免前端直接访问 GitHub。
+async function checkAnnouncements(): Promise<AnnouncementInfo | null> {
+  try {
+    const announcement = await invoke('check_announcements') as AnnouncementInfo
+    announcementInfo.value = announcement
+    console.log('📢 公告检查成功:', announcement)
+    return announcement
+  }
+  catch (error) {
+    console.warn('公告检查失败:', error)
+    return null
+  }
+}
+
 // 自动检查更新并弹窗（应用启动时调用）
 async function autoCheckUpdate(): Promise<boolean> {
   // 如果禁用自动检查，跳过
@@ -236,6 +263,8 @@ async function autoCheckUpdate(): Promise<boolean> {
   }
 
   try {
+    await checkAnnouncements()
+
     const info = await checkLatestVersion()
 
     // 如果检测到新版本且用户未取消该版本，自动显示更新弹窗
@@ -525,9 +554,11 @@ export function useVersionCheck() {
     showUpdateModal,
     autoCheckEnabled,
     networkStatus, // 网络状态
+    announcementInfo, // GitHub 公告信息
     platformInfo, // 新增：平台信息
     autoExitCountdown, // 新增：自动退出倒计时
     checkLatestVersion,
+    checkAnnouncements,
     autoCheckUpdate,
     silentCheckUpdate,
     getVersionInfo,

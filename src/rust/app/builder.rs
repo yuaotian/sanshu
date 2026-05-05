@@ -145,6 +145,7 @@ pub fn build_tauri_app() -> Builder<tauri::Wry> {
 
             // 更新命令
             check_for_updates,
+            check_announcements,
             download_and_install_update,
             get_current_version,
             restart_app,

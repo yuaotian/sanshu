@@ -53,10 +53,11 @@ impl ProxyInfo {
 pub struct ProxyDetector;
 
 impl ProxyDetector {
-    /// 常用代理端口列表（按优先级排序）
+    /// 常用代理端口列表（候选端口，最终按实测延迟选择）
     /// 
     /// - 7890: Clash 混合代理端口（HTTP + SOCKS5）
     /// - 7891: Clash HTTP 代理端口
+    /// - 7892: Clash 常见备用代理端口
     /// - 10809: V2Ray SOCKS5 代理端口
     /// - 10808: V2Ray HTTP 代理端口
     /// - 1080: 通用 SOCKS5 代理端口
@@ -64,6 +65,7 @@ impl ProxyDetector {
     const COMMON_PORTS: &'static [(u16, ProxyType)] = &[
         (7890, ProxyType::Http),    // Clash 混合端口（优先尝试HTTP）
         (7891, ProxyType::Http),    // Clash HTTP端口
+        (7892, ProxyType::Http),    // Clash 备用HTTP端口
         (10808, ProxyType::Http),   // V2Ray HTTP端口
         (10809, ProxyType::Socks5), // V2Ray SOCKS5端口
         (1080, ProxyType::Socks5),  // 通用SOCKS5端口
@@ -72,23 +74,34 @@ impl ProxyDetector {
     
     /// 检测本地可用的代理
     /// 
-    /// 按优先级顺序检测常用代理端口，返回第一个可用的代理
+    /// 检测常用代理端口并选择实测延迟最低的可用代理
     /// 
     /// # 返回值
     /// - `Some(ProxyInfo)`: 找到可用的代理
     /// - `None`: 没有找到可用的代理
     pub async fn detect_available_proxy() -> Option<ProxyInfo> {
         log_important!(info, "[network] 开始检测本地代理");
+        let mut best_proxy: Option<(ProxyInfo, u128)> = None;
         
         for (port, proxy_type) in Self::COMMON_PORTS {
             let proxy_info = ProxyInfo::new(proxy_type.clone(), "127.0.0.1".to_string(), *port);
             
             log_debug!("[network] 检测代理端口: {} ({})", port, proxy_type);
             
+            let started = std::time::Instant::now();
             if Self::check_proxy(&proxy_info).await {
-                log_important!(info, "[network] 找到可用代理: {}:{} ({})", proxy_info.host, proxy_info.port, proxy_info.proxy_type);
-                return Some(proxy_info);
+                let latency_ms = started.elapsed().as_millis();
+                log_important!(info, "[network] 找到可用代理: {}:{} ({}) latency={}ms", proxy_info.host, proxy_info.port, proxy_info.proxy_type, latency_ms);
+                match &best_proxy {
+                    Some((_, best_latency)) if *best_latency <= latency_ms => {}
+                    _ => best_proxy = Some((proxy_info, latency_ms)),
+                }
             }
+        }
+
+        if let Some((proxy_info, latency_ms)) = best_proxy {
+            log_important!(info, "[network] 选择延迟最低的本地代理: {}:{} ({}) latency={}ms", proxy_info.host, proxy_info.port, proxy_info.proxy_type, latency_ms);
+            return Some(proxy_info);
         }
         
         log_important!(warn, "[network] 未找到可用的本地代理");
@@ -224,4 +237,3 @@ mod tests {
         println!("端口 7890 (HTTP) 可用: {}", is_available);
     }
 }
-

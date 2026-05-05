@@ -2,7 +2,10 @@ use tauri::{AppHandle, Emitter, State};
 use serde::{Deserialize, Serialize};
 use std::{fs, io::{Read, Write}, path::PathBuf, process::Command};
 use crate::config::AppState;
-use crate::network::{detect_geo_location, ProxyDetector, ProxyInfo, create_update_client, create_download_client};
+use crate::network::{
+    download_with_strategy_with_progress, fetch_announcement_with_strategy,
+    fetch_latest_release_with_strategy,
+};
 use crate::network::geo::GeoLocation;
 
 /// 网络状态信息
@@ -69,66 +72,50 @@ pub async fn check_for_updates(app: AppHandle, state: State<'_, AppState>) -> Re
     log::info!("🌍 地理位置检测完成: country={}, city={:?}",
         geo_info.country, geo_info.city);
 
-    // 第二步：智能代理检测和配置
-    let proxy_info = detect_and_configure_proxy(&state).await;
+    // 第二步：读取代理配置，交给 GitHub 访问策略统一处理直连、代理站和本地代理兜底。
+    let proxy_config = {
+        let config = state
+            .config
+            .lock()
+            .map_err(|e| format!("获取代理配置失败: {}", e))?;
+        config.proxy_config.clone()
+    };
 
     // 构建网络状态信息
     let mut network_status = NetworkStatus {
         country: geo_info.country.clone(),
         city: geo_info.city.clone(),
         ip: Some(geo_info.ip.clone()),
-        using_proxy: proxy_info.is_some(),
-        proxy_host: proxy_info.as_ref().map(|p| p.host.clone()),
-        proxy_port: proxy_info.as_ref().map(|p| p.port),
-        proxy_type: proxy_info.as_ref().map(|p| p.proxy_type.to_string()),
+        using_proxy: false,
+        proxy_host: None,
+        proxy_port: None,
+        proxy_type: None,
         github_reachable: false, // 稍后更新
     };
 
-    // 创建HTTP客户端（带或不带代理）
-    let client = create_update_client(proxy_info.as_ref())
-        .map_err(|e| {
-            log::error!("❌ 创建HTTP客户端失败: {}", e);
-            format!("创建HTTP客户端失败: {}", e)
-        })?;
-
-    log::info!("📡 发送 GitHub API 请求");
-
-    let response = client
-        .get("https://api.github.com/repos/yuaotian/sanshu/releases/latest")
-        .header("User-Agent", "sanshu-app/1.0")
-        .header("Accept", "application/vnd.github.v3+json")
-        .send()
-        .await
-        .map_err(|e| {
-            log::error!("❌ 网络请求失败: {}", e);
-            format!("网络请求失败: {}", e)
-        })?;
-
-    log::info!("📊 GitHub API 响应状态: {}", response.status());
-
-    // 更新 GitHub 可达状态
-    network_status.github_reachable = response.status().is_success();
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_msg = if status == 403 {
-            "网络请求受限，请手动下载最新版本".to_string()
-        } else if status == 404 {
-            "网络连接异常，请检查网络后重试".to_string()
+    log::info!("📡 使用 GitHub 访问策略获取最新 Release");
+    let release_result = fetch_latest_release_with_strategy(&proxy_config).await?;
+    let route = release_result.route.clone();
+    let route_label = route.label.clone();
+    let used_mirror = route.used_mirror;
+    network_status.github_reachable = true;
+    network_status.using_proxy = used_mirror || route.using_local_proxy;
+    network_status.proxy_host = route.proxy_host.clone().or_else(|| {
+        if used_mirror {
+            Some(route_label.clone())
         } else {
-            format!("网络请求失败: {}", status)
-        };
-        log::error!("❌ {}", error_msg);
-        return Err(error_msg);
-    }
-
-    let release: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| {
-            log::error!("❌ 解析响应失败: {}", e);
-            format!("解析响应失败: {}", e)
-        })?;
+            None
+        }
+    });
+    network_status.proxy_port = route.proxy_port;
+    network_status.proxy_type = route.proxy_type.clone().or_else(|| {
+        if used_mirror {
+            Some("github-proxy".to_string())
+        } else {
+            None
+        }
+    });
+    let release = release_result.value;
 
     log::info!("📋 成功获取 release 数据");
 
@@ -176,6 +163,24 @@ pub async fn check_for_updates(app: AppHandle, state: State<'_, AppState>) -> Re
 
     log::info!("✅ 更新检查完成: {:?}", update_info);
     Ok(update_info)
+}
+
+/// 检查 GitHub 公告 JSON
+///
+/// 中文说明：公告走与更新检查相同的 GitHub 访问策略，支持代理站轮询和本地代理兜底。
+#[tauri::command]
+pub async fn check_announcements(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let proxy_config = {
+        let config = state
+            .config
+            .lock()
+            .map_err(|e| format!("获取代理配置失败: {}", e))?;
+        config.proxy_config.clone()
+    };
+
+    let result = fetch_announcement_with_strategy(&proxy_config).await?;
+    log::info!("📢 公告获取成功: route={}", result.route.label);
+    Ok(result.value)
 }
 
 /// 简单的版本比较函数
@@ -388,54 +393,31 @@ async fn download_and_install_update_impl(
 
     let file_path = temp_dir.join(&file_name);
 
-    // 智能代理检测和配置（用于下载）
-    let proxy_info = detect_and_configure_proxy(state).await;
+    let proxy_config = {
+        let config = state
+            .config
+            .lock()
+            .map_err(|e| format!("获取代理配置失败: {}", e))?;
+        config.proxy_config.clone()
+    };
 
-    // 创建用于下载的HTTP客户端（带或不带代理）
-    let client = create_download_client(proxy_info.as_ref())
-        .map_err(|e| format!("创建下载客户端失败: {}", e))?;
-
-    let mut response = client
-        .get(&update_info.download_url)
-        .send()
-        .await
-        .map_err(|e| format!("下载请求失败: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!("下载失败: HTTP {}", response.status()));
-    }
-
-    let total_size = response.content_length();
-    let mut downloaded = 0u64;
-    let mut file = fs::File::create(&file_path)
-        .map_err(|e| format!("创建文件失败: {}", e))?;
-
-    // 下载并报告进度
-    while let Some(chunk) = response.chunk().await
-        .map_err(|e| format!("下载数据失败: {}", e))? {
-
-        file.write_all(&chunk)
-            .map_err(|e| format!("写入文件失败: {}", e))?;
-
-        downloaded += chunk.len() as u64;
-
-        let percentage = if let Some(total) = total_size {
-            (downloaded as f64 / total as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        let progress = UpdateProgress {
-            chunk_length: chunk.len(),
-            content_length: total_size,
-            downloaded,
-            percentage,
-        };
-
-        let _ = app.emit("update_download_progress", &progress);
-    }
-
-    log::info!("✅ 文件下载完成: {}", file_path.display());
+    let progress_app = app.clone();
+    // 中文说明：下载同样走统一 GitHub 策略，同时透传 chunk 进度给前端更新弹窗。
+    let route = download_with_strategy_with_progress(
+        &update_info.download_url,
+        &file_path,
+        &proxy_config,
+        move |progress| {
+            let update_progress = UpdateProgress {
+                chunk_length: progress.chunk_length,
+                content_length: progress.content_length,
+                downloaded: progress.downloaded,
+                percentage: progress.percentage,
+            };
+            let _ = progress_app.emit("update_download_progress", &update_progress);
+        },
+    ).await?;
+    log::info!("✅ 文件下载完成: {} route={}", file_path.display(), route.label);
 
     // 开始安装
     let _ = app.emit("update_install_started", ());
@@ -988,93 +970,6 @@ fn replace_all_files_unix(app_dir: &PathBuf, files: &[PathBuf]) -> Result<(), St
     log::info!("⚠️ 建议重启应用以加载新版本");
 
     Ok(())
-}
-
-/// 智能代理检测和配置
-///
-/// 根据配置和地理位置，自动检测并配置代理
-///
-/// # 工作流程
-/// 1. 读取代理配置
-/// 2. 如果启用自动检测：
-///    - 检测IP地理位置
-///    - 如果在中国大陆且配置了仅CN使用代理，则检测本地代理
-///    - 否则使用直连
-/// 3. 如果启用手动代理：
-///    - 直接使用配置的代理
-/// 4. 否则使用直连
-///
-/// # 返回值
-/// - `Some(ProxyInfo)`: 使用代理
-/// - `None`: 使用直连
-async fn detect_and_configure_proxy(state: &State<'_, AppState>) -> Option<ProxyInfo> {
-    // 读取代理配置
-    let proxy_config = {
-        let config = state.config.lock().ok()?;
-        config.proxy_config.clone()
-    };
-
-    log::info!("📋 代理配置: auto_detect={}, enabled={}, only_for_cn={}",
-        proxy_config.auto_detect, proxy_config.enabled, proxy_config.only_for_cn);
-
-    // 如果启用自动检测
-    if proxy_config.auto_detect {
-        log::info!("🔍 启用自动代理检测");
-
-        // 检测地理位置
-        let country = detect_geo_location().await;
-        log::info!("🌍 检测到国家代码: {}", country);
-
-        // 判断是否需要使用代理
-        let should_use_proxy = if proxy_config.only_for_cn {
-            // 仅在中国大陆使用代理
-            country == "CN"
-        } else {
-            // 所有地区都尝试使用代理
-            true
-        };
-
-        if should_use_proxy {
-            log::info!("✅ 满足代理使用条件，开始检测本地代理");
-
-            // 检测本地可用代理
-            if let Some(proxy_info) = ProxyDetector::detect_available_proxy().await {
-                log::info!("✅ 使用自动检测的代理: {}:{} ({})",
-                    proxy_info.host, proxy_info.port, proxy_info.proxy_type);
-                return Some(proxy_info);
-            } else {
-                log::warn!("⚠️ 未检测到可用代理，使用直连");
-                return None;
-            }
-        } else {
-            log::info!("ℹ️ 不满足代理使用条件（非CN地区），使用直连");
-            return None;
-        }
-    }
-
-    // 如果启用手动代理
-    if proxy_config.enabled {
-        log::info!("🔧 使用手动配置的代理");
-
-        let proxy_type = match proxy_config.proxy_type.as_str() {
-            "socks5" => crate::network::proxy::ProxyType::Socks5,
-            _ => crate::network::proxy::ProxyType::Http,
-        };
-
-        let proxy_info = ProxyInfo::new(
-            proxy_type,
-            proxy_config.host,
-            proxy_config.port,
-        );
-
-        log::info!("✅ 使用手动代理: {}:{} ({})",
-            proxy_info.host, proxy_info.port, proxy_info.proxy_type);
-
-        return Some(proxy_info);
-    }
-
-    log::info!("ℹ️ 未启用代理，使用直连");
-    None
 }
 
 /// 检测完整的地理位置信息

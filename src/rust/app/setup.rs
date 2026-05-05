@@ -26,5 +26,13 @@ pub async fn setup_application(app_handle: &AppHandle) -> Result<(), String> {
         log_important!(warn, "设置退出处理器失败: {}", e);
     }
 
+    // 中文说明：应用启动后延迟刷新 GitHub 代理站延迟缓存，避免阻塞主界面启动。
+    tauri::async_runtime::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+        if let Err(e) = crate::network::refresh_github_proxy_cache().await {
+            log_important!(warn, "刷新 GitHub 代理站缓存失败: {}", e);
+        }
+    });
+
     Ok(())
 }
