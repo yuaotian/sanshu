@@ -69,7 +69,8 @@ impl AcemcpTool {
             if let Err(e) = watcher_manager.start_watching(
                 request.project_root_path.clone(),
                 acemcp_config.clone(),
-                None  // 使用默认防抖延迟
+                None, // 静默期：使用默认 30s
+                None, // 最大等待：使用默认 5min
             ).await {
                 log_debug!("启动文件监听失败（不影响搜索）: {}", e);
             }

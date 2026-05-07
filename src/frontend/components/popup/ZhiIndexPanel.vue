@@ -189,6 +189,51 @@ const failedFiles = computed(() => {
   return props.projectStatus?.failed_files ?? 0
 })
 
+// 上次同步距离当前的"陈旧度"分级
+// - fresh: ≤1 小时
+// - warn:  1 小时 ~ 24 小时
+// - critical: > 24 小时
+// 用于驱动颜色提示与"立即同步"按钮显示
+type SyncStaleness = 'fresh' | 'warn' | 'critical'
+const syncStaleness = computed<SyncStaleness | null>(() => {
+  const time = props.projectStatus?.last_success_time
+  if (!time)
+    return null
+  try {
+    const diffMs = Date.now() - new Date(time).getTime()
+    const diffMinutes = Math.floor(diffMs / 60000)
+    if (diffMinutes < 60)
+      return 'fresh'
+    if (diffMinutes < 60 * 24)
+      return 'warn'
+    return 'critical'
+  }
+  catch {
+    return null
+  }
+})
+
+// 是否显示"立即同步"快捷按钮（陈旧度 ≠ fresh 且当前不在同步中）
+const showQuickResync = computed(() => {
+  if (props.isIndexing || props.resyncLoading)
+    return false
+  if (isAuthFailure.value)
+    return false
+  return syncStaleness.value === 'warn' || syncStaleness.value === 'critical'
+})
+
+// 时间标签的额外样式（颜色提示）
+const lastSyncTimeClass = computed(() => {
+  switch (syncStaleness.value) {
+    case 'warn':
+      return 'status-time status-time--warn'
+    case 'critical':
+      return 'status-time status-time--critical'
+    default:
+      return 'status-time'
+  }
+})
+
 // 格式化最后同步时间
 const lastSyncTime = computed(() => {
   const time = props.projectStatus?.last_success_time
@@ -310,6 +355,12 @@ function handleResync(type: 'incremental' | 'full') {
   emit('resync', type)
 }
 
+// 头部"立即同步"快捷按钮：触发增量同步，且不展开面板
+function handleQuickResync(e: MouseEvent) {
+  e.stopPropagation()
+  emit('resync', 'incremental')
+}
+
 // 打开设置页面
 function handleOpenSettings(toolId?: string) {
   emit('open-settings', toolId)
@@ -421,10 +472,29 @@ onMounted(() => {
           <!-- 最后同步时间（如有） -->
           <template v-if="lastSyncTime">
             <span class="status-divider">·</span>
-            <span class="status-time">上次同步 {{ lastSyncTime }}</span>
+            <span :class="lastSyncTimeClass">上次同步 {{ lastSyncTime }}</span>
           </template>
         </div>
         <div class="header-right flex items-center gap-2">
+          <!-- 头部"立即同步"快捷按钮：仅在 last_success_time 超过 1 小时时显示 -->
+          <n-tooltip v-if="showQuickResync" trigger="hover" :delay="200">
+            <template #trigger>
+              <button
+                type="button"
+                class="quick-resync-btn"
+                :class="syncStaleness === 'critical' ? 'quick-resync-btn--critical' : 'quick-resync-btn--warn'"
+                @click="handleQuickResync"
+              >
+                <div class="i-carbon-sync text-xs" />
+                <span>立即同步</span>
+              </button>
+            </template>
+            <span class="text-xs">
+              {{ syncStaleness === 'critical'
+                ? '距上次同步已超过 24 小时，建议立即同步'
+                : '距上次同步已超过 1 小时，建议手动同步' }}
+            </span>
+          </n-tooltip>
           <!-- 最近索引文件信息（响应式隐藏） -->
           <n-tooltip v-if="recentFilesText" trigger="hover" :delay="300">
             <template #trigger>
@@ -755,6 +825,57 @@ onMounted(() => {
 
 .status-time {
   color: rgba(255, 255, 255, 0.45);
+}
+
+/* 距上次同步 1~24h：温和提醒 */
+.status-time--warn {
+  color: rgba(251, 191, 36, 0.85);
+}
+
+/* 距上次同步 > 24h：高亮警示 */
+.status-time--critical {
+  color: rgba(251, 113, 133, 0.95);
+  font-weight: 500;
+}
+
+/* 头部"立即同步"快捷按钮 */
+.quick-resync-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.quick-resync-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.quick-resync-btn--warn {
+  border-color: rgba(251, 191, 36, 0.35);
+  color: rgba(251, 191, 36, 0.95);
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.10) 0%, rgba(251, 191, 36, 0.04) 100%);
+}
+
+.quick-resync-btn--warn:hover {
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.18) 0%, rgba(251, 191, 36, 0.08) 100%);
+}
+
+.quick-resync-btn--critical {
+  border-color: rgba(251, 113, 133, 0.4);
+  color: rgba(254, 205, 211, 0.98);
+  background: linear-gradient(135deg, rgba(251, 113, 133, 0.14) 0%, rgba(251, 113, 133, 0.06) 100%);
+}
+
+.quick-resync-btn--critical:hover {
+  background: linear-gradient(135deg, rgba(251, 113, 133, 0.22) 0%, rgba(251, 113, 133, 0.10) 100%);
 }
 
 .header-right {

@@ -116,7 +116,10 @@ pub struct McpConfig {
     pub acemcp_max_lines_per_blob: Option<u32>, // acemcp最大行数/块
     pub acemcp_text_extensions: Option<Vec<String>>, // acemcp文件扩展名
     pub acemcp_exclude_patterns: Option<Vec<String>>, // acemcp排除模式
-    pub acemcp_watch_debounce_ms: Option<u64>, // 文件监听防抖延迟（毫秒），默认 180000 (3分钟)
+    pub acemcp_watch_debounce_ms: Option<u64>, // 文件监听静默期（毫秒），默认 30000 (30秒)
+    /// 文件监听最大等待时间（毫秒）：自首个事件起累积超过该值会强制 flush，
+    /// 防止持续小写入导致永远触发不了同步。默认 300000 (5分钟)。
+    pub acemcp_watch_max_wait_ms: Option<u64>,
     pub acemcp_auto_index_enabled: Option<bool>, // 全局自动索引开关（默认启用）
     /// 是否自动索引嵌套的 Git 子项目（默认启用）
     /// 当对父目录触发索引或监听时，自动检测并索引/监听所有子项目
@@ -320,7 +323,8 @@ pub fn default_mcp_config() -> McpConfig {
         acemcp_max_lines_per_blob: None,
         acemcp_text_extensions: None,
         acemcp_exclude_patterns: None,
-        acemcp_watch_debounce_ms: None, // 使用默认值 180000ms (3分钟)
+        acemcp_watch_debounce_ms: None, // 未设置时走 watcher 默认 30000ms (30秒)
+        acemcp_watch_max_wait_ms: None, // 未设置时走 watcher 默认 300000ms (5分钟)
         acemcp_auto_index_enabled: None, // 默认启用（未设置时视为 true）
         acemcp_index_nested_projects: None, // 自动索引嵌套项目（默认启用）
         // 代理配置默认值

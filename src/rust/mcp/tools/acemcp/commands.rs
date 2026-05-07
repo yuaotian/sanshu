@@ -86,7 +86,9 @@ pub struct SaveAcemcpConfigArgs {
     #[serde(alias = "excludePatterns", alias = "_exclude_patterns")]
     pub exclude_patterns: Vec<String>,
     #[serde(alias = "watchDebounceMs", alias = "watch_debounce_ms")]
-    pub watch_debounce_ms: Option<u64>, // 文件监听防抖延迟（毫秒）
+    pub watch_debounce_ms: Option<u64>, // 文件监听静默期（毫秒）
+    #[serde(alias = "watchMaxWaitMs", alias = "watch_max_wait_ms")]
+    pub watch_max_wait_ms: Option<u64>, // 文件监听最大等待时间（毫秒）
     // 代理配置
     #[serde(alias = "proxyEnabled", alias = "proxy_enabled")]
     pub proxy_enabled: Option<bool>,
@@ -137,6 +139,7 @@ pub async fn save_acemcp_config(
         config.mcp_config.acemcp_text_extensions = Some(args.text_extensions.clone());
         config.mcp_config.acemcp_exclude_patterns = Some(args.exclude_patterns.clone());
         config.mcp_config.acemcp_watch_debounce_ms = args.watch_debounce_ms;
+        config.mcp_config.acemcp_watch_max_wait_ms = args.watch_max_wait_ms;
         // 保存代理配置
         config.mcp_config.acemcp_proxy_enabled = args.proxy_enabled;
         config.mcp_config.acemcp_proxy_host = args.proxy_host.clone();
@@ -846,7 +849,8 @@ pub struct AcemcpConfigResponse {
     pub max_lines_per_blob: u32,
     pub text_extensions: Vec<String>,
     pub exclude_patterns: Vec<String>,
-    pub watch_debounce_ms: u64, // 文件监听防抖延迟（毫秒），默认 180000 (3分钟)
+    pub watch_debounce_ms: u64, // 文件监听静默期（毫秒），默认 30000 (30秒)
+    pub watch_max_wait_ms: u64, // 文件监听最大等待时间（毫秒），默认 300000 (5分钟)
     // 代理配置
     pub proxy_enabled: bool,
     pub proxy_host: String,
@@ -887,7 +891,10 @@ pub async fn get_acemcp_config(state: State<'_, AppState>) -> Result<AcemcpConfi
         exclude_patterns: config.mcp_config.acemcp_exclude_patterns.clone().unwrap_or_else(|| {
             vec!["node_modules".to_string(), ".git".to_string(), "target".to_string(), "dist".to_string()]
         }),
-        watch_debounce_ms: config.mcp_config.acemcp_watch_debounce_ms.unwrap_or(180_000),
+        watch_debounce_ms: config.mcp_config.acemcp_watch_debounce_ms
+            .unwrap_or(super::watcher::DEFAULT_DEBOUNCE_MS),
+        watch_max_wait_ms: config.mcp_config.acemcp_watch_max_wait_ms
+            .unwrap_or(super::watcher::DEFAULT_MAX_WAIT_MS),
         // 代理配置
         proxy_enabled: config.mcp_config.acemcp_proxy_enabled.unwrap_or(false),
         proxy_host: config.mcp_config.acemcp_proxy_host.clone().unwrap_or_else(|| "127.0.0.1".to_string()),
@@ -1167,28 +1174,34 @@ pub fn is_project_watching(project_root_path: String) -> Result<bool, String> {
 }
 
 /// 启动项目文件监听
-/// 从配置中读取防抖延迟参数
+/// 从配置中读取防抖延迟与最大等待时间
 #[tauri::command]
 pub async fn start_project_watching(
     project_root_path: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    // 从配置中读取防抖延迟
-    let debounce_ms = {
+    // 从配置中读取静默期 + 最大等待时间
+    let (debounce_ms, max_wait_ms) = {
         let config = state.config.lock().map_err(|e| format!("获取配置失败: {}", e))?;
-        config.mcp_config.acemcp_watch_debounce_ms
+        (
+            config.mcp_config.acemcp_watch_debounce_ms,
+            config.mcp_config.acemcp_watch_max_wait_ms,
+        )
     };
-    
+
     // 获取 acemcp 配置
     let acemcp_config = super::AcemcpTool::get_acemcp_config()
         .await
         .map_err(|e| format!("获取 acemcp 配置失败: {}", e))?;
-    
-    log::info!("启动项目监听: path={}, debounce_ms={:?}", project_root_path, debounce_ms);
-    
+
+    log::info!(
+        "启动项目监听: path={}, debounce_ms={:?}, max_wait_ms={:?}",
+        project_root_path, debounce_ms, max_wait_ms
+    );
+
     // 启动监听
     let watcher_manager = super::watcher::get_watcher_manager();
-    watcher_manager.start_watching(project_root_path, acemcp_config, debounce_ms)
+    watcher_manager.start_watching(project_root_path, acemcp_config, debounce_ms, max_wait_ms)
         .await
         .map_err(|e| format!("启动监听失败: {}", e))
 }
