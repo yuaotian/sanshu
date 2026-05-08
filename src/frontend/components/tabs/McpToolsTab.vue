@@ -9,6 +9,7 @@ const Context7Config = defineAsyncComponent(() => import('../tools/Context7Confi
 const IconWorkshop = defineAsyncComponent(() => import('../tools/IconWorkshop/IconWorkshop.vue'))
 const EnhanceConfig = defineAsyncComponent(() => import('../tools/EnhanceConfig.vue'))
 const MemoryConfig = defineAsyncComponent(() => import('../tools/MemoryConfig.vue'))
+const TavilyConfig = defineAsyncComponent(() => import('../tools/TavilyConfig.vue'))
 
 const props = withDefaults(defineProps<{
   projectRootPath?: string | null
@@ -247,6 +248,7 @@ onMounted(async () => {
           :active="showToolConfigModal"
           :project-root-path="props.projectRootPath"
         />
+        <TavilyConfig v-else-if="currentToolId === 'tavily'" :active="showToolConfigModal" />
         <IconWorkshop v-else-if="currentToolId === 'icon'" :active="showToolConfigModal" />
         <MemoryConfig
           v-else-if="currentToolId === 'ji'"

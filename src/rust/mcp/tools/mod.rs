@@ -9,6 +9,7 @@ pub mod icon;
 pub mod skills;
 pub mod uiux;
 pub mod enhance;
+pub mod tavily;
 
 // 重新导出工具以便访问
 pub use memory::MemoryTool;
@@ -19,3 +20,4 @@ pub use icon::IconTool;
 pub use skills::SkillsTool;
 pub use uiux::UiuxTool;
 pub use enhance::EnhanceTool;
+pub use tavily::TavilyTool;

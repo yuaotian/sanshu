@@ -112,6 +112,11 @@ pub fn build_tauri_app() -> Builder<tauri::Wry> {
             crate::mcp::tools::context7::commands::get_context7_config,
             crate::mcp::tools::context7::commands::save_context7_config,
 
+            // tavily 命令
+            crate::mcp::tools::tavily::commands::get_tavily_config,
+            crate::mcp::tools::tavily::commands::save_tavily_config,
+            crate::mcp::tools::tavily::commands::test_tavily_connection,
+
             // 自定义prompt命令
             get_custom_prompt_config,
             add_custom_prompt,

@@ -157,6 +157,10 @@ pub struct McpConfig {
     pub icon_default_png_size: Option<u32>,
     /// 缓存过期时间（分钟），默认 30
     pub icon_cache_expiry_minutes: Option<u64>,
+
+    // Tavily AI 搜索配置
+    /// Tavily API 密钥（必填，免费计划每月 1000 信用点）
+    pub tavily_api_key: Option<String>,
 }
 
 
@@ -351,6 +355,8 @@ pub fn default_mcp_config() -> McpConfig {
         icon_default_format: None,          // 默认 SVG
         icon_default_png_size: None,        // 默认 64px
         icon_cache_expiry_minutes: None,    // 默认 30 分钟
+        // Tavily AI 搜索配置
+        tavily_api_key: None,              // 用户需配置 API Key
     }
 }
 
@@ -455,6 +461,7 @@ pub fn default_mcp_tools() -> HashMap<String, bool> {
     tools.insert(mcp::TOOL_CONTEXT7.to_string(), true); // Context7 文档查询工具默认启用（支持免费使用，无需配置即可使用）
     tools.insert(mcp::TOOL_UIUX.to_string(), true); // UI/UX 工具默认启用（内置技能）
     tools.insert(mcp::TOOL_ENHANCE.to_string(), false); // 提示词增强工具默认关闭（依赖 acemcp 配置）
+    tools.insert(mcp::TOOL_TAVILY.to_string(), true); // Tavily AI 搜索工具默认启用（免费额度，需配置 API Key）
     tools
 }
 
@@ -781,6 +788,21 @@ pub fn default_custom_prompts() -> Vec<CustomPrompt> {
             template_false: Some("".to_string()),
             current_state: true, // uiux 是当前主链路，默认提醒开启
             linked_mcp_tool: Some("uiux".to_string()),
+        },
+        CustomPrompt {
+            id: "default_15".to_string(),
+            name: "是否启用 AI 搜索".to_string(),
+            content: "".to_string(),
+            description: Some("提醒 AI 需要实时信息时使用 tavily 进行搜索".to_string()),
+            sort_order: 15,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            r#type: "conditional".to_string(),
+            condition_text: Some("是否启用 AI 搜索".to_string()),
+            template_true: Some("✔️请记住，需要实时搜索信息时使用 tavily 工具进行 AI 搜索，获取最新准确数据".to_string()),
+            template_false: Some("".to_string()),
+            current_state: true, // 默认开启（与 TOOL_TAVILY 默认状态保持一致）
+            linked_mcp_tool: Some("tavily".to_string()), // 关联到 tavily MCP 工具
         },
     ]
 }

@@ -105,6 +105,19 @@ pub async fn get_mcp_tools_config(state: State<'_, AppState>) -> Result<Vec<MCPT
         has_config: true, // 提示词增强有独立配置面板
     });
 
+    // Tavily AI 搜索工具 - 需要配置 API Key
+    tools.push(MCPToolConfig {
+        id: mcp::TOOL_TAVILY.to_string(),
+        name: "Tavily AI 搜索".to_string(),
+        description: "AI 搜索与内容提取，实时获取互联网最新信息，免费每月1000信用点".to_string(),
+        enabled: config.mcp_config.tools.get(mcp::TOOL_TAVILY).copied().unwrap_or(true),
+        can_disable: true,
+        icon: "i-carbon-search-locate text-lg text-orange-600 dark:text-orange-400".to_string(),
+        icon_bg: "bg-orange-100 dark:bg-orange-900".to_string(),
+        dark_icon_bg: "dark:bg-orange-800".to_string(),
+        has_config: true, // Tavily 需要配置 API Key
+    });
+
     // 图标工坊工具 - UI 功能工具，始终存在，有配置选项
     tools.push(MCPToolConfig {
         id: "icon".to_string(),

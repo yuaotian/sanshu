@@ -242,6 +242,32 @@ export const MCP_TOOLS_CONFIG: ToolPromptConfig[] = [
       darkIconBg: 'dark:bg-indigo-900',
     },
   },
+
+  // tavily - AI 搜索与内容提取
+  {
+    id: 'tavily',
+    name: 'Tavily AI 搜索',
+    description: '实时 AI 搜索与内容提取：互联网最新信息、新闻、网页提取',
+    prompt: {
+      base: '',
+      whenToUse: [
+        '需要获取实时、最新的互联网信息时',
+        '需要从指定 URL 提取结构化内容时',
+      ],
+      howToUse: [
+        '搜索：传入 query 即可获取 AI 回答和多条搜索结果',
+        '提取：action="extract" + urls 参数，从网页提取 Markdown 内容',
+        '免费每月 1000 信用点；basic 搜索 1 信用、advanced 2 信用',
+      ],
+    },
+    ui: {
+      enabled: false, // 默认不启用：免费额度（但是需要登录 Tavily 账号获取token才能使用）
+      canDisable: true,
+      icon: 'i-carbon-search-locate text-lg text-orange-600 dark:text-orange-400',
+      iconBg: 'bg-orange-100',
+      darkIconBg: 'dark:bg-orange-900',
+    },
+  },
 ]
 
 // ----------------------------------------------------------------------------

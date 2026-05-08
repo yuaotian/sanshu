@@ -18,6 +18,9 @@ pub const TOOL_UIUX: &str = "uiux";
 /// 提示词增强工具标识符
 pub const TOOL_ENHANCE: &str = "enhance";
 
+/// Tavily AI 搜索工具标识符
+pub const TOOL_TAVILY: &str = "tavily";
+
 /// 默认启用的工具列表
 pub const DEFAULT_ENABLED_TOOLS: &[&str] = &[
     TOOL_ZHI,
@@ -26,6 +29,7 @@ pub const DEFAULT_ENABLED_TOOLS: &[&str] = &[
     TOOL_CONTEXT7,
     TOOL_UIUX,
     TOOL_ENHANCE,
+    TOOL_TAVILY,
 ];
 
 /// 继续回复默认启用状态
@@ -82,6 +86,7 @@ impl Default for McpConfig {
                 McpToolConfig::new(TOOL_CONTEXT7, true, true), // Context7 文档查询工具可禁用，默认启用
                 McpToolConfig::new(TOOL_UIUX, true, true), // UI/UX 工具可禁用，默认启用
                 McpToolConfig::new(TOOL_ENHANCE, false, true), // 提示词增强工具可禁用，默认关闭（依赖 acemcp 配置）
+                McpToolConfig::new(TOOL_TAVILY, true, true), // Tavily AI 搜索工具可禁用，默认启用（免费额度）
             ],
             continue_reply_enabled: DEFAULT_CONTINUE_REPLY_ENABLED,
             auto_continue_threshold: DEFAULT_AUTO_CONTINUE_THRESHOLD,
@@ -143,5 +148,5 @@ pub fn get_default_mcp_config() -> McpConfig {
 
 /// 检查是否为有效的工具 ID
 pub fn is_valid_tool_id(tool_id: &str) -> bool {
-    matches!(tool_id, TOOL_ZHI | TOOL_JI | TOOL_SOU | TOOL_CONTEXT7 | TOOL_UIUX | TOOL_ENHANCE)
+    matches!(tool_id, TOOL_ZHI | TOOL_JI | TOOL_SOU | TOOL_CONTEXT7 | TOOL_UIUX | TOOL_ENHANCE | TOOL_TAVILY)
 }

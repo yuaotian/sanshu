@@ -171,6 +171,41 @@ const statusText = computed(() => {
   return '等待输入...'
 })
 
+// 上下文追加区域 UI 状态
+const COLLAPSE_THRESHOLD = 6 // 条件性 prompt ≥ 此值时默认折叠
+const isContextCollapsed = useStorage('popup-context-collapsed', false) // 折叠/展开状态
+const showContextDescription = useStorage('popup-context-show-desc', true) // 是否显示描述
+
+// 已开启的条件性 prompt 数量（用于折叠时的统计摘要）
+const enabledConditionalCount = computed(() =>
+  conditionalPrompts.value.filter(p => p.current_state && isMcpToolEnabled(p.linked_mcp_tool)).length,
+)
+
+// 根据条件性 prompt 数量自动判断初始折叠状态
+// 只在首次加载时检查，用户手动操作后以 useStorage 为准
+function autoCollapseIfNeeded() {
+  if (conditionalPrompts.value.length >= COLLAPSE_THRESHOLD && !isContextCollapsed.value) {
+    // 不自动覆盖用户选择 — useStorage 已有值则跳过
+  }
+}
+
+// 根据条件性 prompt 的标题/功能描述匹配预设图标
+function getConditionalIcon(prompt: CustomPrompt): string {
+  const text = `${prompt.name || ''} ${prompt.condition_text || ''} ${prompt.description || ''}`.toLowerCase()
+
+  if (/文档|markdown|md/.test(text)) return 'i-carbon-document'
+  if (/测试|test/.test(text)) return 'i-carbon-test-tool'
+  if (/编译|构建|build|compile/.test(text)) return 'i-carbon-build'
+  if (/运行|执行|run|exec/.test(text)) return 'i-carbon-play'
+  if (/搜索|sou|语义/.test(text)) return 'i-carbon-search'
+  if (/框架|context7|文档查询|library/.test(text)) return 'i-carbon-book'
+  if (/确认|zhi|三术|关键节点/.test(text)) return 'i-carbon-checkmark-outline'
+  if (/ui|ux|美化|设计|页面/.test(text)) return 'i-carbon-color-palette'
+  if (/tavily|ai.?搜索|实时搜索/.test(text)) return 'i-carbon-search-locate'
+  if (/记忆|memory|ji/.test(text)) return 'i-carbon-data-base'
+  return 'i-carbon-settings-adjust'
+}
+
 // 悬浮/固定相关状态
 const isFloating = useStorage('popup-input-floating', false) // 开启/关闭悬浮模式
 const sentinelRef = ref<HTMLElement | null>(null) // 哨兵元素
@@ -825,24 +860,64 @@ defineExpose({
 
         <!-- 上下文追加区域 -->
         <div v-if="customPromptEnabled && conditionalPrompts.length > 0" class="space-y-2" data-guide="context-append">
-          <div class="text-xs text-on-surface-secondary flex items-center gap-2">
-            <div class="i-carbon-settings-adjust w-3 h-3 text-primary-500" />
-            <span>上下文追加:</span>
+          <!-- 标题栏：含折叠/展开、仅标题模式切换 -->
+          <div class="flex items-center justify-between">
+            <div
+              class="text-xs text-on-surface-secondary flex items-center gap-2 cursor-pointer select-none"
+              @click="isContextCollapsed = !isContextCollapsed"
+            >
+              <div
+                :class="[
+                  'w-3 h-3 transition-transform duration-200',
+                  isContextCollapsed ? 'i-carbon-chevron-right' : 'i-carbon-chevron-down',
+                  'text-primary-500'
+                ]"
+              />
+              <span>上下文追加</span>
+              <span class="text-on-surface-secondary opacity-60">
+                ({{ enabledConditionalCount }}/{{ conditionalPrompts.length }})
+              </span>
+            </div>
+            <!-- 右侧控制按钮 -->
+            <div v-if="!isContextCollapsed" class="flex items-center gap-1">
+              <n-tooltip>
+                <template #trigger>
+                  <n-button
+                    text
+                    size="tiny"
+                    class="opacity-60 hover:opacity-100"
+                    @click="showContextDescription = !showContextDescription"
+                  >
+                    <template #icon>
+                      <div :class="showContextDescription ? 'i-carbon-text-short-paragraph' : 'i-carbon-text-line-spacing'" />
+                    </template>
+                  </n-button>
+                </template>
+                {{ showContextDescription ? '仅显示标题' : '显示标题和描述' }}
+              </n-tooltip>
+            </div>
           </div>
-          <div class="grid grid-cols-2 gap-2">
+
+          <!-- 展开时的内容 -->
+          <div v-if="!isContextCollapsed" :class="showContextDescription ? 'grid grid-cols-2 gap-2' : 'flex flex-wrap gap-1.5'">
             <div
               v-for="prompt in conditionalPrompts"
               :key="prompt.id"
               :class="[
-                'flex items-center justify-between p-2 bg-container-secondary rounded border border-gray-600 transition-colors text-xs',
+                showContextDescription
+                  ? 'flex items-center justify-between p-2 bg-container-secondary rounded border border-gray-600 transition-colors text-xs'
+                  : 'inline-flex items-center gap-1.5 px-2 py-1 bg-container-secondary rounded border border-gray-600 transition-colors text-xs',
                 isMcpToolEnabled(prompt.linked_mcp_tool) ? 'hover:bg-container-tertiary' : 'opacity-50 cursor-not-allowed'
               ]"
             >
-              <div class="flex-1 min-w-0 mr-2">
+              <!-- 动态图标 -->
+              <div :class="[getConditionalIcon(prompt), 'w-3 h-3 shrink-0', (prompt.current_state && isMcpToolEnabled(prompt.linked_mcp_tool)) ? 'text-primary-500' : 'text-on-surface-secondary opacity-50']" />
+
+              <div class="flex-1 min-w-0" :class="showContextDescription ? 'mr-2' : 'mr-1'">
                 <div class="text-xs text-on-surface truncate font-medium" :title="prompt.condition_text || prompt.name">
                   {{ prompt.condition_text || prompt.name }}
                 </div>
-                <div v-if="getConditionalDescription(prompt)" class="text-xs text-primary-600 dark:text-primary-400 opacity-50 dark:opacity-60 mt-0.5 truncate leading-tight" :title="getConditionalDescription(prompt)">
+                <div v-if="showContextDescription && getConditionalDescription(prompt)" class="text-xs text-primary-600 dark:text-primary-400 opacity-50 dark:opacity-60 mt-0.5 truncate leading-tight" :title="getConditionalDescription(prompt)">
                   {{ getConditionalDescription(prompt) }}
                 </div>
               </div>

@@ -9,10 +9,11 @@ use rmcp::model::*;
 use std::collections::HashMap;
 use std::time::Instant;
 
-use super::tools::{InteractionTool, MemoryTool, AcemcpTool, Context7Tool, IconTool, SkillsTool, UiuxTool, EnhanceTool};
+use super::tools::{InteractionTool, MemoryTool, AcemcpTool, Context7Tool, IconTool, SkillsTool, UiuxTool, EnhanceTool, TavilyTool};
 use super::types::{ZhiRequest, JiyiRequest, TuRequest, SkillRunRequest};
 use crate::mcp::tools::enhance::mcp::EnhanceMcpRequest;
 use crate::mcp::tools::context7::types::Context7Request;
+use crate::mcp::tools::tavily::types::TavilyRequest;
 use crate::config::load_standalone_config;
 use crate::mcp::utils::safe_truncate_clean;
 use crate::mcp::utils::generate_request_id;
@@ -294,6 +295,11 @@ impl ServerHandler for ZhiServer {
             tools.push(EnhanceTool::get_tool_definition());
         }
 
+        // Tavily AI 搜索工具 - 仅在启用时添加
+        if self.is_tool_enabled("tavily") {
+            tools.push(TavilyTool::get_tool_definition());
+        }
+
         // 技能运行时工具 - 动态发现 skills 并追加工具
         let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         tools.extend(SkillsTool::list_dynamic_tools(&project_root));
@@ -485,6 +491,25 @@ impl ServerHandler for ZhiServer {
                             log_important!(
                                 warn,
                                 "[MCP] 参数解析失败: call_id={}, tool=enhance, error={}",
+                                call_id,
+                                e
+                            );
+                            Err(McpError::invalid_params(format!("参数解析失败: {}", e), None))
+                        }
+                    }
+                }
+            }
+            "tavily" => {
+                if !self.is_tool_enabled("tavily") {
+                    log_important!(warn, "[MCP] 工具已禁用: call_id={}, tool=tavily", call_id);
+                    Err(McpError::internal_error("Tavily AI 搜索工具已被禁用".to_string(), None))
+                } else {
+                    match serde_json::from_value::<TavilyRequest>(arguments_value) {
+                        Ok(tavily_request) => TavilyTool::execute(tavily_request).await,
+                        Err(e) => {
+                            log_important!(
+                                warn,
+                                "[MCP] 参数解析失败: call_id={}, tool=tavily, error={}",
                                 call_id,
                                 e
                             );
