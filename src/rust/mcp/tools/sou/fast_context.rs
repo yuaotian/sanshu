@@ -1,0 +1,1808 @@
+use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use globset::GlobBuilder;
+use regex::Regex;
+use reqwest::Client;
+use rusqlite::{Connection, OpenFlags};
+use serde_json::{json, Map, Value};
+use std::collections::HashSet;
+use std::env;
+use std::fmt;
+use std::fs;
+use std::io::{Read, Write};
+use std::path::{Component, Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+use tokio::process::Command;
+use uuid::Uuid;
+
+const API_BASE: &str = "https://server.self-serve.windsurf.com/exa.api_server_pb.ApiServerService";
+const AUTH_BASE: &str = "https://server.self-serve.windsurf.com/exa.auth_pb.AuthService";
+const WS_APP: &str = "windsurf";
+const DEFAULT_WS_APP_VER: &str = "1.48.2";
+const DEFAULT_WS_LS_VER: &str = "1.9544.35";
+const DEFAULT_WS_MODEL: &str = "MODEL_SWE_1_6_FAST";
+const MAX_TREE_BYTES: usize = 250 * 1024;
+const RESULT_MAX_LINES: usize = 50;
+const LINE_MAX_CHARS: usize = 250;
+const FINAL_FORCE_ANSWER: &str =
+    "You have no turns left. Now you MUST provide your final ANSWER, even if it's not complete.";
+
+#[derive(Debug, Clone)]
+pub struct SearchOptions {
+    pub query: String,
+    pub project_root: PathBuf,
+    pub api_key: Option<String>,
+    pub tree_depth: u8,
+    pub max_turns: u8,
+    pub max_results: u8,
+    pub max_commands: u8,
+    pub timeout_ms: u64,
+    pub exclude_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    pub files: Vec<FastContextFile>,
+    pub rg_patterns: Vec<String>,
+    pub meta: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct FastContextFile {
+    pub path: Option<String>,
+    pub full_path: Option<String>,
+    pub ranges: Vec<[usize; 2]>,
+}
+
+#[derive(Debug, Clone)]
+struct RepoMap {
+    tree: String,
+    depth: u8,
+    size_bytes: usize,
+    fell_back: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ChatMessage {
+    role: u64,
+    content: String,
+    tool_call_id: Option<String>,
+    tool_name: Option<String>,
+    tool_args_json: Option<String>,
+    ref_call_id: Option<String>,
+}
+
+#[derive(Debug)]
+struct ParsedToolCall {
+    thinking: String,
+    name: String,
+    args: Value,
+}
+
+#[derive(Debug, Clone)]
+struct FastContextError {
+    code: String,
+    message: String,
+    status: Option<u16>,
+}
+
+impl FastContextError {
+    fn status(status: reqwest::StatusCode) -> Self {
+        let code = match status.as_u16() {
+            413 => "PAYLOAD_TOO_LARGE",
+            429 => "RATE_LIMITED",
+            401 | 403 => "AUTH_ERROR",
+            _ => "SERVER_ERROR",
+        };
+        Self {
+            code: code.to_string(),
+            message: format!("HTTP {}", status.as_u16()),
+            status: Some(status.as_u16()),
+        }
+    }
+
+    fn timeout(message: impl Into<String>) -> Self {
+        Self {
+            code: "TIMEOUT".to_string(),
+            message: message.into(),
+            status: None,
+        }
+    }
+
+    fn network(message: impl Into<String>) -> Self {
+        Self {
+            code: "NETWORK_ERROR".to_string(),
+            message: message.into(),
+            status: None,
+        }
+    }
+}
+
+impl fmt::Display for FastContextError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for FastContextError {}
+
+type FcResult<T> = std::result::Result<T, FastContextError>;
+
+/// 使用 Rust 原生实现执行 fast-context 检索，避免依赖 demo 目录中的 Node bridge。
+pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
+    let project_root = opts
+        .project_root
+        .canonicalize()
+        .with_context(|| format!("无法解析项目路径: {}", opts.project_root.display()))?;
+    if !project_root.is_dir() {
+        return Err(anyhow!("项目路径不是目录: {}", project_root.display()));
+    }
+
+    let api_key = resolve_api_key(opts.api_key.as_deref())
+        .context("未找到 Windsurf API Key，请在设置中填写或登录 Windsurf 后重试")?;
+    let client = Client::builder()
+        .timeout(Duration::from_millis(opts.timeout_ms + 5000))
+        .build()
+        .context("创建 fast-context HTTP 客户端失败")?;
+
+    let jwt = fetch_jwt(&client, &api_key).await?;
+    if !check_rate_limit(&client, &api_key, &jwt).await? {
+        return Err(anyhow!("RATE_LIMITED: Windsurf 当前限流，请稍后重试"));
+    }
+
+    let repo_map = get_repo_map(&project_root, opts.tree_depth, &opts.exclude_paths);
+    let mut executor = ToolExecutor::new(project_root.clone());
+    let tool_defs = build_tool_definitions(opts.max_commands);
+    let system_prompt = build_system_prompt(opts.max_turns, opts.max_commands, opts.max_results);
+    let user_content = format!(
+        "Problem Statement: {}\n\nRepo Map (tree -L {} /codebase):\n```text\n{}\n```",
+        opts.query, repo_map.depth, repo_map.tree
+    );
+
+    let mut messages = vec![
+        ChatMessage::new(5, system_prompt),
+        ChatMessage::new(1, user_content),
+    ];
+    let total_api_calls = opts.max_turns as usize + 1;
+    let mut compensated_turns = 0usize;
+    let mut force_answer_injected = false;
+
+    let mut turn = 0usize;
+    while turn < total_api_calls + compensated_turns {
+        let proto = build_request(&api_key, &jwt, &messages, &tool_defs)?;
+        let response = match streaming_request(&client, &proto, opts.timeout_ms, 2).await {
+            Ok(response) => response,
+            Err(err)
+                if matches!(err.code.as_str(), "PAYLOAD_TOO_LARGE" | "TIMEOUT")
+                    && messages.len() > 4 =>
+            {
+                trim_messages(&mut messages);
+                let retry_proto = build_request(&api_key, &jwt, &messages, &tool_defs)?;
+                streaming_request(&client, &retry_proto, opts.timeout_ms, 0)
+                    .await
+                    .map_err(|retry_err| anyhow!("{} (context_trimmed=true)", retry_err))?
+            }
+            Err(err) => return Err(anyhow!(err)),
+        };
+
+        let Some(tool_call) = parse_response(&response)? else {
+            let text = parse_plain_response(&response);
+            if text.trim().is_empty() {
+                return Err(anyhow!("fast-context 未返回可解析响应"));
+            }
+            if text.starts_with("[Error]") {
+                return Err(anyhow!(text));
+            }
+            return Ok(SearchResult {
+                files: Vec::new(),
+                rg_patterns: executor.collected_rg_patterns(),
+                meta: build_meta(&repo_map, true, Some(text)),
+            });
+        };
+
+        match tool_call.name.as_str() {
+            "answer" => {
+                let answer_xml = tool_call
+                    .args
+                    .get("answer")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let files = parse_answer(answer_xml, &project_root)?;
+                return Ok(SearchResult {
+                    files,
+                    rg_patterns: executor.collected_rg_patterns(),
+                    meta: build_meta(&repo_map, true, None),
+                });
+            }
+            "restricted_exec" => {
+                let call_id = Uuid::new_v4().to_string();
+                let args_json = serde_json::to_string(&tool_call.args)
+                    .context("序列化 fast-context 工具参数失败")?;
+                let valid_commands = count_valid_commands(&tool_call.args);
+                let results = executor.exec_tool_call(&tool_call.args).await;
+
+                if valid_commands == 0 && compensated_turns < 2 {
+                    compensated_turns += 1;
+                }
+
+                messages.push(ChatMessage {
+                    role: 2,
+                    content: tool_call.thinking,
+                    tool_call_id: Some(call_id.clone()),
+                    tool_name: Some("restricted_exec".to_string()),
+                    tool_args_json: Some(args_json),
+                    ref_call_id: None,
+                });
+                messages.push(ChatMessage {
+                    role: 4,
+                    content: results,
+                    tool_call_id: None,
+                    tool_name: None,
+                    tool_args_json: None,
+                    ref_call_id: Some(call_id),
+                });
+
+                let effective_turn = turn.saturating_sub(compensated_turns);
+                if effective_turn >= opts.max_turns.saturating_sub(1) as usize
+                    && !force_answer_injected
+                {
+                    messages.push(ChatMessage::new(1, FINAL_FORCE_ANSWER.to_string()));
+                    force_answer_injected = true;
+                }
+            }
+            other => return Err(anyhow!("fast-context 返回未知工具调用: {}", other)),
+        }
+        turn += 1;
+    }
+
+    Ok(SearchResult {
+        files: Vec::new(),
+        rg_patterns: executor.collected_rg_patterns(),
+        meta: build_meta(
+            &repo_map,
+            true,
+            Some("Max turns reached without getting an answer".to_string()),
+        ),
+    })
+}
+
+impl ChatMessage {
+    fn new(role: u64, content: String) -> Self {
+        Self {
+            role,
+            content,
+            tool_call_id: None,
+            tool_name: None,
+            tool_args_json: None,
+            ref_call_id: None,
+        }
+    }
+}
+
+fn resolve_api_key(configured: Option<&str>) -> Result<String> {
+    if let Some(key) = configured.map(str::trim).filter(|s| !s.is_empty()) {
+        return Ok(key.to_string());
+    }
+    if let Ok(key) = env::var("WINDSURF_API_KEY") {
+        let key = key.trim().to_string();
+        if !key.is_empty() {
+            return Ok(key);
+        }
+    }
+    extract_windsurf_api_key()?.ok_or_else(|| anyhow!("Windsurf 本地登录库中没有 apiKey"))
+}
+
+fn extract_windsurf_api_key() -> Result<Option<String>> {
+    let db_path = windsurf_state_db_path()?;
+    if !db_path.exists() {
+        return Ok(None);
+    }
+
+    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("打开 Windsurf 登录数据库失败: {}", db_path.display()))?;
+    let value: String = conn
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key = 'windsurfAuthStatus'",
+            [],
+            |row| row.get(0),
+        )
+        .context("读取 windsurfAuthStatus 记录失败")?;
+    let json: Value = serde_json::from_str(&value).context("解析 windsurfAuthStatus JSON 失败")?;
+    Ok(json
+        .get("apiKey")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned))
+}
+
+fn windsurf_state_db_path() -> Result<PathBuf> {
+    if cfg!(target_os = "macos") {
+        let home = dirs::home_dir().ok_or_else(|| anyhow!("无法定位用户主目录"))?;
+        return Ok(home
+            .join("Library")
+            .join("Application Support")
+            .join("Windsurf")
+            .join("User")
+            .join("globalStorage")
+            .join("state.vscdb"));
+    }
+    if cfg!(target_os = "windows") {
+        let appdata = env::var("APPDATA").context("无法读取 APPDATA 环境变量")?;
+        return Ok(PathBuf::from(appdata)
+            .join("Windsurf")
+            .join("User")
+            .join("globalStorage")
+            .join("state.vscdb"));
+    }
+
+    let config_root = env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|_| {
+            dirs::home_dir()
+                .map(|home| home.join(".config"))
+                .ok_or(env::VarError::NotPresent)
+        })
+        .context("无法定位 Linux 配置目录")?;
+    Ok(config_root
+        .join("Windsurf")
+        .join("User")
+        .join("globalStorage")
+        .join("state.vscdb"))
+}
+
+async fn fetch_jwt(client: &Client, api_key: &str) -> Result<String> {
+    let mut meta = ProtobufEncoder::default();
+    meta.write_string(1, WS_APP);
+    meta.write_string(2, &ws_app_ver());
+    meta.write_string(3, api_key);
+    meta.write_string(4, "zh-cn");
+    meta.write_string(7, &ws_ls_ver());
+    meta.write_string(12, WS_APP);
+    meta.write_bytes(30, &[0x00, 0x01]);
+
+    let mut outer = ProtobufEncoder::default();
+    outer.write_message(1, &meta);
+    let response = unary_request(
+        client,
+        &format!("{AUTH_BASE}/GetUserJwt"),
+        &outer.into_bytes(),
+        false,
+        30_000,
+    )
+    .await
+    .map_err(|e| anyhow!("获取 Windsurf JWT 失败: {}", e))?;
+
+    extract_jwt_from_response(&response).ok_or_else(|| anyhow!("无法从 GetUserJwt 响应中提取 JWT"))
+}
+
+fn extract_jwt_from_response(response: &[u8]) -> Option<String> {
+    let mut candidates = vec![response.to_vec()];
+
+    if let Ok(decoded) = gunzip_bytes(response) {
+        candidates.push(decoded);
+    }
+    candidates.extend(connect_frame_decode(response));
+
+    for bytes in candidates {
+        for value in extract_strings(&bytes) {
+            let trimmed = value.trim();
+            if trimmed.starts_with("eyJ") && trimmed.contains('.') {
+                return Some(trimmed.to_string());
+            }
+        }
+
+        let raw_text = String::from_utf8_lossy(&bytes);
+        for part in raw_text.split(|ch: char| ch.is_whitespace() || matches!(ch, '"' | '\'' | ','))
+        {
+            let trimmed = part.trim();
+            if trimmed.starts_with("eyJ") && trimmed.contains('.') {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+async fn check_rate_limit(client: &Client, api_key: &str, jwt: &str) -> Result<bool> {
+    let mut request = ProtobufEncoder::default();
+    request.write_message(1, &build_metadata(api_key, jwt)?);
+    request.write_string(3, &ws_model());
+
+    match unary_request(
+        client,
+        &format!("{API_BASE}/CheckUserMessageRateLimit"),
+        &request.into_bytes(),
+        true,
+        30_000,
+    )
+    .await
+    {
+        Ok(_) => Ok(true),
+        Err(err) if err.status == Some(429) => Ok(false),
+        Err(_) => Ok(true),
+    }
+}
+
+async fn unary_request(
+    client: &Client,
+    url: &str,
+    proto_bytes: &[u8],
+    compress: bool,
+    timeout_ms: u64,
+) -> FcResult<Vec<u8>> {
+    let mut body = proto_bytes.to_vec();
+    let mut request = client
+        .post(url)
+        .timeout(Duration::from_millis(timeout_ms))
+        .header("Content-Type", "application/proto")
+        .header("Connect-Protocol-Version", "1")
+        .header("User-Agent", "connect-go/1.18.1 (go1.25.5)")
+        .header("Accept-Encoding", "gzip");
+
+    if compress {
+        body = gzip_bytes(proto_bytes)?;
+        request = request.header("Content-Encoding", "gzip");
+    }
+
+    let response = request
+        .body(body)
+        .send()
+        .await
+        .map_err(classify_reqwest_error)?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(FastContextError::status(status));
+    }
+    response
+        .bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(classify_reqwest_error)
+}
+
+async fn streaming_request(
+    client: &Client,
+    proto_bytes: &[u8],
+    timeout_ms: u64,
+    max_retries: usize,
+) -> FcResult<Vec<u8>> {
+    let frame = connect_frame_encode(proto_bytes, true)?;
+    let url = format!("{API_BASE}/GetDevstralStream");
+    let base_timeout_ms = timeout_ms.max(1000);
+    let abort_ms = base_timeout_ms + 5000;
+    let mut last_error = None;
+
+    for attempt in 0..=max_retries {
+        let trace_id = Uuid::new_v4().simple().to_string();
+        let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
+        let response = client
+            .post(&url)
+            .timeout(Duration::from_millis(abort_ms))
+            .header("Content-Type", "application/connect+proto")
+            .header("Connect-Protocol-Version", "1")
+            .header("Connect-Accept-Encoding", "gzip")
+            .header("Connect-Content-Encoding", "gzip")
+            .header("Connect-Timeout-Ms", base_timeout_ms.to_string())
+            .header("User-Agent", "connect-go/1.18.1 (go1.25.5)")
+            .header("Accept-Encoding", "identity")
+            .header(
+                "Baggage",
+                format!(
+                    "sentry-release=language-server-windsurf@{},sentry-environment=stable,sentry-sampled=false,sentry-trace_id={},sentry-public_key=b813f73488da69eedec534dba1029111",
+                    ws_ls_ver(), trace_id
+                ),
+            )
+            .header("Sentry-Trace", format!("{}-{}-0", trace_id, span_id))
+            .body(frame.clone())
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) if resp.status().is_success() => {
+                return resp
+                    .bytes()
+                    .await
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(classify_reqwest_error);
+            }
+            Ok(resp) => {
+                let err = FastContextError::status(resp.status());
+                if err
+                    .status
+                    .is_some_and(|s| (400..500).contains(&s) && s != 429)
+                {
+                    return Err(err);
+                }
+                last_error = Some(err);
+            }
+            Err(err) => {
+                let err = classify_reqwest_error(err);
+                last_error = Some(err);
+            }
+        }
+
+        if attempt < max_retries {
+            tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1))).await;
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| FastContextError::timeout("streaming request timed out")))
+}
+
+fn classify_reqwest_error(err: reqwest::Error) -> FastContextError {
+    if err.is_timeout() {
+        FastContextError::timeout(err.to_string())
+    } else if let Some(status) = err.status() {
+        FastContextError::status(status)
+    } else {
+        FastContextError::network(err.to_string())
+    }
+}
+
+fn build_metadata(api_key: &str, jwt: &str) -> Result<ProtobufEncoder> {
+    let mut meta = ProtobufEncoder::default();
+    meta.write_string(1, WS_APP);
+    meta.write_string(2, &ws_app_ver());
+    meta.write_string(3, api_key);
+    meta.write_string(4, "zh-cn");
+    meta.write_string(5, &serde_json::to_string(&system_info())?);
+    meta.write_string(7, &ws_ls_ver());
+    meta.write_string(8, &serde_json::to_string(&cpu_info())?);
+    meta.write_string(12, WS_APP);
+    meta.write_string(21, jwt);
+    meta.write_bytes(30, &[0x00, 0x01]);
+    Ok(meta)
+}
+
+fn build_request(
+    api_key: &str,
+    jwt: &str,
+    messages: &[ChatMessage],
+    tool_defs: &str,
+) -> Result<Vec<u8>> {
+    let mut request = ProtobufEncoder::default();
+    request.write_message(1, &build_metadata(api_key, jwt)?);
+    for message in messages {
+        request.write_message(2, &build_chat_message(message));
+    }
+    request.write_string(3, tool_defs);
+    Ok(request.into_bytes())
+}
+
+fn build_chat_message(message: &ChatMessage) -> ProtobufEncoder {
+    let mut msg = ProtobufEncoder::default();
+    msg.write_varint(2, message.role);
+    msg.write_string(3, &message.content);
+
+    if let (Some(call_id), Some(tool_name), Some(args_json)) = (
+        message.tool_call_id.as_deref(),
+        message.tool_name.as_deref(),
+        message.tool_args_json.as_deref(),
+    ) {
+        let mut tool_call = ProtobufEncoder::default();
+        tool_call.write_string(1, call_id);
+        tool_call.write_string(2, tool_name);
+        tool_call.write_string(3, args_json);
+        msg.write_message(6, &tool_call);
+    }
+
+    if let Some(ref_call_id) = message.ref_call_id.as_deref() {
+        msg.write_string(7, ref_call_id);
+    }
+
+    msg
+}
+
+fn parse_response(data: &[u8]) -> Result<Option<ParsedToolCall>> {
+    let mut all_text = String::new();
+    for frame in connect_frame_decode(data) {
+        let text_candidate = String::from_utf8_lossy(&frame);
+        if text_candidate.starts_with('{') {
+            if let Ok(err_obj) = serde_json::from_str::<Value>(&text_candidate) {
+                if let Some(error) = err_obj.get("error") {
+                    let code = error
+                        .get("code")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+                    return Err(anyhow!("[Error] {code}: {message}"));
+                }
+            }
+        }
+
+        let raw_text = text_candidate.replace('\u{fffd}', "");
+        if raw_text.contains("[TOOL_CALLS]") {
+            all_text = raw_text;
+            break;
+        }
+
+        for s in extract_strings(&frame) {
+            if s.len() > 10 {
+                all_text.push_str(&s);
+            }
+        }
+    }
+
+    Ok(parse_tool_call(&all_text))
+}
+
+fn parse_plain_response(data: &[u8]) -> String {
+    connect_frame_decode(data)
+        .into_iter()
+        .flat_map(|frame| extract_strings(&frame))
+        .filter(|s| s.len() > 10)
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn parse_tool_call(text: &str) -> Option<ParsedToolCall> {
+    let text = text.replace("</s>", "");
+    let marker = "[TOOL_CALLS]";
+    let args_marker = "[ARGS]";
+    let marker_start = text.find(marker)?;
+    let name_start = marker_start + marker.len();
+    let args_start_rel = text[name_start..].find(args_marker)?;
+    let name = text[name_start..name_start + args_start_rel].trim();
+    if name.is_empty() {
+        return None;
+    }
+
+    let raw = text[name_start + args_start_rel + args_marker.len()..].trim();
+    let end = find_json_object_end(raw).unwrap_or(raw.len());
+    let args = serde_json::from_str(&raw[..end]).ok()?;
+    Some(ParsedToolCall {
+        thinking: text[..marker_start].trim().to_string(),
+        name: name.to_string(),
+        args,
+    })
+}
+
+fn find_json_object_end(raw: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (idx, ch) in raw.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(idx + ch.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_answer(xml_text: &str, project_root: &Path) -> Result<Vec<FastContextFile>> {
+    let file_re =
+        Regex::new(r#"(?s)<file\s+path=["']([^"']+)["']>(.*?)</file>"#).expect("valid regex");
+    let range_re = Regex::new(r"<range>(\d+)-(\d+)</range>").expect("valid regex");
+    let root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let mut files = Vec::new();
+
+    for cap in file_re.captures_iter(xml_text) {
+        let vpath = cap.get(1).map(|m| m.as_str()).unwrap_or_default();
+        let body = cap.get(2).map(|m| m.as_str()).unwrap_or_default();
+        let Some((rel_path, full_path)) = resolve_answer_path(vpath, &root) else {
+            continue;
+        };
+
+        let ranges = range_re
+            .captures_iter(body)
+            .filter_map(|range_cap| {
+                let start = range_cap.get(1)?.as_str().parse::<usize>().ok()?;
+                let end = range_cap.get(2)?.as_str().parse::<usize>().ok()?;
+                Some([start.max(1), end.max(start)])
+            })
+            .collect::<Vec<_>>();
+
+        files.push(FastContextFile {
+            path: Some(rel_path),
+            full_path: Some(normalize_path(&full_path)),
+            ranges,
+        });
+    }
+
+    Ok(files)
+}
+
+fn resolve_answer_path(vpath: &str, root: &Path) -> Option<(String, PathBuf)> {
+    let mut normalized = vpath.trim().replace('\\', "/");
+    if normalized.starts_with("/codebase") {
+        normalized = normalized
+            .trim_start_matches("/codebase")
+            .trim_start_matches('/')
+            .to_string();
+    }
+
+    let candidate = if Path::new(&normalized).is_absolute() {
+        PathBuf::from(&normalized)
+    } else {
+        if has_parent_dir(Path::new(&normalized)) {
+            return None;
+        }
+        root.join(&normalized)
+    };
+    let absolute = candidate.canonicalize().unwrap_or(candidate);
+    if !absolute.starts_with(root) {
+        return None;
+    }
+    let rel = absolute.strip_prefix(root).ok().map(normalize_path)?;
+    Some((rel, absolute))
+}
+
+fn get_repo_map(project_root: &Path, target_depth: u8, exclude_paths: &[String]) -> RepoMap {
+    for depth in (1..=target_depth.max(1)).rev() {
+        let tree = build_tree(project_root, "/codebase", depth, exclude_paths);
+        let size_bytes = tree.len();
+        if size_bytes <= MAX_TREE_BYTES {
+            return RepoMap {
+                tree,
+                depth,
+                size_bytes,
+                fell_back: depth < target_depth,
+            };
+        }
+    }
+
+    let tree = list_root(project_root, exclude_paths);
+    RepoMap {
+        size_bytes: tree.len(),
+        tree,
+        depth: 0,
+        fell_back: true,
+    }
+}
+
+fn build_tree(root: &Path, label: &str, max_depth: u8, exclude_paths: &[String]) -> String {
+    let mut lines = vec![label.to_string()];
+    append_tree(root, "", 1, max_depth, exclude_paths, &mut lines);
+    lines.join("\n")
+}
+
+fn append_tree(
+    dir: &Path,
+    prefix: &str,
+    depth: u8,
+    max_depth: u8,
+    exclude_paths: &[String],
+    lines: &mut Vec<String>,
+) {
+    if depth > max_depth {
+        return;
+    }
+
+    let entries = sorted_entries(dir, exclude_paths);
+    let len = entries.len();
+    for (idx, entry) in entries.into_iter().enumerate() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let last = idx + 1 == len;
+        lines.push(format!(
+            "{}{} {}",
+            prefix,
+            if last { "`--" } else { "|--" },
+            name
+        ));
+        if entry.path().is_dir() {
+            let next_prefix = format!("{}{}", prefix, if last { "   " } else { "|  " });
+            append_tree(
+                &entry.path(),
+                &next_prefix,
+                depth + 1,
+                max_depth,
+                exclude_paths,
+                lines,
+            );
+        }
+    }
+}
+
+fn list_root(root: &Path, exclude_paths: &[String]) -> String {
+    let mut lines = vec!["/codebase".to_string()];
+    for entry in sorted_entries(root, exclude_paths) {
+        lines.push(format!("|-- {}", entry.file_name().to_string_lossy()));
+    }
+    lines.join("\n")
+}
+
+fn sorted_entries(dir: &Path, exclude_paths: &[String]) -> Vec<fs::DirEntry> {
+    let mut entries = match fs::read_dir(dir) {
+        Ok(read_dir) => read_dir.filter_map(|entry| entry.ok()).collect::<Vec<_>>(),
+        Err(_) => return Vec::new(),
+    };
+    entries.retain(|entry| {
+        let name = entry.file_name().to_string_lossy().to_string();
+        !matches_exclude(&name, exclude_paths)
+    });
+    entries.sort_by_key(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase());
+    entries
+}
+
+fn matches_exclude(name: &str, exclude_paths: &[String]) -> bool {
+    exclude_paths.iter().any(|pattern| {
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            return false;
+        }
+        if !pattern.contains('*') && !pattern.contains('?') {
+            return pattern == name;
+        }
+        glob_match(pattern, name)
+    })
+}
+
+fn glob_match(pattern: &str, text: &str) -> bool {
+    GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .build()
+        .map(|glob| glob.compile_matcher().is_match(text))
+        .unwrap_or(false)
+}
+
+fn build_system_prompt(max_turns: u8, max_commands: u8, max_results: u8) -> String {
+    format!(
+        r#"You are an expert software engineer providing code context for another engineer.
+Return only the files and inclusive line ranges needed to understand and implement the user's request.
+
+Environment:
+- Working directory is /codebase.
+- Tool-call protocol is text based: call tools by outputting `[TOOL_CALLS]restricted_exec[ARGS]{{...}}` or `[TOOL_CALLS]answer[ARGS]{{...}}` exactly.
+- You may use exactly one restricted_exec tool call per search turn.
+- Each restricted_exec call may include at most {max_commands} commands.
+- Available command types: rg, readfile, tree, ls, glob.
+- Prefer narrow rg searches first, then read complete semantic blocks.
+- Avoid generated, vendored, dependency, build, and cache directories unless directly relevant.
+- You have at most {max_turns} search turns before final answer.
+
+Final answer:
+- Use the answer tool by outputting `[TOOL_CALLS]answer[ARGS]{{"answer":"<ANSWER>...</ANSWER>"}}`.
+- answer must be XML with root <ANSWER>.
+- Use <file path="/codebase/path"><range>start-end</range></file>.
+- Aim for at most {max_results} files.
+- If nothing relevant exists, return <ANSWER></ANSWER>.
+"#
+    )
+}
+
+fn build_tool_definitions(max_commands: u8) -> String {
+    let mut props = Map::new();
+    for i in 1..=max_commands.max(1) {
+        props.insert(format!("command{i}"), command_schema(i));
+    }
+
+    json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "restricted_exec",
+                "description": "Execute restricted commands in parallel.",
+                "parameters": {
+                    "type": "object",
+                    "properties": props,
+                    "required": ["command1"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "answer",
+                "description": "Final answer with relevant files and line ranges.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "answer": { "type": "string", "description": "The final answer in XML format." }
+                    },
+                    "required": ["answer"]
+                }
+            }
+        }
+    ])
+    .to_string()
+}
+
+fn command_schema(n: u8) -> Value {
+    json!({
+        "type": "object",
+        "description": format!("Command {n} to execute."),
+        "oneOf": [
+            {
+                "properties": {
+                    "type": { "type": "string", "const": "rg" },
+                    "pattern": { "type": "string" },
+                    "path": { "type": "string" },
+                    "include": { "type": "array", "items": { "type": "string" } },
+                    "exclude": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["type", "pattern", "path"]
+            },
+            {
+                "properties": {
+                    "type": { "type": "string", "const": "readfile" },
+                    "file": { "type": "string" },
+                    "start_line": { "type": "integer" },
+                    "end_line": { "type": "integer" }
+                },
+                "required": ["type", "file"]
+            },
+            {
+                "properties": {
+                    "type": { "type": "string", "const": "tree" },
+                    "path": { "type": "string" },
+                    "levels": { "type": "integer" }
+                },
+                "required": ["type", "path"]
+            },
+            {
+                "properties": {
+                    "type": { "type": "string", "const": "ls" },
+                    "path": { "type": "string" },
+                    "long_format": { "type": "boolean" },
+                    "all": { "type": "boolean" }
+                },
+                "required": ["type", "path"]
+            },
+            {
+                "properties": {
+                    "type": { "type": "string", "const": "glob" },
+                    "pattern": { "type": "string" },
+                    "path": { "type": "string" },
+                    "type_filter": { "type": "string", "enum": ["file", "directory", "all"] }
+                },
+                "required": ["type", "pattern", "path"]
+            }
+        ]
+    })
+}
+
+fn count_valid_commands(args: &Value) -> usize {
+    args.as_object()
+        .map(|obj| {
+            obj.iter()
+                .filter(|(key, value)| {
+                    key.starts_with("command")
+                        && value.get("type").and_then(Value::as_str).is_some()
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn trim_messages(messages: &mut Vec<ChatMessage>) {
+    if messages.len() <= 4 {
+        return;
+    }
+    let mut trimmed = Vec::new();
+    trimmed.extend_from_slice(&messages[..2]);
+    trimmed.push(ChatMessage::new(
+        1,
+        "[Prior search rounds omitted to reduce payload. Provide your best answer based on available context.]".to_string(),
+    ));
+    trimmed.extend_from_slice(&messages[messages.len() - 2..]);
+    *messages = trimmed;
+}
+
+fn build_meta(repo_map: &RepoMap, native: bool, raw_response: Option<String>) -> Value {
+    let mut meta = json!({
+        "treeDepth": repo_map.depth,
+        "treeSizeKB": ((repo_map.size_bytes as f64 / 1024.0) * 10.0).round() / 10.0,
+        "fellBack": repo_map.fell_back,
+        "native": native
+    });
+    if let Some(raw) = raw_response {
+        meta["raw_response"] = Value::String(raw);
+    }
+    meta
+}
+
+#[derive(Default)]
+struct ProtobufEncoder {
+    bytes: Vec<u8>,
+}
+
+impl ProtobufEncoder {
+    fn write_varint(&mut self, field: u64, value: u64) {
+        self.bytes.extend(encode_varint((field << 3) | 0));
+        self.bytes.extend(encode_varint(value));
+    }
+
+    fn write_string(&mut self, field: u64, value: &str) {
+        self.write_bytes(field, value.as_bytes());
+    }
+
+    fn write_bytes(&mut self, field: u64, value: &[u8]) {
+        self.bytes.extend(encode_varint((field << 3) | 2));
+        self.bytes.extend(encode_varint(value.len() as u64));
+        self.bytes.extend(value);
+    }
+
+    fn write_message(&mut self, field: u64, sub: &ProtobufEncoder) {
+        self.write_bytes(field, &sub.bytes);
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+fn encode_varint(mut value: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    while value > 0x7f {
+        out.push(((value & 0x7f) as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push((value & 0x7f) as u8);
+    out
+}
+
+fn decode_varint(data: &[u8], offset: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    while *offset < data.len() {
+        let b = data[*offset];
+        *offset += 1;
+        value |= ((b & 0x7f) as u64) << shift;
+        if b & 0x80 == 0 {
+            return Some(value);
+        }
+        shift += 7;
+        if shift > 63 {
+            return None;
+        }
+    }
+    None
+}
+
+fn extract_strings(data: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    extract_strings_inner(data, 0, &mut out);
+    out
+}
+
+fn extract_strings_inner(data: &[u8], depth: u8, out: &mut Vec<String>) {
+    if depth > 3 {
+        return;
+    }
+    let mut i = 0usize;
+    while i < data.len() {
+        let Some(tag) = decode_varint(data, &mut i) else {
+            break;
+        };
+        match tag & 0x7 {
+            0 => {
+                let _ = decode_varint(data, &mut i);
+            }
+            1 => i = i.saturating_add(8).min(data.len()),
+            2 => {
+                let Some(length) = decode_varint(data, &mut i).map(|v| v as usize) else {
+                    break;
+                };
+                if i + length > data.len() {
+                    break;
+                }
+                let raw = &data[i..i + length];
+                let text = String::from_utf8_lossy(raw).replace('\u{fffd}', "");
+                if text.len() > 5 && printable_score(&text) > 0.75 {
+                    out.push(text);
+                }
+                extract_strings_inner(raw, depth + 1, out);
+                i += length;
+            }
+            5 => i = i.saturating_add(4).min(data.len()),
+            _ => break,
+        }
+    }
+}
+
+fn printable_score(text: &str) -> f32 {
+    let total = text.chars().count().max(1) as f32;
+    let printable = text
+        .chars()
+        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
+        .count() as f32;
+    printable / total
+}
+
+fn connect_frame_encode(proto_bytes: &[u8], compress: bool) -> FcResult<Vec<u8>> {
+    let (flags, payload) = if compress {
+        (1u8, gzip_bytes(proto_bytes)?)
+    } else {
+        (0u8, proto_bytes.to_vec())
+    };
+    let mut frame = Vec::with_capacity(payload.len() + 5);
+    frame.push(flags);
+    frame.extend((payload.len() as u32).to_be_bytes());
+    frame.extend(payload);
+    Ok(frame)
+}
+
+fn connect_frame_decode(data: &[u8]) -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
+    let mut i = 0usize;
+    while i + 5 <= data.len() {
+        let flags = data[i];
+        let length =
+            u32::from_be_bytes([data[i + 1], data[i + 2], data[i + 3], data[i + 4]]) as usize;
+        i += 5;
+        if i + length > data.len() {
+            break;
+        }
+        let payload = &data[i..i + length];
+        i += length;
+        if matches!(flags, 1 | 3) {
+            frames.push(gunzip_bytes(payload).unwrap_or_else(|_| payload.to_vec()));
+        } else {
+            frames.push(payload.to_vec());
+        }
+    }
+    frames
+}
+
+fn gzip_bytes(data: &[u8]) -> FcResult<Vec<u8>> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(data)
+        .map_err(|e| FastContextError::network(e.to_string()))?;
+    encoder
+        .finish()
+        .map_err(|e| FastContextError::network(e.to_string()))
+}
+
+fn gunzip_bytes(data: &[u8]) -> Result<Vec<u8>> {
+    let mut decoder = GzDecoder::new(data);
+    let mut out = Vec::new();
+    decoder.read_to_end(&mut out)?;
+    Ok(out)
+}
+
+struct ToolExecutor {
+    root: PathBuf,
+    root_slash: String,
+    collected_rg_patterns: Vec<String>,
+}
+
+impl ToolExecutor {
+    fn new(root: PathBuf) -> Self {
+        let root_slash = normalize_path(&root);
+        Self {
+            root,
+            root_slash,
+            collected_rg_patterns: Vec::new(),
+        }
+    }
+
+    fn collected_rg_patterns(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        self.collected_rg_patterns
+            .iter()
+            .filter(|pattern| seen.insert((*pattern).clone()))
+            .cloned()
+            .collect()
+    }
+
+    async fn exec_tool_call(&mut self, args: &Value) -> String {
+        let Some(obj) = args.as_object() else {
+            return "Error: missing or invalid tool args".to_string();
+        };
+        let mut keys = obj
+            .keys()
+            .filter(|key| key.starts_with("command"))
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.sort();
+
+        let mut parts = Vec::new();
+        for key in keys {
+            let output = self.exec_command(&obj[&key]).await;
+            parts.push(format!("<{key}_result>\n{output}\n</{key}_result>"));
+        }
+        parts.join("")
+    }
+
+    async fn exec_command(&mut self, cmd: &Value) -> String {
+        let Some(kind) = cmd.get("type").and_then(Value::as_str) else {
+            return "Error: missing or invalid command".to_string();
+        };
+        match kind {
+            "rg" => {
+                let pattern = cmd.get("pattern").and_then(Value::as_str).unwrap_or("");
+                let path = cmd.get("path").and_then(Value::as_str).unwrap_or("");
+                let include = string_array(cmd.get("include"));
+                let exclude = string_array(cmd.get("exclude"));
+                self.rg(pattern, path, include, exclude).await
+            }
+            "readfile" => {
+                let file = cmd.get("file").and_then(Value::as_str).unwrap_or("");
+                let start = cmd
+                    .get("start_line")
+                    .and_then(Value::as_u64)
+                    .map(|v| v as usize);
+                let end = cmd
+                    .get("end_line")
+                    .and_then(Value::as_u64)
+                    .map(|v| v as usize);
+                self.readfile(file, start, end)
+            }
+            "tree" => {
+                let path = cmd.get("path").and_then(Value::as_str).unwrap_or("");
+                let levels = cmd.get("levels").and_then(Value::as_u64).map(|v| v as u8);
+                self.tree(path, levels)
+            }
+            "ls" => {
+                let path = cmd.get("path").and_then(Value::as_str).unwrap_or("");
+                let long_format = cmd
+                    .get("long_format")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let all = cmd.get("all").and_then(Value::as_bool).unwrap_or(false);
+                self.ls(path, long_format, all)
+            }
+            "glob" => {
+                let pattern = cmd.get("pattern").and_then(Value::as_str).unwrap_or("");
+                let path = cmd.get("path").and_then(Value::as_str).unwrap_or("");
+                let type_filter = cmd
+                    .get("type_filter")
+                    .and_then(Value::as_str)
+                    .unwrap_or("all");
+                self.glob(pattern, path, type_filter)
+            }
+            other => format!("Error: unknown command type '{other}'"),
+        }
+    }
+
+    async fn rg(
+        &mut self,
+        pattern: &str,
+        path: &str,
+        include: Vec<String>,
+        exclude: Vec<String>,
+    ) -> String {
+        if pattern.trim().is_empty() {
+            return "Error: missing or invalid pattern".to_string();
+        }
+        let Ok(real_path) = self.real_path(path) else {
+            return format!("Error: path does not exist: {path}");
+        };
+        if !real_path.exists() {
+            return format!("Error: path does not exist: {path}");
+        }
+        self.collected_rg_patterns.push(pattern.to_string());
+
+        let mut command = Command::new("rg");
+        command
+            .arg("--no-heading")
+            .arg("-n")
+            .arg("--max-count")
+            .arg("50");
+        for glob in &include {
+            command.arg("--glob").arg(glob);
+        }
+        for glob in &exclude {
+            command.arg("--glob").arg(format!("!{glob}"));
+        }
+        command
+            .arg(pattern)
+            .arg(&real_path)
+            .env("RIPGREP_CONFIG_PATH", "")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        match tokio::time::timeout(Duration::from_secs(30), command.output()).await {
+            Ok(Ok(output)) if output.status.success() => {
+                truncate_output(&self.remap(&String::from_utf8_lossy(&output.stdout)))
+            }
+            Ok(Ok(output)) if output.status.code() == Some(1) => "(no matches)".to_string(),
+            Ok(Ok(output)) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                truncate_output(&self.remap(if stderr.trim().is_empty() {
+                    "Error: rg failed"
+                } else {
+                    &stderr
+                }))
+            }
+            // 本机未安装 rg 时走 Rust 内置搜索，保证 fast-context 不因外部二进制缺失不可用。
+            Ok(Err(_)) => self.rg_fallback(pattern, &real_path, &include, &exclude),
+            Err(_) => "Error: rg timed out".to_string(),
+        }
+    }
+
+    fn rg_fallback(
+        &self,
+        pattern: &str,
+        real_path: &Path,
+        include: &[String],
+        exclude: &[String],
+    ) -> String {
+        let regex = match Regex::new(pattern) {
+            Ok(regex) => regex,
+            Err(err) => return format!("Error: invalid regex: {err}"),
+        };
+        let mut matches = Vec::new();
+        collect_rg_matches(
+            &self.root,
+            real_path,
+            &regex,
+            include,
+            exclude,
+            &mut matches,
+        );
+        if matches.is_empty() {
+            "(no matches)".to_string()
+        } else {
+            truncate_output(&self.remap(&matches.join("\n")))
+        }
+    }
+
+    fn readfile(&self, file: &str, start_line: Option<usize>, end_line: Option<usize>) -> String {
+        let Ok(path) = self.real_path(file) else {
+            return format!("Error: file not found: {file}");
+        };
+        if !path.is_file() {
+            return format!("Error: file not found: {file}");
+        }
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(err) => return format!("Error: {err}"),
+        };
+        let start = start_line.unwrap_or(1).max(1);
+        let end = end_line
+            .unwrap_or_else(|| content.lines().count())
+            .max(start);
+        let output = content
+            .lines()
+            .enumerate()
+            .filter_map(|(idx, line)| {
+                let line_no = idx + 1;
+                (line_no >= start && line_no <= end).then(|| format!("{line_no}:{line}"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        truncate_output(&output)
+    }
+
+    fn tree(&self, path: &str, levels: Option<u8>) -> String {
+        let Ok(real_path) = self.real_path(path) else {
+            return format!("Error: dir not found: {path}");
+        };
+        if !real_path.is_dir() {
+            return format!("Error: dir not found: {path}");
+        }
+        let label = self.virtual_label(path);
+        truncate_output(&self.remap(&build_tree(
+            &real_path,
+            &label,
+            levels.unwrap_or(3).clamp(1, 6),
+            &[],
+        )))
+    }
+
+    fn ls(&self, path: &str, long_format: bool, all: bool) -> String {
+        let Ok(real_path) = self.real_path(path) else {
+            return format!("Error: dir not found: {path}");
+        };
+        if !real_path.is_dir() {
+            return format!("Error: not a directory: {path}");
+        }
+        let mut entries = match fs::read_dir(&real_path) {
+            Ok(entries) => entries.filter_map(|entry| entry.ok()).collect::<Vec<_>>(),
+            Err(err) => return format!("Error: {err}"),
+        };
+        entries.sort_by_key(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase());
+        if !all {
+            entries.retain(|entry| !entry.file_name().to_string_lossy().starts_with('.'));
+        }
+        if !long_format {
+            return truncate_output(
+                &entries
+                    .iter()
+                    .map(|entry| entry.file_name().to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
+
+        let mut lines = vec![format!("total {}", entries.len())];
+        for entry in entries {
+            let metadata = entry.metadata().ok();
+            let kind = if metadata.as_ref().is_some_and(|m| m.is_dir()) {
+                "d"
+            } else {
+                "-"
+            };
+            let size = metadata.map(|m| m.len()).unwrap_or(0);
+            lines.push(format!(
+                "{kind}rwxr-xr-x  1 user staff {size:>8} {}",
+                entry.file_name().to_string_lossy()
+            ));
+        }
+        truncate_output(&lines.join("\n"))
+    }
+
+    fn glob(&self, pattern: &str, path: &str, type_filter: &str) -> String {
+        if pattern.trim().is_empty() {
+            return "Error: missing or invalid pattern".to_string();
+        }
+        let Ok(root) = self.real_path(path) else {
+            return format!("Error: path does not exist: {path}");
+        };
+        if !root.exists() {
+            return format!("Error: path does not exist: {path}");
+        }
+        let matcher = match GlobBuilder::new(pattern).literal_separator(true).build() {
+            Ok(glob) => glob.compile_matcher(),
+            Err(err) => return format!("Error: invalid glob: {err}"),
+        };
+        let mut matches = Vec::new();
+        collect_glob_matches(&root, &root, &matcher, type_filter, &mut matches);
+        matches.sort();
+        matches.truncate(100);
+        if matches.is_empty() {
+            "(no matches)".to_string()
+        } else {
+            self.remap(
+                &matches
+                    .iter()
+                    .map(|path| normalize_path(path))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        }
+    }
+
+    fn real_path(&self, value: &str) -> std::result::Result<PathBuf, ()> {
+        if value.trim().is_empty() {
+            return Err(());
+        }
+        let normalized = value.trim().replace('\\', "/");
+        let candidate = if normalized.starts_with("/codebase") {
+            let rel = normalized
+                .trim_start_matches("/codebase")
+                .trim_start_matches('/');
+            let rel_path = Path::new(rel);
+            if has_parent_dir(rel_path) {
+                return Err(());
+            }
+            self.root.join(rel_path)
+        } else {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                path
+            } else {
+                if has_parent_dir(&path) {
+                    return Err(());
+                }
+                self.root.join(path)
+            }
+        };
+
+        let absolute = candidate.canonicalize().unwrap_or(candidate);
+        if absolute.starts_with(&self.root) {
+            Ok(absolute)
+        } else {
+            Err(())
+        }
+    }
+
+    fn remap(&self, text: &str) -> String {
+        text.replace(&self.root_slash, "/codebase")
+            .replace(&self.root.to_string_lossy().to_string(), "/codebase")
+            .replace('\\', "/")
+    }
+
+    fn virtual_label(&self, path: &str) -> String {
+        if path.trim().is_empty() {
+            return "/codebase".to_string();
+        }
+        self.remap(path)
+    }
+}
+
+fn collect_glob_matches(
+    base: &Path,
+    dir: &Path,
+    matcher: &globset::GlobMatcher,
+    type_filter: &str,
+    matches: &mut Vec<PathBuf>,
+) {
+    if matches.len() >= 100 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        if matches.len() >= 100 {
+            return;
+        }
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let rel = path.strip_prefix(base).unwrap_or(&path);
+        let name = entry.file_name().to_string_lossy().to_string();
+        let matched = matcher.is_match(rel) || matcher.is_match(&name);
+        if matched && matches_type(type_filter, metadata.is_file(), metadata.is_dir()) {
+            matches.push(path.clone());
+        }
+        if metadata.is_dir() && !name.starts_with('.') {
+            collect_glob_matches(base, &path, matcher, type_filter, matches);
+        }
+    }
+}
+
+fn collect_rg_matches(
+    root: &Path,
+    path: &Path,
+    regex: &Regex,
+    include: &[String],
+    exclude: &[String],
+    matches: &mut Vec<String>,
+) {
+    if matches.len() >= RESULT_MAX_LINES {
+        return;
+    }
+
+    if path.is_file() {
+        if !path_matches_filters(root, path, include, exclude) {
+            return;
+        }
+        let Ok(content) = fs::read_to_string(path) else {
+            return;
+        };
+        for (idx, line) in content.lines().enumerate() {
+            if matches.len() >= RESULT_MAX_LINES {
+                return;
+            }
+            if regex.is_match(line) {
+                matches.push(format!("{}:{}:{}", normalize_path(path), idx + 1, line));
+            }
+        }
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        if matches.len() >= RESULT_MAX_LINES {
+            return;
+        }
+        let entry_path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(".git") || exclude.iter().any(|pattern| glob_match(pattern, &name)) {
+            continue;
+        }
+        if entry_path.is_dir() {
+            collect_rg_matches(root, &entry_path, regex, include, exclude, matches);
+        } else {
+            collect_rg_matches(root, &entry_path, regex, include, exclude, matches);
+        }
+    }
+}
+
+fn path_matches_filters(root: &Path, path: &Path, include: &[String], exclude: &[String]) -> bool {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    let rel_slash = normalize_path(rel);
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    if exclude
+        .iter()
+        .any(|pattern| glob_match(pattern, &rel_slash) || glob_match(pattern, &file_name))
+    {
+        return false;
+    }
+    include.is_empty()
+        || include
+            .iter()
+            .any(|pattern| glob_match(pattern, &rel_slash) || glob_match(pattern, &file_name))
+}
+
+fn matches_type(type_filter: &str, is_file: bool, is_dir: bool) -> bool {
+    match type_filter {
+        "file" => is_file,
+        "directory" => is_dir,
+        _ => true,
+    }
+}
+
+fn string_array(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn truncate_output(text: &str) -> String {
+    let lines = text.lines().collect::<Vec<_>>();
+    let mut truncated = lines
+        .iter()
+        .take(RESULT_MAX_LINES)
+        .map(|line| {
+            if line.chars().count() > LINE_MAX_CHARS {
+                line.chars().take(LINE_MAX_CHARS).collect::<String>()
+            } else {
+                (*line).to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if lines.len() > RESULT_MAX_LINES {
+        truncated.push_str("\n... (lines truncated) ...");
+    }
+    truncated
+}
+
+fn has_parent_dir(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
+}
+
+fn normalize_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn ws_app_ver() -> String {
+    env::var("WS_APP_VER").unwrap_or_else(|_| DEFAULT_WS_APP_VER.to_string())
+}
+
+fn ws_ls_ver() -> String {
+    env::var("WS_LS_VER").unwrap_or_else(|_| DEFAULT_WS_LS_VER.to_string())
+}
+
+fn ws_model() -> String {
+    env::var("WS_MODEL").unwrap_or_else(|_| DEFAULT_WS_MODEL.to_string())
+}
+
+fn system_info() -> Value {
+    let os = if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(target_os = "windows") {
+        "win32"
+    } else {
+        "linux"
+    };
+    json!({
+        "Os": os,
+        "Arch": env::consts::ARCH,
+        "Release": "",
+        "Version": "",
+        "Machine": env::consts::ARCH,
+        "Nodename": hostname(),
+        "Sysname": if cfg!(target_os = "macos") { "Darwin" } else if cfg!(target_os = "windows") { "Windows_NT" } else { "Linux" },
+        "ProductVersion": ""
+    })
+}
+
+fn cpu_info() -> Value {
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    json!({
+        "NumSockets": 1,
+        "NumCores": threads,
+        "NumThreads": threads,
+        "VendorID": "",
+        "Family": "0",
+        "Model": "0",
+        "ModelName": "Unknown",
+        "Memory": 0
+    })
+}
+
+fn hostname() -> String {
+    env::var("COMPUTERNAME")
+        .or_else(|_| env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "localhost".to_string())
+}
+
+#[allow(dead_code)]
+fn jwt_exp(token: &str) -> Option<u64> {
+    let payload = token.split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let value: Value = serde_json::from_slice(&decoded).ok()?;
+    value.get("exp").and_then(Value::as_u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn protobuf_varint_round_trip() {
+        for value in [0, 1, 127, 128, 16_384, u32::MAX as u64] {
+            let bytes = encode_varint(value);
+            let mut offset = 0;
+            assert_eq!(decode_varint(&bytes, &mut offset), Some(value));
+            assert_eq!(offset, bytes.len());
+        }
+    }
+
+    #[test]
+    fn connect_frame_round_trip_supports_gzip_and_plain() {
+        let payload = b"hello fast-context";
+
+        let compressed = connect_frame_encode(payload, true).expect("gzip frame 应可编码");
+        assert_eq!(connect_frame_decode(&compressed), vec![payload.to_vec()]);
+
+        let plain = connect_frame_encode(payload, false).expect("plain frame 应可编码");
+        assert_eq!(connect_frame_decode(&plain), vec![payload.to_vec()]);
+    }
+
+    #[test]
+    fn parse_tool_call_extracts_json_and_ignores_tail() {
+        let parsed = parse_tool_call(
+            "thinking\n[TOOL_CALLS]restricted_exec[ARGS]{\"command1\":{\"type\":\"rg\",\"pattern\":\"SouTool\",\"path\":\"/codebase/src\"}}</s>",
+        )
+        .expect("应识别 restricted_exec 调用");
+
+        assert_eq!(parsed.thinking, "thinking");
+        assert_eq!(parsed.name, "restricted_exec");
+        assert_eq!(parsed.args["command1"]["pattern"].as_str(), Some("SouTool"));
+    }
+
+    #[test]
+    fn parse_response_surfaces_connect_error_json() {
+        let frame = connect_frame_encode(
+            br#"{"error":{"code":"unauthenticated","message":"bad token"}}"#,
+            false,
+        )
+        .expect("error frame 应可编码");
+        let error = parse_response(&frame).expect_err("Connect error frame 应返回错误");
+        assert!(error.to_string().contains("unauthenticated"));
+        assert!(error.to_string().contains("bad token"));
+    }
+
+    #[test]
+    fn parse_answer_keeps_safe_paths_and_rejects_escape() {
+        let temp = tempdir().expect("临时目录应创建成功");
+        let src_dir = temp.path().join("src");
+        fs::create_dir_all(&src_dir).expect("src 目录应创建成功");
+        let file = src_dir.join("lib.rs");
+        fs::write(&file, "fn main() {}\n").expect("测试文件应写入成功");
+
+        let xml = r#"
+<ANSWER>
+  <file path="/codebase/src/lib.rs"><range>1-10</range></file>
+  <file path="/codebase/../secret.rs"><range>1-1</range></file>
+</ANSWER>
+"#;
+
+        let files = parse_answer(xml, temp.path()).expect("ANSWER XML 应可解析");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path.as_deref(), Some("src/lib.rs"));
+        assert_eq!(files[0].ranges, vec![[1, 10]]);
+    }
+}

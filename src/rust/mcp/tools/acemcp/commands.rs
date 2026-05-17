@@ -8,7 +8,8 @@ use std::time::Duration;
 use crate::config::{AppState, save_config};
 use crate::network::proxy::{ProxyDetector, ProxyInfo, ProxyType};
 use super::AcemcpTool;
-use super::types::{AcemcpRequest, ProjectIndexStatus, ProjectsIndexStatus, ProjectFilesStatus, DetectedProxy, ProxySpeedTestResult, SpeedTestMetric, SpeedTestProgress, SpeedTestStageStatus, ProjectWithNestedStatus};
+use super::types::{ProjectIndexStatus, ProjectsIndexStatus, ProjectFilesStatus, DetectedProxy, ProxySpeedTestResult, SpeedTestMetric, SpeedTestProgress, SpeedTestStageStatus, ProjectWithNestedStatus};
+use crate::mcp::tools::sou::{SouRequest, SouTool};
 use reqwest;
 use crate::{log_debug, log_important};
 
@@ -105,6 +106,32 @@ pub struct SaveAcemcpConfigArgs {
     /// 是否自动索引嵌套的 Git 子项目
     #[serde(alias = "indexNestedProjects", alias = "index_nested_projects")]
     pub index_nested_projects: Option<bool>,
+    #[serde(alias = "souDefaultBackend", alias = "sou_default_backend")]
+    pub sou_default_backend: Option<String>,
+    #[serde(alias = "souAutoOrder", alias = "sou_auto_order")]
+    pub sou_auto_order: Option<Vec<String>>,
+    #[serde(alias = "souIncludeBackendHeaders", alias = "sou_include_backend_headers")]
+    pub sou_include_backend_headers: Option<bool>,
+    #[serde(alias = "souIncludeFailedBackendErrors", alias = "sou_include_failed_backend_errors")]
+    pub sou_include_failed_backend_errors: Option<bool>,
+    #[serde(alias = "fastContextCommand", alias = "fast_context_command")]
+    pub fast_context_command: Option<String>,
+    #[serde(alias = "fastContextScriptPath", alias = "fast_context_script_path")]
+    pub fast_context_script_path: Option<String>,
+    #[serde(alias = "fastContextApiKey", alias = "fast_context_api_key")]
+    pub fast_context_api_key: Option<String>,
+    #[serde(alias = "fastContextTreeDepth", alias = "fast_context_tree_depth")]
+    pub fast_context_tree_depth: Option<u8>,
+    #[serde(alias = "fastContextMaxTurns", alias = "fast_context_max_turns")]
+    pub fast_context_max_turns: Option<u8>,
+    #[serde(alias = "fastContextMaxResults", alias = "fast_context_max_results")]
+    pub fast_context_max_results: Option<u8>,
+    #[serde(alias = "fastContextMaxCommands", alias = "fast_context_max_commands")]
+    pub fast_context_max_commands: Option<u8>,
+    #[serde(alias = "fastContextTimeoutMs", alias = "fast_context_timeout_ms")]
+    pub fast_context_timeout_ms: Option<u64>,
+    #[serde(alias = "fastContextExcludePaths", alias = "fast_context_exclude_paths")]
+    pub fast_context_exclude_paths: Option<Vec<String>>,
 }
 
 
@@ -114,17 +141,24 @@ pub async fn save_acemcp_config(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
-    // 规范化 base_url：补充协议（如缺失）并去除末尾斜杠，防止URL拼接时出现双斜杠
-    let mut base_url = args.base_url.trim().to_string();
-    if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
-        base_url = format!("http://{}", base_url);
-        log::warn!("BASE_URL 缺少协议，已自动补全为: {}", base_url);
-    }
-    // 去除末尾的所有斜杠，确保URL格式统一
-    while base_url.ends_with('/') {
-        base_url.pop();
-    }
-    log::info!("规范化后的 BASE_URL: {}", base_url);
+    // 允许只使用 fast-context，此时 ACE base_url/token 可以留空。
+    let normalized_base_url = {
+        let trimmed = args.base_url.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            let mut base_url = trimmed.to_string();
+            if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+                base_url = format!("http://{}", base_url);
+                log::warn!("BASE_URL 缺少协议，已自动补全为: {}", base_url);
+            }
+            while base_url.ends_with('/') {
+                base_url.pop();
+            }
+            log::info!("规范化后的 BASE_URL: {}", base_url);
+            Some(base_url)
+        }
+    };
 
     {
         let mut config = state
@@ -132,8 +166,8 @@ pub async fn save_acemcp_config(
             .lock()
             .map_err(|e| format!("获取配置失败: {}", e))?;
 
-        config.mcp_config.acemcp_base_url = Some(base_url.clone());
-        config.mcp_config.acemcp_token = Some(args.token.clone());
+        config.mcp_config.acemcp_base_url = normalized_base_url.clone();
+        config.mcp_config.acemcp_token = if args.token.trim().is_empty() { None } else { Some(args.token.clone()) };
         config.mcp_config.acemcp_batch_size = Some(args.batch_size);
         config.mcp_config.acemcp_max_lines_per_blob = Some(args.max_lines_per_blob);
         config.mcp_config.acemcp_text_extensions = Some(args.text_extensions.clone());
@@ -151,6 +185,46 @@ pub async fn save_acemcp_config(
         // 仅在前端显式传入时才覆盖，避免其他页面保存配置时将用户设置重置为默认值
         if let Some(v) = args.index_nested_projects {
             config.mcp_config.acemcp_index_nested_projects = Some(v);
+        }
+        // 这些字段可能不会由复用 acemcp 配置的旧页面传入，需保留已有后端配置。
+        if let Some(v) = args.sou_default_backend.clone() {
+            config.mcp_config.sou_default_backend = Some(v);
+        }
+        if let Some(v) = args.sou_auto_order.clone() {
+            config.mcp_config.sou_auto_order = Some(v);
+        }
+        if let Some(v) = args.sou_include_backend_headers {
+            config.mcp_config.sou_include_backend_headers = Some(v);
+        }
+        if let Some(v) = args.sou_include_failed_backend_errors {
+            config.mcp_config.sou_include_failed_backend_errors = Some(v);
+        }
+        if let Some(v) = args.fast_context_command.clone() {
+            config.mcp_config.fast_context_command = Some(v);
+        }
+        if args.fast_context_script_path.is_some() {
+            config.mcp_config.fast_context_script_path = args.fast_context_script_path.clone();
+        }
+        if args.fast_context_api_key.is_some() {
+            config.mcp_config.fast_context_api_key = args.fast_context_api_key.clone();
+        }
+        if let Some(v) = args.fast_context_tree_depth {
+            config.mcp_config.fast_context_tree_depth = Some(v);
+        }
+        if let Some(v) = args.fast_context_max_turns {
+            config.mcp_config.fast_context_max_turns = Some(v);
+        }
+        if let Some(v) = args.fast_context_max_results {
+            config.mcp_config.fast_context_max_results = Some(v);
+        }
+        if let Some(v) = args.fast_context_max_commands {
+            config.mcp_config.fast_context_max_commands = Some(v);
+        }
+        if let Some(v) = args.fast_context_timeout_ms {
+            config.mcp_config.fast_context_timeout_ms = Some(v);
+        }
+        if let Some(v) = args.fast_context_exclude_paths.clone() {
+            config.mcp_config.fast_context_exclude_paths = Some(v);
         }
     }
 
@@ -860,6 +934,19 @@ pub struct AcemcpConfigResponse {
     pub proxy_password: String,
     /// 是否自动索引嵌套的 Git 子项目（默认启用）
     pub index_nested_projects: bool,
+    pub sou_default_backend: String,
+    pub sou_auto_order: Vec<String>,
+    pub sou_include_backend_headers: bool,
+    pub sou_include_failed_backend_errors: bool,
+    pub fast_context_command: String,
+    pub fast_context_script_path: Option<String>,
+    pub fast_context_api_key: Option<String>,
+    pub fast_context_tree_depth: u8,
+    pub fast_context_max_turns: u8,
+    pub fast_context_max_results: u8,
+    pub fast_context_max_commands: u8,
+    pub fast_context_timeout_ms: u64,
+    pub fast_context_exclude_paths: Vec<String>,
 }
 
 #[tauri::command]
@@ -904,6 +991,21 @@ pub async fn get_acemcp_config(state: State<'_, AppState>) -> Result<AcemcpConfi
         proxy_password: config.mcp_config.acemcp_proxy_password.clone().unwrap_or_default(),
         // 嵌套项目索引开关（默认启用）
         index_nested_projects: config.mcp_config.acemcp_index_nested_projects.unwrap_or(true),
+        sou_default_backend: config.mcp_config.sou_default_backend.clone().unwrap_or_else(|| "auto".to_string()),
+        sou_auto_order: config.mcp_config.sou_auto_order.clone().unwrap_or_else(|| vec!["ace".to_string(), "fast_context".to_string()]),
+        sou_include_backend_headers: config.mcp_config.sou_include_backend_headers.unwrap_or(true),
+        sou_include_failed_backend_errors: config.mcp_config.sou_include_failed_backend_errors.unwrap_or(true),
+        fast_context_command: config.mcp_config.fast_context_command.clone().unwrap_or_else(|| "node".to_string()),
+        fast_context_script_path: config.mcp_config.fast_context_script_path.clone(),
+        fast_context_api_key: config.mcp_config.fast_context_api_key.clone(),
+        fast_context_tree_depth: config.mcp_config.fast_context_tree_depth.unwrap_or(3),
+        fast_context_max_turns: config.mcp_config.fast_context_max_turns.unwrap_or(3),
+        fast_context_max_results: config.mcp_config.fast_context_max_results.unwrap_or(10),
+        fast_context_max_commands: config.mcp_config.fast_context_max_commands.unwrap_or(8),
+        fast_context_timeout_ms: config.mcp_config.fast_context_timeout_ms.unwrap_or(30000),
+        fast_context_exclude_paths: config.mcp_config.fast_context_exclude_paths.clone().unwrap_or_else(|| {
+            vec!["node_modules".to_string(), ".git".to_string(), "dist".to_string(), "build".to_string(), "target".to_string()]
+        }),
     })
 }
 
@@ -934,6 +1036,7 @@ pub struct DebugSearchResult {
 pub async fn debug_acemcp_search(
     project_root_path: String,
     query: String,
+    backend: Option<String>,
     _app: AppHandle,
 ) -> Result<DebugSearchResult, String> {
     use std::time::Instant;
@@ -943,14 +1046,21 @@ pub async fn debug_acemcp_search(
     let request_time_str = request_time.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
     let start_instant = Instant::now();
     
-    let req = AcemcpRequest { 
+    let req = SouRequest { 
         project_root_path: project_root_path.clone(), 
-        query: query.clone() 
+        query: query.clone(),
+        backend,
+        tree_depth: None,
+        max_turns: None,
+        max_results: None,
+        max_commands: None,
+        timeout_ms: None,
+        exclude_paths: None,
     };
     
     // 调用搜索函数（日志会通过 log crate 输出到日志文件）
     log::info!("[调试搜索] 开始执行: project={}, query={}", project_root_path, query);
-    let search_result = AcemcpTool::search_context(req).await;
+    let search_result = SouTool::search_context(req).await;
     
     // 记录响应接收时间
     let response_time = chrono::Utc::now();
@@ -1028,9 +1138,24 @@ pub async fn execute_acemcp_tool(
                 .ok_or_else(|| "缺少query参数".to_string())?
                 .to_string();
             
+            let backend = arguments.get("backend")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string());
+
             // 执行搜索
-            let req = AcemcpRequest { project_root_path, query };
-            match AcemcpTool::search_context(req).await {
+            let req = SouRequest {
+                project_root_path,
+                query,
+                backend,
+                tree_depth: arguments.get("tree_depth").and_then(|v| v.as_u64()).map(|v| v as u8),
+                max_turns: arguments.get("max_turns").and_then(|v| v.as_u64()).map(|v| v as u8),
+                max_results: arguments.get("max_results").and_then(|v| v.as_u64()).map(|v| v as u8),
+                max_commands: arguments.get("max_commands").and_then(|v| v.as_u64()).map(|v| v as u8),
+                timeout_ms: arguments.get("timeout_ms").and_then(|v| v.as_u64()),
+                exclude_paths: arguments.get("exclude_paths")
+                    .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok()),
+            };
+            match SouTool::search_context(req).await {
                 Ok(result) => {
                     // 转换结果为JSON
                     if let Ok(val) = serde_json::to_value(&result) {

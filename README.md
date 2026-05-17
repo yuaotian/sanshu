@@ -1433,6 +1433,7 @@ copies or substantial portions of the Software.
 - [Model Context Protocol](https://modelcontextprotocol.io/) - 提供了 AI 与工具协同的标准协议
 - [Tauri](https://tauri.app/) - 提供了跨平台桌面应用框架
 - [Augment Code](https://www.augmentcode.com/) - 提供了优秀的 AI 编程助手
+- [fast-context-mcp](https://github.com/SammySnake-d/fast-context-mcp) - 感谢其提供 fast-context 搜索协议与实现参考
 
 三术 (sanshu) 是在原项目基础上的进一步探索与创新，我们向所有贡献者致以诚挚的谢意。
 

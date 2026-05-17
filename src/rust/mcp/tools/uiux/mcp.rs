@@ -9,8 +9,8 @@ use rmcp::model::{CallToolResult, Content, ErrorData as McpError, Tool};
 use serde::Serialize;
 
 use crate::config::load_standalone_config;
-use crate::mcp::tools::acemcp::types::AcemcpRequest;
-use crate::mcp::tools::AcemcpTool;
+use crate::mcp::tools::sou::SouRequest;
+use crate::mcp::tools::SouTool;
 use crate::{log_debug, log_important};
 
 use super::localize;
@@ -450,9 +450,16 @@ async fn collect_project_context_hits(
 }
 
 async fn search_sou_sections(project_root_path: &str, query: &str) -> Result<Vec<SouSection>, String> {
-    let result = AcemcpTool::search_context(AcemcpRequest {
+    let result = SouTool::search_context(SouRequest {
         project_root_path: project_root_path.to_string(),
         query: query.to_string(),
+        backend: None,
+        tree_depth: None,
+        max_turns: None,
+        max_results: None,
+        max_commands: None,
+        timeout_ms: None,
+        exclude_paths: None,
     })
     .await
     .map_err(|e| format!("sou 调用失败: {}", e))?;
@@ -491,6 +498,8 @@ fn is_sou_error_text(text: &str) -> bool {
         || normalized.starts_with("搜索失败:")
         || normalized.starts_with("索引更新失败:")
         || normalized.starts_with("代码搜索失败:")
+        || normalized.starts_with("FastContext搜索失败:")
+        || normalized.starts_with("sou搜索失败:")
 }
 
 fn parse_sou_sections(text: &str) -> Vec<SouSection> {
@@ -501,7 +510,7 @@ fn parse_sou_sections(text: &str) -> Vec<SouSection> {
     for line in text.lines() {
         if let Some(path) = line.strip_prefix("Path: ") {
             flush_sou_section(&mut sections, &mut current_path, &mut current_lines);
-            current_path = Some(path.trim().to_string());
+            current_path = Some(normalize_sou_location(path));
             continue;
         }
 
@@ -516,6 +525,14 @@ fn parse_sou_sections(text: &str) -> Vec<SouSection> {
 
     flush_sou_section(&mut sections, &mut current_path, &mut current_lines);
     sections
+}
+
+fn normalize_sou_location(path: &str) -> String {
+    let trimmed = path.trim();
+    trimmed
+        .rsplit_once(" (L")
+        .map(|(location, _)| location.trim().to_string())
+        .unwrap_or_else(|| trimmed.to_string())
 }
 
 fn flush_sou_section(

@@ -80,11 +80,13 @@ scripts/
 !ACEMCP.md
 !README.md
 !INSTALL.md
-!docs/**/*.md
 metadata.json
 demo/
 
-docs/
+/docs/
+!/docs/
+/docs/*
+
 
 test/
 

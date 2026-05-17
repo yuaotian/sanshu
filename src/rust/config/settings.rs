@@ -135,6 +135,21 @@ pub struct McpConfig {
     pub acemcp_proxy_type: Option<String>, // 代理类型: "http" | "https" | "socks5"
     pub acemcp_proxy_username: Option<String>, // 代理用户名（可选）
     pub acemcp_proxy_password: Option<String>, // 代理密码（可选）
+    // Sou 多后端配置
+    pub sou_default_backend: Option<String>, // "auto" | "ace" | "fast_context" | "both"
+    pub sou_auto_order: Option<Vec<String>>, // auto 模式下的后端优先级
+    pub sou_include_backend_headers: Option<bool>, // 是否在结果中标注后端来源
+    pub sou_include_failed_backend_errors: Option<bool>, // 部分成功时是否附加失败后端诊断
+    // Fast Context 配置
+    pub fast_context_command: Option<String>, // 兼容旧配置：Rust 原生 fast-context 已不再使用
+    pub fast_context_script_path: Option<String>, // 兼容旧配置：Rust 原生 fast-context 已不再使用
+    pub fast_context_api_key: Option<String>, // Windsurf API Key，留空时走环境变量/自动发现
+    pub fast_context_tree_depth: Option<u8>, // 目录树深度 1-6
+    pub fast_context_max_turns: Option<u8>, // 搜索轮数 1-5
+    pub fast_context_max_results: Option<u8>, // 返回文件数 1-30
+    pub fast_context_max_commands: Option<u8>, // 每轮最大命令数
+    pub fast_context_timeout_ms: Option<u64>, // 请求超时
+    pub fast_context_exclude_paths: Option<Vec<String>>, // 额外排除路径
     pub context7_api_key: Option<String>, // Context7 API密钥 (可选，免费使用时可为空)
     pub skill_python_path: Option<String>, // Skill Python 路径（可选，默认走 PATH）
 
@@ -343,6 +358,27 @@ pub fn default_mcp_config() -> McpConfig {
         acemcp_proxy_type: None,
         acemcp_proxy_username: None,
         acemcp_proxy_password: None,
+        // Sou 多后端默认配置
+        sou_default_backend: Some("auto".to_string()),
+        sou_auto_order: Some(vec!["ace".to_string(), "fast_context".to_string()]),
+        sou_include_backend_headers: Some(true),
+        sou_include_failed_backend_errors: Some(true),
+        // Fast Context 默认配置：协议与本地命令执行已迁移为 Rust 原生实现
+        fast_context_command: Some("node".to_string()),
+        fast_context_script_path: None,
+        fast_context_api_key: None,
+        fast_context_tree_depth: Some(3),
+        fast_context_max_turns: Some(3),
+        fast_context_max_results: Some(10),
+        fast_context_max_commands: Some(8),
+        fast_context_timeout_ms: Some(30000),
+        fast_context_exclude_paths: Some(vec![
+            "node_modules".to_string(),
+            ".git".to_string(),
+            "dist".to_string(),
+            "build".to_string(),
+            "target".to_string(),
+        ]),
         context7_api_key: None,
         skill_python_path: None,
         // UI/UX Pro Max 默认配置

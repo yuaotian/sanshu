@@ -2,7 +2,7 @@
 
 ## 📖 简介
 
-代码搜索工具（基于 Acemcp）是一个基于 ACE (Augment Context Engine) 的代码库语义搜索工具，已整合到三术项目中。它能够通过自然语言查询在代码库中搜索相关的代码上下文，帮助 AI 助手更好地理解项目结构和代码实现。
+代码搜索工具 `sou` 是三术内置的代码库上下文检索工具。它原本基于 ACE (Augment Context Engine) 工作，现在支持多后端：保留 ACE 的索引式语义搜索能力，同时可以接入 `fast-context` 作为备用、默认或合并检索后端，降低单一 token 失效带来的不可用风险。
 
 ## ✨ 核心特性
 
@@ -10,6 +10,12 @@
 - 使用自然语言查询搜索代码库
 - 返回与查询语义相关的代码片段
 - 支持多种编程语言和文件类型
+
+### 1.1 多后端切换
+- `auto`：默认推荐策略，按配置优先级尝试后端，默认先 ACE，失败后自动切换到 fast-context。
+- `ace`：强制使用 ACE / Augment 后端，保持原有索引式搜索行为。
+- `fast_context`：强制使用 fast-context 后端，适合 ACE token 失效或不想等待 ACE 索引时使用。
+- `both`：同时调用 ACE 与 fast-context，并合并返回结果；部分后端失败时会附带诊断信息。
 
 ### 2. 增量索引
 - 自动检测项目中的新文件和修改过的文件
@@ -43,11 +49,20 @@
      - **认证令牌**：用于访问 API 的 Bearer Token
    - 其他高级配置（批量大小、文件扩展名等）可根据需要调整，通常使用默认值即可
 
-3. **测试连接**
+3. **配置搜索后端**
+   - 打开 `后端切换` 标签页。
+   - **默认策略**：推荐保持 `auto`，当 ACE 不可用时自动回退到 fast-context。
+   - **自动模式优先级**：默认 `ACE -> fast-context`，也可以调整为优先 fast-context。
+   - **主动切换调试**：可在页面中临时选择 `default`、`auto`、`ace`、`fast_context` 或 `both` 验证效果。
+   - **双后端合并**：选择 `both` 后会一起返回 ACE 与 fast-context 的结果。
+   - **Fast Context 参数**：Rust 原生执行，可配置 Windsurf API Key、`tree_depth`、`max_turns`、`max_results`、超时时间和排除路径。
+   - 如果只使用 fast-context，ACE 的 API 端点与认证令牌可以留空。
+
+4. **测试连接**
    - 在配置界面点击"测试连接"按钮
    - 确认 API 端点可正常访问
 
-4. **使用搜索功能**
+5. **使用搜索功能**
    - 在 AI 助手中使用自然语言查询
    - 例如：
      - "查找日志配置相关的代码"
@@ -73,10 +88,40 @@
 - 格式：`http://host:port` 或 `https://host:port`
 - 如果缺少协议前缀，系统会自动补全为 `http://`
 - 示例：`https://api.example.com` 或 `localhost:8080`
+- 仅使用 fast-context 时可以留空
 
 ### 认证令牌
 - 用于访问 ACE API 的 Bearer Token
 - 请确保令牌具有足够的权限访问代码库检索接口
+- 仅使用 fast-context 时可以留空
+
+### Fast Context
+- `Windsurf API Key` 可在设置中填写；如果留空，将读取 `WINDSURF_API_KEY` 或尝试从本机 Windsurf 安装中自动提取。
+- 自动提取会读取 Windsurf 登录数据库中的 `windsurfAuthStatus.apiKey`：macOS `~/Library/Application Support/Windsurf/User/globalStorage/state.vscdb`、Windows `%APPDATA%/Windsurf/User/globalStorage/state.vscdb`、Linux `~/.config/Windsurf/User/globalStorage/state.vscdb`。
+- fast-context 返回文件路径和行号范围，三术会在本地读取对应代码片段并格式化为兼容 `Path: ...` 的 `sou` 输出。
+
+### MCP 调用参数
+`sou` 继续兼容旧参数：
+
+```json
+{
+  "project_root_path": "E:/ProjectCode/RustCode/sanshu",
+  "query": "sou 多后端路由实现"
+}
+```
+
+也可以主动指定后端：
+
+```json
+{
+  "project_root_path": "E:/ProjectCode/RustCode/sanshu",
+  "query": "sou 多后端路由实现",
+  "backend": "both",
+  "tree_depth": 3,
+  "max_turns": 3,
+  "max_results": 10
+}
+```
 
 > 💡 **提示**：其他高级配置（批量大小、文件扩展名、排除模式等）可在配置界面的"高级配置"标签页中调整，通常使用默认值即可满足大多数使用场景。
 

@@ -5,7 +5,7 @@
  */
 import { invoke } from '@tauri-apps/api/core'
 import { useMessage } from 'naive-ui'
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useAcemcpSync } from '../../composables/useAcemcpSync'
 import { useLogViewer } from '../../composables/useLogViewer'
 import ConfigSection from '../common/ConfigSection.vue'
@@ -45,6 +45,19 @@ const config = ref({
   proxy_password: '',
   // 嵌套项目索引配置
   index_nested_projects: true, // 是否自动索引嵌套的 Git 子项目（默认启用）
+  // sou 多后端配置
+  sou_default_backend: 'auto' as 'auto' | 'ace' | 'fast_context' | 'both',
+  sou_auto_order: ['ace', 'fast_context'] as string[],
+  sou_include_backend_headers: true,
+  sou_include_failed_backend_errors: true,
+  // fast-context 配置
+  fast_context_api_key: '',
+  fast_context_tree_depth: 3,
+  fast_context_max_turns: 3,
+  fast_context_max_results: 10,
+  fast_context_max_commands: 8,
+  fast_context_timeout_ms: 30000,
+  fast_context_exclude_paths: ['node_modules', '.git', 'dist', 'build', 'target'] as string[],
 })
 
 const loadingConfig = ref(false)
@@ -59,6 +72,7 @@ const { open: openLogViewer } = useLogViewer()
 const debugProjectRoot = ref('')
 const debugQuery = ref('')
 const debugLoading = ref(false)
+const debugBackend = ref<'default' | 'auto' | 'ace' | 'fast_context' | 'both'>('default')
 const debugUseManualInput = ref(false) // 是否使用手动输入模式
 const debugProjectOptions = ref<{ label: string, value: string }[]>([]) // 项目选择选项
 const debugProjectOptionsLoading = ref(false) // 加载项目列表中
@@ -164,6 +178,48 @@ const excludeOptions = ref([
   'obj',
 ].map(v => ({ label: v, value: v })))
 
+const backendOptions = [
+  { label: '默认配置', value: 'default' },
+  { label: '自动回退（ACE → fast-context）', value: 'auto' },
+  { label: '仅 ACE / Augment', value: 'ace' },
+  { label: '仅 fast-context', value: 'fast_context' },
+  { label: '双后端合并', value: 'both' },
+]
+
+const autoOrderOptions = [
+  { label: 'ACE / Augment', value: 'ace' },
+  { label: 'fast-context', value: 'fast_context' },
+]
+
+const backendConfigOptions = backendOptions.filter(item => item.value !== 'default')
+
+const aceEnabledInStrategy = computed(() => {
+  const backend = config.value.sou_default_backend
+  return backend === 'ace'
+    || backend === 'both'
+    || (backend === 'auto' && config.value.sou_auto_order.includes('ace'))
+})
+
+const fastContextEnabledInStrategy = computed(() => {
+  const backend = config.value.sou_default_backend
+  return backend === 'fast_context'
+    || backend === 'both'
+    || (backend === 'auto' && config.value.sou_auto_order.includes('fast_context'))
+})
+
+const backendStrategySummary = computed(() => {
+  switch (config.value.sou_default_backend) {
+    case 'ace':
+      return '当前默认仅使用 ACE / Augment 后端。'
+    case 'fast_context':
+      return '当前默认仅使用 fast-context，ACE 连接配置可留空。'
+    case 'both':
+      return '当前默认同时返回 ACE 与 fast-context 的合并结果。'
+    default:
+      return '当前默认 ACE 优先，ACE 失败或索引不可用时自动切换到 fast-context。'
+  }
+})
+
 // --- 操作函数 ---
 
 function normalizeBaseUrl(value: string): string {
@@ -192,6 +248,19 @@ async function loadAcemcpConfig() {
       proxy_password: res.proxy_password || '',
       // 嵌套项目索引配置
       index_nested_projects: res.index_nested_projects ?? true,
+      // sou 多后端配置
+      sou_default_backend: res.sou_default_backend || 'auto',
+      sou_auto_order: res.sou_auto_order || ['ace', 'fast_context'],
+      sou_include_backend_headers: res.sou_include_backend_headers ?? true,
+      sou_include_failed_backend_errors: res.sou_include_failed_backend_errors ?? true,
+      // fast-context 配置
+      fast_context_api_key: res.fast_context_api_key || '',
+      fast_context_tree_depth: res.fast_context_tree_depth || 3,
+      fast_context_max_turns: res.fast_context_max_turns || 3,
+      fast_context_max_results: res.fast_context_max_results || 10,
+      fast_context_max_commands: res.fast_context_max_commands || 8,
+      fast_context_timeout_ms: res.fast_context_timeout_ms || 30000,
+      fast_context_exclude_paths: res.fast_context_exclude_paths || ['node_modules', '.git', 'dist', 'build', 'target'],
     }
     lastSavedConnection.value = {
       base_url: normalizeBaseUrl(res.base_url || ''),
@@ -232,8 +301,8 @@ async function loadLogFilePath() {
 
 async function saveConfig() {
   try {
-    if (!config.value.base_url || !/^https?:\/\//i.test(config.value.base_url)) {
-      message.error('URL无效，需以 http(s):// 开头')
+    if (config.value.base_url && !/^https?:\/\//i.test(config.value.base_url)) {
+      message.error('URL无效，需以 http(s):// 开头；如只使用 fast-context，可留空')
       return
     }
 
@@ -290,6 +359,19 @@ async function saveConfig() {
         proxyPassword: config.value.proxy_password,
         // 嵌套项目索引配置
         indexNestedProjects: config.value.index_nested_projects,
+        // sou 多后端配置
+        souDefaultBackend: config.value.sou_default_backend,
+        souAutoOrder: config.value.sou_auto_order,
+        souIncludeBackendHeaders: config.value.sou_include_backend_headers,
+        souIncludeFailedBackendErrors: config.value.sou_include_failed_backend_errors,
+        // fast-context 配置
+        fastContextApiKey: config.value.fast_context_api_key,
+        fastContextTreeDepth: config.value.fast_context_tree_depth,
+        fastContextMaxTurns: config.value.fast_context_max_turns,
+        fastContextMaxResults: config.value.fast_context_max_results,
+        fastContextMaxCommands: config.value.fast_context_max_commands,
+        fastContextTimeoutMs: config.value.fast_context_timeout_ms,
+        fastContextExcludePaths: config.value.fast_context_exclude_paths,
       },
     })
     lastSavedConnection.value = {
@@ -375,6 +457,7 @@ async function runToolDebug() {
     const result = await invoke<DebugSearchResult>('debug_acemcp_search', {
       projectRootPath: debugProjectRoot.value,
       query: debugQuery.value,
+      backend: debugBackend.value,
     })
 
     debugResultData.value = result
@@ -514,11 +597,24 @@ defineExpose({ saveConfig })
       <n-tab-pane name="basic" tab="基础配置">
         <n-scrollbar class="tab-scrollbar">
           <n-space vertical size="large" class="tab-content">
-            <ConfigSection title="连接设置" description="配置代码搜索服务的连接信息">
+            <ConfigSection title="ACE 连接设置" :description="aceEnabledInStrategy ? '配置 ACE / Augment 索引服务连接信息' : '当前默认策略不依赖 ACE，以下配置可留空'">
+              <n-alert type="info" :bordered="false" class="mb-4">
+                {{ backendStrategySummary }}
+              </n-alert>
               <n-grid :x-gap="24" :y-gap="16" :cols="1">
                 <n-grid-item>
                   <n-form-item label="API端点URL">
-                    <n-input v-model:value="config.base_url" placeholder="https://api.example.com" clearable />
+                    <n-input
+                      v-model:value="config.base_url"
+                      placeholder="https://api.example.com"
+                      clearable
+                      :disabled="!aceEnabledInStrategy"
+                    />
+                    <template #feedback>
+                      <span class="form-feedback">
+                        {{ aceEnabledInStrategy ? 'ACE 后端需要配置 API 端点。' : 'fast-context-only 时可以留空。' }}
+                      </span>
+                    </template>
                   </n-form-item>
                 </n-grid-item>
                 <n-grid-item>
@@ -529,7 +625,13 @@ defineExpose({ saveConfig })
                       show-password-on="click"
                       placeholder="输入认证令牌"
                       clearable
+                      :disabled="!aceEnabledInStrategy"
                     />
+                    <template #feedback>
+                      <span class="form-feedback">
+                        {{ aceEnabledInStrategy ? '用于 ACE / Augment 的 Bearer Token。' : '当前默认不使用 ACE Token。' }}
+                      </span>
+                    </template>
                   </n-form-item>
                 </n-grid-item>
               </n-grid>
@@ -602,6 +704,151 @@ defineExpose({ saveConfig })
         </n-scrollbar>
       </n-tab-pane>
 
+      <!-- 后端切换 -->
+      <n-tab-pane name="backend" tab="后端切换">
+        <n-scrollbar class="tab-scrollbar">
+          <n-space vertical size="large" class="tab-content">
+            <ConfigSection title="切换策略" description="配置默认后端、主动切换入口和双后端合并返回">
+              <n-space vertical size="medium">
+                <n-alert type="success" :bordered="false">
+                  推荐默认策略：ACE 优先，失败或索引不可用时自动切换到 fast-context。
+                  MCP 调用时也可以通过 <code>backend</code> 主动指定 ace、fast_context 或 both。
+                </n-alert>
+
+                <n-grid :x-gap="24" :y-gap="16" :cols="2">
+                  <n-grid-item>
+                    <n-form-item label="默认策略">
+                      <n-select
+                        v-model:value="config.sou_default_backend"
+                        :options="backendConfigOptions"
+                      />
+                      <template #feedback>
+                        <span class="form-feedback">{{ backendStrategySummary }}</span>
+                      </template>
+                    </n-form-item>
+                  </n-grid-item>
+                  <n-grid-item>
+                    <n-form-item label="自动模式优先级">
+                      <n-select
+                        v-model:value="config.sou_auto_order"
+                        :options="autoOrderOptions"
+                        multiple
+                        :max-tag-count="2"
+                      />
+                      <template #feedback>
+                        <span class="form-feedback">默认保持 ACE 在前，ACE 失败后切 fast-context。</span>
+                      </template>
+                    </n-form-item>
+                  </n-grid-item>
+                </n-grid>
+
+                <n-grid :x-gap="24" :y-gap="16" :cols="3">
+                  <n-grid-item>
+                    <n-form-item label="启用 ACE">
+                      <n-tag :type="aceEnabledInStrategy ? 'success' : 'default'" :bordered="false">
+                        {{ aceEnabledInStrategy ? '会参与检索' : '默认不参与' }}
+                      </n-tag>
+                    </n-form-item>
+                  </n-grid-item>
+                  <n-grid-item>
+                    <n-form-item label="启用 fast-context">
+                      <n-tag :type="fastContextEnabledInStrategy ? 'success' : 'default'" :bordered="false">
+                        {{ fastContextEnabledInStrategy ? '会参与检索' : '默认不参与' }}
+                      </n-tag>
+                    </n-form-item>
+                  </n-grid-item>
+                  <n-grid-item>
+                    <n-form-item label="主动切换调试">
+                      <n-select
+                        v-model:value="debugBackend"
+                        :options="backendOptions"
+                      />
+                    </n-form-item>
+                  </n-grid-item>
+                </n-grid>
+
+                <n-grid :x-gap="24" :y-gap="16" :cols="2">
+                  <n-grid-item>
+                    <n-form-item label="显示后端来源">
+                      <n-switch v-model:value="config.sou_include_backend_headers" />
+                    </n-form-item>
+                  </n-grid-item>
+                  <n-grid-item>
+                    <n-form-item label="保留失败诊断">
+                      <n-switch v-model:value="config.sou_include_failed_backend_errors" />
+                    </n-form-item>
+                  </n-grid-item>
+                </n-grid>
+              </n-space>
+            </ConfigSection>
+
+            <ConfigSection title="Fast Context" description="Rust 原生 fast-context，无需 Node bridge；仅配置 Windsurf 搜索参数">
+              <n-space vertical size="medium">
+                <n-form-item label="Windsurf API Key">
+                  <n-input
+                    v-model:value="config.fast_context_api_key"
+                    type="password"
+                    show-password-on="click"
+                    placeholder="留空时读取 WINDSURF_API_KEY 或自动提取"
+                    clearable
+                  />
+                </n-form-item>
+
+                <n-grid :x-gap="24" :y-gap="16" :cols="4">
+                  <n-grid-item>
+                    <n-form-item label="tree depth">
+                      <n-input-number v-model:value="config.fast_context_tree_depth" :min="1" :max="6" class="w-full" />
+                    </n-form-item>
+                  </n-grid-item>
+                  <n-grid-item>
+                    <n-form-item label="max turns">
+                      <n-input-number v-model:value="config.fast_context_max_turns" :min="1" :max="5" class="w-full" />
+                    </n-form-item>
+                  </n-grid-item>
+                  <n-grid-item>
+                    <n-form-item label="max results">
+                      <n-input-number v-model:value="config.fast_context_max_results" :min="1" :max="30" class="w-full" />
+                    </n-form-item>
+                  </n-grid-item>
+                  <n-grid-item>
+                    <n-form-item label="timeout">
+                      <n-input-number
+                        v-model:value="config.fast_context_timeout_ms"
+                        :min="1000"
+                        :max="300000"
+                        :step="1000"
+                        class="w-full"
+                      />
+                    </n-form-item>
+                  </n-grid-item>
+                </n-grid>
+
+                <n-form-item label="fast-context 排除路径">
+                  <n-select
+                    v-model:value="config.fast_context_exclude_paths"
+                    :options="excludeOptions"
+                    multiple
+                    tag
+                    filterable
+                    clearable
+                    placeholder="node_modules / target / dist ..."
+                  />
+                </n-form-item>
+
+                <div class="flex justify-end">
+                  <n-button type="primary" @click="saveConfig">
+                    <template #icon>
+                      <div class="i-carbon-save" />
+                    </template>
+                    保存后端配置
+                  </n-button>
+                </div>
+              </n-space>
+            </ConfigSection>
+          </n-space>
+        </n-scrollbar>
+      </n-tab-pane>
+
       <!-- 高级配置 -->
       <n-tab-pane name="advanced" tab="高级配置">
         <n-scrollbar class="tab-scrollbar">
@@ -661,11 +908,11 @@ defineExpose({ saveConfig })
               </n-alert>
 
               <n-space class="mt-3">
-                <n-button size="small" secondary @click="testConnection">
+                <n-button size="small" secondary :disabled="!aceEnabledInStrategy" @click="testConnection">
                   <template #icon>
                     <div class="i-carbon-connection-signal" />
                   </template>
-                  测试连接
+                  测试 ACE 连接
                 </n-button>
                 <n-button size="small" secondary @click="viewLogs">
                   <template #icon>
@@ -777,6 +1024,13 @@ defineExpose({ saveConfig })
                     v-model:value="debugProjectRoot"
                     placeholder="/abs/path/to/project"
                     clearable
+                  />
+                </n-form-item>
+
+                <n-form-item label="搜索后端" :show-feedback="false">
+                  <n-select
+                    v-model:value="debugBackend"
+                    :options="backendOptions"
                   />
                 </n-form-item>
 

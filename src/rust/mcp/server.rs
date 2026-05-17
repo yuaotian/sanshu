@@ -9,7 +9,7 @@ use rmcp::model::*;
 use std::collections::HashMap;
 use std::time::Instant;
 
-use super::tools::{InteractionTool, MemoryTool, AcemcpTool, Context7Tool, IconTool, SkillsTool, UiuxTool, EnhanceTool, TavilyTool};
+use super::tools::{InteractionTool, MemoryTool, SouTool, Context7Tool, IconTool, SkillsTool, UiuxTool, EnhanceTool, TavilyTool};
 use super::types::{ZhiRequest, JiyiRequest, TuRequest, SkillRunRequest};
 use crate::mcp::tools::enhance::mcp::EnhanceMcpRequest;
 use crate::mcp::tools::context7::types::Context7Request;
@@ -272,7 +272,7 @@ impl ServerHandler for ZhiServer {
 
         // 代码搜索工具 - 仅在启用时添加
         if self.is_tool_enabled("sou") {
-            tools.push(AcemcpTool::get_tool_definition());
+            tools.push(SouTool::get_tool_definition());
         }
 
         // Context7 文档查询工具 - 仅在启用时添加
@@ -402,8 +402,8 @@ impl ServerHandler for ZhiServer {
                     log_important!(warn, "[MCP] 工具已禁用: call_id={}, tool=sou", call_id);
                     Err(McpError::internal_error("代码搜索工具已被禁用".to_string(), None))
                 } else {
-                    match serde_json::from_value::<crate::mcp::tools::acemcp::types::AcemcpRequest>(arguments_value) {
-                        Ok(acemcp_request) => AcemcpTool::search_context(acemcp_request).await,
+                    match serde_json::from_value::<crate::mcp::tools::sou::SouRequest>(arguments_value) {
+                        Ok(sou_request) => SouTool::search_context(sou_request).await,
                         Err(e) => {
                             log_important!(
                                 warn,
