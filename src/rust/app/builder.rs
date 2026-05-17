@@ -77,6 +77,7 @@ pub fn build_tauri_app() -> Builder<tauri::Wry> {
             // acemcp命令（迁移至 tools::acemcp::commands）
             crate::mcp::tools::acemcp::commands::get_acemcp_config,
             crate::mcp::tools::acemcp::commands::save_acemcp_config,
+            crate::mcp::tools::acemcp::commands::detect_fast_context_api_key,
             crate::mcp::tools::acemcp::commands::test_acemcp_connection,
             crate::mcp::tools::acemcp::commands::read_acemcp_logs,
             crate::mcp::tools::acemcp::commands::list_acemcp_log_targets,

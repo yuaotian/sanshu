@@ -7,13 +7,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use crate::config::load_standalone_config;
 use crate::log_important;
 use crate::mcp::tools::acemcp::types::AcemcpRequest;
 use crate::mcp::tools::AcemcpTool;
 
-mod fast_context;
+pub(crate) mod fast_context;
 
 const BACKEND_ACE: &str = "ace";
 const BACKEND_FAST_CONTEXT: &str = "fast_context";
@@ -261,6 +262,7 @@ async fn run_auto(
 ) -> Result<CallToolResult, McpError> {
     let mut errors = Vec::new();
     for backend in &config.auto_order {
+        log_important!(info, "[sou] auto 尝试后端: {}", backend);
         let result = match backend.as_str() {
             BACKEND_ACE => run_ace(request).await,
             BACKEND_FAST_CONTEXT => {
@@ -275,7 +277,10 @@ async fn run_auto(
         };
 
         match result {
-            Ok(ok) => return Ok(success_result(ok.text)),
+            Ok(ok) => {
+                log_important!(info, "[sou] auto 后端成功: {}", ok.backend);
+                return Ok(success_result(ok.text));
+            }
             Err(message) => errors.push(BackendRunError {
                 backend: backend.clone(),
                 message,
@@ -305,18 +310,34 @@ async fn run_both(
     let mut outputs = Vec::new();
     let mut errors = Vec::new();
     match ace {
-        Ok(result) => outputs.push(result),
-        Err(message) => errors.push(BackendRunError {
-            backend: BACKEND_ACE.to_string(),
-            message,
-        }),
+        Ok(result) => {
+            log_important!(info, "[sou] both 后端成功: ace");
+            outputs.push(result);
+        }
+        Err(message) => {
+            log_important!(warn, "[sou] both 后端失败: ace, error={}", message);
+            errors.push(BackendRunError {
+                backend: BACKEND_ACE.to_string(),
+                message,
+            });
+        }
     }
     match fast {
-        Ok(result) => outputs.push(result),
-        Err(message) => errors.push(BackendRunError {
-            backend: BACKEND_FAST_CONTEXT.to_string(),
-            message,
-        }),
+        Ok(result) => {
+            log_important!(info, "[sou] both 后端成功: fast_context");
+            outputs.push(result);
+        }
+        Err(message) => {
+            log_important!(
+                warn,
+                "[sou] both 后端失败: fast_context, error={}",
+                message
+            );
+            errors.push(BackendRunError {
+                backend: BACKEND_FAST_CONTEXT.to_string(),
+                message,
+            });
+        }
     }
 
     if outputs.is_empty() {
@@ -383,6 +404,7 @@ async fn run_fast_context(
     config: &FastContextConfig,
     include_header: bool,
 ) -> Result<BackendRunResult, String> {
+    let started_at = Instant::now();
     let project_root = canonical_project_root(&request.project_root_path)
         .map_err(|e| format!("项目路径无效: {}", e))?;
     let effective_timeout_ms = request.timeout_ms.unwrap_or(config.timeout_ms).clamp(1000, 300000);
@@ -390,6 +412,24 @@ async fn run_fast_context(
     let max_turns = clamp_u8(request.max_turns.unwrap_or(config.max_turns), 1, 5);
     let max_results = clamp_u8(request.max_results.unwrap_or(config.max_results), 1, 30);
     let max_commands = clamp_u8(request.max_commands.unwrap_or(config.max_commands), 1, 20);
+    let exclude_paths = request
+        .exclude_paths
+        .clone()
+        .unwrap_or_else(|| config.exclude_paths.clone());
+
+    log_important!(
+        info,
+        "[sou] fast-context 开始: project_root={}, query_len={}, timeout_ms={}, tree_depth={}, max_turns={}, max_results={}, max_commands={}, exclude_count={}, include_header={}",
+        project_root,
+        request.query.chars().count(),
+        effective_timeout_ms,
+        tree_depth,
+        max_turns,
+        max_results,
+        max_commands,
+        exclude_paths.len(),
+        include_header
+    );
 
     let response = tokio::time::timeout(
         Duration::from_millis(effective_timeout_ms + 5000),
@@ -402,21 +442,54 @@ async fn run_fast_context(
             max_results,
             max_commands,
             timeout_ms: effective_timeout_ms,
-            exclude_paths: request
-                .exclude_paths
-                .clone()
-                .unwrap_or_else(|| config.exclude_paths.clone()),
+            exclude_paths,
         }),
     )
     .await
-    .map_err(|_| format!("fast-context 超时（{}ms）", effective_timeout_ms))?
-    .map_err(|e| e.to_string())?;
+    .map_err(|_| {
+        log_important!(
+            warn,
+            "[sou] fast-context 超时: timeout_ms={}, elapsed_ms={}",
+            effective_timeout_ms,
+            started_at.elapsed().as_millis()
+        );
+        format!("fast-context 超时（{}ms）", effective_timeout_ms)
+    })?
+    .map_err(|e| {
+        let message = e.to_string();
+        log_important!(
+            warn,
+            "[sou] fast-context 失败: elapsed_ms={}, error={}",
+            started_at.elapsed().as_millis(),
+            message
+        );
+        message
+    })?;
+
+    log_important!(
+        info,
+        "[sou] fast-context 原生结果: files={}, rg_patterns={}, meta={}",
+        response.files.len(),
+        response.rg_patterns.len(),
+        response.meta
+    );
 
     let text = format_fast_context_text(&project_root, &response, include_header)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            let message = e.to_string();
+            log_important!(warn, "[sou] fast-context 格式化失败: {}", message);
+            message
+        })?;
     if text.trim().is_empty() {
         return Err("fast-context 未返回可用文件范围".to_string());
     }
+
+    log_important!(
+        info,
+        "[sou] fast-context 完成: elapsed_ms={}, output_len={}",
+        started_at.elapsed().as_millis(),
+        text.len()
+    );
 
     Ok(BackendRunResult {
         backend: BACKEND_FAST_CONTEXT.to_string(),
@@ -436,11 +509,24 @@ fn format_fast_context_text(
         parts.push(String::new());
     }
 
+    log_important!(
+        info,
+        "[sou] fast-context 兼容格式化: files={}, include_header={}",
+        response.files.len(),
+        include_header
+    );
+
     for file in &response.files {
         let Some(path) = resolve_fast_context_file(&root, file)? else {
+            log_important!(warn, "[sou] fast-context 文件项缺少路径，已跳过");
             continue;
         };
         if !path.exists() || !path.is_file() {
+            log_important!(
+                warn,
+                "[sou] fast-context 文件不存在或不是文件，已跳过: {}",
+                path.display()
+            );
             continue;
         }
 
@@ -456,8 +542,23 @@ fn format_fast_context_text(
             let end = range[1].max(start).min(start.saturating_add(220));
             let snippet = read_line_range(&path, start, end)?;
             if snippet.trim().is_empty() {
+                log_important!(
+                    warn,
+                    "[sou] fast-context 片段为空，已跳过: path={}, range=L{}-L{}",
+                    path.display(),
+                    start,
+                    end
+                );
                 continue;
             }
+            log_important!(
+                info,
+                "[sou] fast-context 片段已格式化: path={}, range=L{}-L{}, snippet_len={}",
+                path.display(),
+                start,
+                end,
+                snippet.len()
+            );
             parts.push(format!("Path: {}", display));
             parts.push(format!("Lines: L{}-L{}", start, end));
             parts.push(snippet);

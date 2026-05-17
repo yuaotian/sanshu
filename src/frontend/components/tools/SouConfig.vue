@@ -90,7 +90,20 @@ interface DebugSearchResult {
   query: string
 }
 
+interface FastContextApiKeyDetectionResult {
+  found: boolean
+  source?: string
+  source_label?: string
+  api_key?: string
+  masked_api_key?: string
+  saved: boolean
+  message: string
+}
+
 const debugResultData = ref<DebugSearchResult | null>(null)
+const detectingFastContextKey = ref(false)
+const fastContextKeyStatus = ref('')
+const fastContextKeyStatusType = ref<'success' | 'warning' | 'error' | 'info'>('info')
 
 // 选项数据
 const extOptions = ref([
@@ -262,6 +275,10 @@ async function loadAcemcpConfig() {
       fast_context_timeout_ms: res.fast_context_timeout_ms || 30000,
       fast_context_exclude_paths: res.fast_context_exclude_paths || ['node_modules', '.git', 'dist', 'build', 'target'],
     }
+    if (!config.value.fast_context_api_key) {
+      // 中文说明：配置页首次加载时主动尝试读取并保存 Windsurf API Key，失败时保留手动填写入口。
+      await detectFastContextApiKey(false)
+    }
     lastSavedConnection.value = {
       base_url: normalizeBaseUrl(res.base_url || ''),
       token: (res.token || '').trim(),
@@ -286,6 +303,44 @@ async function loadAcemcpConfig() {
   }
   finally {
     loadingConfig.value = false
+  }
+}
+
+async function detectFastContextApiKey(showFeedback = true) {
+  detectingFastContextKey.value = true
+  fastContextKeyStatus.value = ''
+  fastContextKeyStatusType.value = 'info'
+  try {
+    const result = await invoke<FastContextApiKeyDetectionResult>('detect_fast_context_api_key', {
+      save: true,
+      includeSaved: !showFeedback,
+    })
+
+    fastContextKeyStatus.value = result.message
+    if (result.found && result.api_key) {
+      config.value.fast_context_api_key = result.api_key
+      fastContextKeyStatusType.value = 'success'
+      if (showFeedback) {
+        message.success(result.message)
+      }
+    }
+    else {
+      fastContextKeyStatusType.value = 'warning'
+      if (showFeedback) {
+        message.warning(result.message || '未获取到 Windsurf API Key，请手动填写')
+      }
+    }
+  }
+  catch (err) {
+    const msg = `获取 Windsurf API Key 失败: ${err}`
+    fastContextKeyStatus.value = msg
+    fastContextKeyStatusType.value = 'error'
+    if (showFeedback) {
+      message.error(msg)
+    }
+  }
+  finally {
+    detectingFastContextKey.value = false
   }
 }
 
@@ -785,13 +840,33 @@ defineExpose({ saveConfig })
             <ConfigSection title="Fast Context" description="Rust 原生 fast-context，无需 Node bridge；仅配置 Windsurf 搜索参数">
               <n-space vertical size="medium">
                 <n-form-item label="Windsurf API Key">
-                  <n-input
-                    v-model:value="config.fast_context_api_key"
-                    type="password"
-                    show-password-on="click"
-                    placeholder="留空时读取 WINDSURF_API_KEY 或自动提取"
-                    clearable
-                  />
+                  <n-space vertical size="small" class="w-full">
+                    <n-input-group>
+                      <n-button
+                        secondary
+                        type="primary"
+                        :loading="detectingFastContextKey"
+                        @click="detectFastContextApiKey(true)"
+                      >
+                        手动获取
+                      </n-button>
+                      <n-input
+                        v-model:value="config.fast_context_api_key"
+                        type="password"
+                        show-password-on="click"
+                        placeholder="自动读取失败时请手动填写"
+                        clearable
+                      />
+                    </n-input-group>
+                    <n-alert
+                      v-if="fastContextKeyStatus"
+                      :type="fastContextKeyStatusType"
+                      :bordered="false"
+                      class="compact-alert"
+                    >
+                      {{ fastContextKeyStatus }}
+                    </n-alert>
+                  </n-space>
                 </n-form-item>
 
                 <n-grid :x-gap="24" :y-gap="16" :cols="4">
@@ -1148,6 +1223,14 @@ defineExpose({ saveConfig })
                         </n-button>
                       </div>
                       <div class="section-content">
+                        <n-alert
+                          v-if="debugResultData.success"
+                          type="info"
+                          :bordered="false"
+                          class="compact-alert mb-2"
+                        >
+                          fast-context 的 Path/Lines/L行号 是三术按 answer 文件范围本地读取后生成的 ACE 兼容格式，不是 fast-context 原生直出文本。
+                        </n-alert>
                         <div v-if="debugResultData.error" class="error-content">
                           {{ debugResultData.error }}
                         </div>
@@ -1283,6 +1366,11 @@ defineExpose({ saveConfig })
 /* 信息提示 */
 .info-alert {
   border-radius: 8px;
+}
+
+.compact-alert {
+  border-radius: 6px;
+  font-size: 12px;
 }
 
 /* 代码样式 */

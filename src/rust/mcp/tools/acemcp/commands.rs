@@ -9,7 +9,7 @@ use crate::config::{AppState, save_config};
 use crate::network::proxy::{ProxyDetector, ProxyInfo, ProxyType};
 use super::AcemcpTool;
 use super::types::{ProjectIndexStatus, ProjectsIndexStatus, ProjectFilesStatus, DetectedProxy, ProxySpeedTestResult, SpeedTestMetric, SpeedTestProgress, SpeedTestStageStatus, ProjectWithNestedStatus};
-use crate::mcp::tools::sou::{SouRequest, SouTool};
+use crate::mcp::tools::sou::{fast_context, SouRequest, SouTool};
 use reqwest;
 use crate::{log_debug, log_important};
 
@@ -132,6 +132,92 @@ pub struct SaveAcemcpConfigArgs {
     pub fast_context_timeout_ms: Option<u64>,
     #[serde(alias = "fastContextExcludePaths", alias = "fast_context_exclude_paths")]
     pub fast_context_exclude_paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct FastContextApiKeyDetectionResponse {
+    pub found: bool,
+    pub source: Option<String>,
+    pub source_label: Option<String>,
+    pub api_key: Option<String>,
+    pub masked_api_key: Option<String>,
+    pub saved: bool,
+    pub message: String,
+}
+
+#[tauri::command]
+pub async fn detect_fast_context_api_key(
+    save: bool,
+    include_saved: Option<bool>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<FastContextApiKeyDetectionResponse, String> {
+    let include_saved = include_saved.unwrap_or(true);
+    let configured_key = if include_saved {
+        let config = state
+            .config
+            .lock()
+            .map_err(|e| format!("获取配置失败: {}", e))?;
+        config.mcp_config.fast_context_api_key.clone()
+    } else {
+        None
+    };
+
+    match fast_context::detect_api_key(configured_key.as_deref()) {
+        Ok(detected) => {
+            let source = detected.source.as_str().to_string();
+            let source_label = detected.source.label().to_string();
+            let masked = fast_context::mask_api_key(&detected.api_key);
+            let mut saved = false;
+
+            if save && !detected.api_key.trim().is_empty() {
+                {
+                    let mut config = state
+                        .config
+                        .lock()
+                        .map_err(|e| format!("获取配置失败: {}", e))?;
+                    config.mcp_config.fast_context_api_key = Some(detected.api_key.clone());
+                }
+                save_config(&state, &app)
+                    .await
+                    .map_err(|e| format!("保存 Windsurf API Key 失败: {}", e))?;
+                saved = true;
+            }
+
+            log::info!(
+                "[fast-context] Windsurf API Key 检测成功: source={}, masked={}, saved={}",
+                source,
+                masked,
+                saved
+            );
+
+            Ok(FastContextApiKeyDetectionResponse {
+                found: true,
+                source: Some(source),
+                source_label: Some(source_label.clone()),
+                api_key: Some(detected.api_key),
+                masked_api_key: Some(masked),
+                saved,
+                message: if saved {
+                    format!("已从{}获取并保存 Windsurf API Key", source_label)
+                } else {
+                    format!("已从{}获取 Windsurf API Key", source_label)
+                },
+            })
+        }
+        Err(err) => {
+            log::warn!("[fast-context] Windsurf API Key 检测失败: {}", err);
+            Ok(FastContextApiKeyDetectionResponse {
+                found: false,
+                source: None,
+                source_label: None,
+                api_key: None,
+                masked_api_key: None,
+                saved: false,
+                message: format!("未获取到 Windsurf API Key，请手动填写: {}", err),
+            })
+        }
+    }
 }
 
 

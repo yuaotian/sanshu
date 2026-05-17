@@ -415,8 +415,9 @@ pub fn auto_init_logger() -> Result<(), Box<dyn std::error::Error>> {
     let config = if is_mcp_mode {
         // MCP 模式：只输出到文件，不输出到 stderr
         LogConfig {
+            // MCP 模式只写日志文件，不输出 stderr；默认 info 便于排查 fast-context 检索链路。
             level: env::var("RUST_LOG")
-                .unwrap_or_else(|_| "warn".to_string())
+                .unwrap_or_else(|_| "info".to_string())
                 .parse::<LevelFilter>()
                 .unwrap_or(LevelFilter::Warn),
             file_path: log_file_path,

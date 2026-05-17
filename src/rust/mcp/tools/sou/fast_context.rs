@@ -15,6 +15,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
+use std::time::Instant;
 use std::time::Duration;
 use tokio::process::Command;
 use uuid::Uuid;
@@ -56,6 +57,37 @@ pub struct FastContextFile {
     pub path: Option<String>,
     pub full_path: Option<String>,
     pub ranges: Vec<[usize; 2]>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApiKeyDetection {
+    pub api_key: String,
+    pub source: ApiKeySource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiKeySource {
+    Config,
+    Env,
+    WindsurfDb,
+}
+
+impl ApiKeySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::Env => "env",
+            Self::WindsurfDb => "windsurf_db",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Config => "已保存配置",
+            Self::Env => "WINDSURF_API_KEY 环境变量",
+            Self::WindsurfDb => "Windsurf 本地登录库",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +166,19 @@ type FcResult<T> = std::result::Result<T, FastContextError>;
 
 /// 使用 Rust 原生实现执行 fast-context 检索，避免依赖 demo 目录中的 Node bridge。
 pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
+    let started_at = Instant::now();
+    log::info!(
+        "[fast-context] 开始搜索: project_root={}, query_len={}, tree_depth={}, max_turns={}, max_results={}, max_commands={}, timeout_ms={}, exclude_count={}",
+        opts.project_root.display(),
+        opts.query.chars().count(),
+        opts.tree_depth,
+        opts.max_turns,
+        opts.max_results,
+        opts.max_commands,
+        opts.timeout_ms,
+        opts.exclude_paths.len()
+    );
+
     let project_root = opts
         .project_root
         .canonicalize()
@@ -141,20 +186,44 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
     if !project_root.is_dir() {
         return Err(anyhow!("项目路径不是目录: {}", project_root.display()));
     }
+    log::info!(
+        "[fast-context] 项目路径已解析: {}",
+        project_root.display()
+    );
 
-    let api_key = resolve_api_key(opts.api_key.as_deref())
+    let detected_key = detect_api_key(opts.api_key.as_deref())
         .context("未找到 Windsurf API Key，请在设置中填写或登录 Windsurf 后重试")?;
+    log::info!(
+        "[fast-context] Windsurf API Key 已解析: source={}, label={}, masked={}, length={}",
+        detected_key.source.as_str(),
+        detected_key.source.label(),
+        mask_api_key(&detected_key.api_key),
+        detected_key.api_key.chars().count()
+    );
+    let api_key = detected_key.api_key;
+
     let client = Client::builder()
         .timeout(Duration::from_millis(opts.timeout_ms + 5000))
         .build()
         .context("创建 fast-context HTTP 客户端失败")?;
 
+    log::info!("[fast-context] 开始获取 Windsurf JWT");
     let jwt = fetch_jwt(&client, &api_key).await?;
+    log::info!("[fast-context] Windsurf JWT 获取成功: length={}", jwt.len());
+    log::info!("[fast-context] 开始检查 Windsurf 限流状态");
     if !check_rate_limit(&client, &api_key, &jwt).await? {
+        log::warn!("[fast-context] Windsurf 限流检查未通过");
         return Err(anyhow!("RATE_LIMITED: Windsurf 当前限流，请稍后重试"));
     }
+    log::info!("[fast-context] Windsurf 限流检查通过");
 
     let repo_map = get_repo_map(&project_root, opts.tree_depth, &opts.exclude_paths);
+    log::info!(
+        "[fast-context] repo map 已生成: depth={}, size_bytes={}, fell_back={}",
+        repo_map.depth,
+        repo_map.size_bytes,
+        repo_map.fell_back
+    );
     let mut executor = ToolExecutor::new(project_root.clone());
     let tool_defs = build_tool_definitions(opts.max_commands);
     let system_prompt = build_system_prompt(opts.max_turns, opts.max_commands, opts.max_results);
@@ -173,6 +242,13 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
 
     let mut turn = 0usize;
     while turn < total_api_calls + compensated_turns {
+        log::info!(
+            "[fast-context] 搜索轮次开始: turn={}, messages={}, compensated_turns={}, force_answer_injected={}",
+            turn + 1,
+            messages.len(),
+            compensated_turns,
+            force_answer_injected
+        );
         let proto = build_request(&api_key, &jwt, &messages, &tool_defs)?;
         let response = match streaming_request(&client, &proto, opts.timeout_ms, 2).await {
             Ok(response) => response,
@@ -180,6 +256,12 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
                 if matches!(err.code.as_str(), "PAYLOAD_TOO_LARGE" | "TIMEOUT")
                     && messages.len() > 4 =>
             {
+                log::warn!(
+                    "[fast-context] 流式请求失败并触发上下文裁剪: code={}, status={:?}, messages={}",
+                    err.code,
+                    err.status,
+                    messages.len()
+                );
                 trim_messages(&mut messages);
                 let retry_proto = build_request(&api_key, &jwt, &messages, &tool_defs)?;
                 streaming_request(&client, &retry_proto, opts.timeout_ms, 0)
@@ -188,6 +270,11 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
             }
             Err(err) => return Err(anyhow!(err)),
         };
+        log::debug!(
+            "[fast-context] 搜索轮次响应已收到: turn={}, bytes={}",
+            turn + 1,
+            response.len()
+        );
 
         let Some(tool_call) = parse_response(&response)? else {
             let text = parse_plain_response(&response);
@@ -197,6 +284,10 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
             if text.starts_with("[Error]") {
                 return Err(anyhow!(text));
             }
+            log::warn!(
+                "[fast-context] 未解析到工具调用，返回 plain response: length={}",
+                text.len()
+            );
             return Ok(SearchResult {
                 files: Vec::new(),
                 rg_patterns: executor.collected_rg_patterns(),
@@ -212,6 +303,11 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 let files = parse_answer(answer_xml, &project_root)?;
+                log::info!(
+                    "[fast-context] answer 解析完成: files={}, elapsed_ms={}",
+                    files.len(),
+                    started_at.elapsed().as_millis()
+                );
                 return Ok(SearchResult {
                     files,
                     rg_patterns: executor.collected_rg_patterns(),
@@ -223,7 +319,17 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
                 let args_json = serde_json::to_string(&tool_call.args)
                     .context("序列化 fast-context 工具参数失败")?;
                 let valid_commands = count_valid_commands(&tool_call.args);
+                log::info!(
+                    "[fast-context] restricted_exec 调用: turn={}, valid_commands={}",
+                    turn + 1,
+                    valid_commands
+                );
                 let results = executor.exec_tool_call(&tool_call.args).await;
+                log::debug!(
+                    "[fast-context] restricted_exec 返回: turn={}, output_len={}",
+                    turn + 1,
+                    results.len()
+                );
 
                 if valid_commands == 0 && compensated_turns < 2 {
                     compensated_turns += 1;
@@ -250,6 +356,10 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
                 if effective_turn >= opts.max_turns.saturating_sub(1) as usize
                     && !force_answer_injected
                 {
+                    log::info!(
+                        "[fast-context] 搜索轮次即将耗尽，已注入强制 answer 提示: turn={}",
+                        turn + 1
+                    );
                     messages.push(ChatMessage::new(1, FINAL_FORCE_ANSWER.to_string()));
                     force_answer_injected = true;
                 }
@@ -259,6 +369,10 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
         turn += 1;
     }
 
+    log::warn!(
+        "[fast-context] 已达到最大轮次但未获得 answer: elapsed_ms={}",
+        started_at.elapsed().as_millis()
+    );
     Ok(SearchResult {
         files: Vec::new(),
         rg_patterns: executor.collected_rg_patterns(),
@@ -283,24 +397,61 @@ impl ChatMessage {
     }
 }
 
-fn resolve_api_key(configured: Option<&str>) -> Result<String> {
+pub fn detect_api_key(configured: Option<&str>) -> Result<ApiKeyDetection> {
     if let Some(key) = configured.map(str::trim).filter(|s| !s.is_empty()) {
-        return Ok(key.to_string());
+        return Ok(ApiKeyDetection {
+            api_key: key.to_string(),
+            source: ApiKeySource::Config,
+        });
     }
     if let Ok(key) = env::var("WINDSURF_API_KEY") {
         let key = key.trim().to_string();
         if !key.is_empty() {
-            return Ok(key);
+            return Ok(ApiKeyDetection {
+                api_key: key,
+                source: ApiKeySource::Env,
+            });
         }
     }
-    extract_windsurf_api_key()?.ok_or_else(|| anyhow!("Windsurf 本地登录库中没有 apiKey"))
+    extract_windsurf_api_key()?
+        .map(|api_key| ApiKeyDetection {
+            api_key,
+            source: ApiKeySource::WindsurfDb,
+        })
+        .ok_or_else(|| anyhow!("Windsurf 本地登录库中没有 apiKey"))
+}
+
+pub fn mask_api_key(api_key: &str) -> String {
+    let trimmed = api_key.trim();
+    let char_count = trimmed.chars().count();
+    if char_count <= 8 {
+        return "*".repeat(char_count.max(1));
+    }
+    let prefix = trimmed.chars().take(4).collect::<String>();
+    let suffix = trimmed
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("{prefix}...{suffix}")
 }
 
 fn extract_windsurf_api_key() -> Result<Option<String>> {
     let db_path = windsurf_state_db_path()?;
     if !db_path.exists() {
+        log::warn!(
+            "[fast-context] Windsurf 登录数据库不存在: {}",
+            db_path.display()
+        );
         return Ok(None);
     }
+    log::debug!(
+        "[fast-context] 尝试读取 Windsurf 登录数据库: {}",
+        db_path.display()
+    );
 
     let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("打开 Windsurf 登录数据库失败: {}", db_path.display()))?;
@@ -436,6 +587,7 @@ async fn unary_request(
     compress: bool,
     timeout_ms: u64,
 ) -> FcResult<Vec<u8>> {
+    let started_at = Instant::now();
     let mut body = proto_bytes.to_vec();
     let mut request = client
         .post(url)
@@ -457,13 +609,26 @@ async fn unary_request(
         .map_err(classify_reqwest_error)?;
     let status = response.status();
     if !status.is_success() {
+        log::warn!(
+            "[fast-context] unary 请求失败: url={}, status={}, elapsed_ms={}",
+            url,
+            status,
+            started_at.elapsed().as_millis()
+        );
         return Err(FastContextError::status(status));
     }
-    response
+    let bytes = response
         .bytes()
         .await
         .map(|bytes| bytes.to_vec())
-        .map_err(classify_reqwest_error)
+        .map_err(classify_reqwest_error)?;
+    log::info!(
+        "[fast-context] unary 请求成功: url={}, bytes={}, elapsed_ms={}",
+        url,
+        bytes.len(),
+        started_at.elapsed().as_millis()
+    );
+    Ok(bytes)
 }
 
 async fn streaming_request(
@@ -479,6 +644,7 @@ async fn streaming_request(
     let mut last_error = None;
 
     for attempt in 0..=max_retries {
+        let started_at = Instant::now();
         let trace_id = Uuid::new_v4().simple().to_string();
         let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
         let response = client
@@ -505,14 +671,28 @@ async fn streaming_request(
 
         match response {
             Ok(resp) if resp.status().is_success() => {
-                return resp
+                let bytes = resp
                     .bytes()
                     .await
                     .map(|bytes| bytes.to_vec())
-                    .map_err(classify_reqwest_error);
+                    .map_err(classify_reqwest_error)?;
+                log::info!(
+                    "[fast-context] 流式请求成功: attempt={}, bytes={}, elapsed_ms={}",
+                    attempt + 1,
+                    bytes.len(),
+                    started_at.elapsed().as_millis()
+                );
+                return Ok(bytes);
             }
             Ok(resp) => {
                 let err = FastContextError::status(resp.status());
+                log::warn!(
+                    "[fast-context] 流式请求 HTTP 失败: attempt={}, status={:?}, code={}, elapsed_ms={}",
+                    attempt + 1,
+                    err.status,
+                    err.code,
+                    started_at.elapsed().as_millis()
+                );
                 if err
                     .status
                     .is_some_and(|s| (400..500).contains(&s) && s != 429)
@@ -523,6 +703,13 @@ async fn streaming_request(
             }
             Err(err) => {
                 let err = classify_reqwest_error(err);
+                log::warn!(
+                    "[fast-context] 流式请求网络失败: attempt={}, code={}, elapsed_ms={}, message={}",
+                    attempt + 1,
+                    err.code,
+                    started_at.elapsed().as_millis(),
+                    err.message
+                );
                 last_error = Some(err);
             }
         }
@@ -1205,6 +1392,7 @@ impl ToolExecutor {
 
     async fn exec_tool_call(&mut self, args: &Value) -> String {
         let Some(obj) = args.as_object() else {
+            log::warn!("[fast-context] restricted_exec 参数缺失或格式错误");
             return "Error: missing or invalid tool args".to_string();
         };
         let mut keys = obj
@@ -1215,8 +1403,19 @@ impl ToolExecutor {
         keys.sort();
 
         let mut parts = Vec::new();
+        log::info!(
+            "[fast-context] restricted_exec 开始执行本地命令: count={}",
+            keys.len()
+        );
         for key in keys {
+            let started_at = Instant::now();
             let output = self.exec_command(&obj[&key]).await;
+            log::info!(
+                "[fast-context] restricted_exec 本地命令完成: key={}, output_len={}, elapsed_ms={}",
+                key,
+                output.len(),
+                started_at.elapsed().as_millis()
+            );
             parts.push(format!("<{key}_result>\n{output}\n</{key}_result>"));
         }
         parts.join("")
@@ -1224,6 +1423,7 @@ impl ToolExecutor {
 
     async fn exec_command(&mut self, cmd: &Value) -> String {
         let Some(kind) = cmd.get("type").and_then(Value::as_str) else {
+            log::warn!("[fast-context] 本地命令缺少 type: {}", cmd);
             return "Error: missing or invalid command".to_string();
         };
         match kind {
@@ -1232,6 +1432,13 @@ impl ToolExecutor {
                 let path = cmd.get("path").and_then(Value::as_str).unwrap_or("");
                 let include = string_array(cmd.get("include"));
                 let exclude = string_array(cmd.get("exclude"));
+                log::info!(
+                    "[fast-context] 本地命令 rg: path={}, pattern_len={}, include_count={}, exclude_count={}",
+                    path,
+                    pattern.chars().count(),
+                    include.len(),
+                    exclude.len()
+                );
                 self.rg(pattern, path, include, exclude).await
             }
             "readfile" => {
@@ -1244,11 +1451,22 @@ impl ToolExecutor {
                     .get("end_line")
                     .and_then(Value::as_u64)
                     .map(|v| v as usize);
+                log::info!(
+                    "[fast-context] 本地命令 readfile: file={}, start_line={:?}, end_line={:?}",
+                    file,
+                    start,
+                    end
+                );
                 self.readfile(file, start, end)
             }
             "tree" => {
                 let path = cmd.get("path").and_then(Value::as_str).unwrap_or("");
                 let levels = cmd.get("levels").and_then(Value::as_u64).map(|v| v as u8);
+                log::info!(
+                    "[fast-context] 本地命令 tree: path={}, levels={:?}",
+                    path,
+                    levels
+                );
                 self.tree(path, levels)
             }
             "ls" => {
@@ -1258,6 +1476,12 @@ impl ToolExecutor {
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
                 let all = cmd.get("all").and_then(Value::as_bool).unwrap_or(false);
+                log::info!(
+                    "[fast-context] 本地命令 ls: path={}, long_format={}, all={}",
+                    path,
+                    long_format,
+                    all
+                );
                 self.ls(path, long_format, all)
             }
             "glob" => {
@@ -1267,9 +1491,18 @@ impl ToolExecutor {
                     .get("type_filter")
                     .and_then(Value::as_str)
                     .unwrap_or("all");
+                log::info!(
+                    "[fast-context] 本地命令 glob: path={}, pattern={}, type_filter={}",
+                    path,
+                    pattern,
+                    type_filter
+                );
                 self.glob(pattern, path, type_filter)
             }
-            other => format!("Error: unknown command type '{other}'"),
+            other => {
+                log::warn!("[fast-context] 未知本地命令类型: {}", other);
+                format!("Error: unknown command type '{other}'")
+            }
         }
     }
 
@@ -1281,12 +1514,15 @@ impl ToolExecutor {
         exclude: Vec<String>,
     ) -> String {
         if pattern.trim().is_empty() {
+            log::warn!("[fast-context] rg 缺少 pattern");
             return "Error: missing or invalid pattern".to_string();
         }
         let Ok(real_path) = self.real_path(path) else {
+            log::warn!("[fast-context] rg 路径无法映射: {}", path);
             return format!("Error: path does not exist: {path}");
         };
         if !real_path.exists() {
+            log::warn!("[fast-context] rg 路径不存在: {}", real_path.display());
             return format!("Error: path does not exist: {path}");
         }
         self.collected_rg_patterns.push(pattern.to_string());
@@ -1313,20 +1549,44 @@ impl ToolExecutor {
 
         match tokio::time::timeout(Duration::from_secs(30), command.output()).await {
             Ok(Ok(output)) if output.status.success() => {
-                truncate_output(&self.remap(&String::from_utf8_lossy(&output.stdout)))
+                let result = truncate_output(&self.remap(&String::from_utf8_lossy(&output.stdout)));
+                log::info!(
+                    "[fast-context] rg 成功: path={}, output_len={}",
+                    real_path.display(),
+                    result.len()
+                );
+                result
             }
-            Ok(Ok(output)) if output.status.code() == Some(1) => "(no matches)".to_string(),
+            Ok(Ok(output)) if output.status.code() == Some(1) => {
+                log::info!("[fast-context] rg 无匹配: pattern={}", pattern);
+                "(no matches)".to_string()
+            }
             Ok(Ok(output)) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                truncate_output(&self.remap(if stderr.trim().is_empty() {
+                let result = truncate_output(&self.remap(if stderr.trim().is_empty() {
                     "Error: rg failed"
                 } else {
                     &stderr
-                }))
+                }));
+                log::warn!(
+                    "[fast-context] rg 执行失败: status={:?}, output_len={}",
+                    output.status.code(),
+                    result.len()
+                );
+                result
             }
             // 本机未安装 rg 时走 Rust 内置搜索，保证 fast-context 不因外部二进制缺失不可用。
-            Ok(Err(_)) => self.rg_fallback(pattern, &real_path, &include, &exclude),
-            Err(_) => "Error: rg timed out".to_string(),
+            Ok(Err(err)) => {
+                log::warn!(
+                    "[fast-context] 启动 rg 失败，改用 Rust 内置搜索: error={}",
+                    err
+                );
+                self.rg_fallback(pattern, &real_path, &include, &exclude)
+            }
+            Err(_) => {
+                log::warn!("[fast-context] rg 超时: pattern={}", pattern);
+                "Error: rg timed out".to_string()
+            }
         }
     }
 
@@ -1339,7 +1599,10 @@ impl ToolExecutor {
     ) -> String {
         let regex = match Regex::new(pattern) {
             Ok(regex) => regex,
-            Err(err) => return format!("Error: invalid regex: {err}"),
+            Err(err) => {
+                log::warn!("[fast-context] Rust 内置搜索 regex 无效: {}", err);
+                return format!("Error: invalid regex: {err}");
+            }
         };
         let mut matches = Vec::new();
         collect_rg_matches(
@@ -1351,22 +1614,38 @@ impl ToolExecutor {
             &mut matches,
         );
         if matches.is_empty() {
+            log::info!("[fast-context] Rust 内置搜索无匹配: pattern={}", pattern);
             "(no matches)".to_string()
         } else {
-            truncate_output(&self.remap(&matches.join("\n")))
+            let result = truncate_output(&self.remap(&matches.join("\n")));
+            log::info!(
+                "[fast-context] Rust 内置搜索完成: matches={}, output_len={}",
+                matches.len(),
+                result.len()
+            );
+            result
         }
     }
 
     fn readfile(&self, file: &str, start_line: Option<usize>, end_line: Option<usize>) -> String {
         let Ok(path) = self.real_path(file) else {
+            log::warn!("[fast-context] readfile 文件无法映射: {}", file);
             return format!("Error: file not found: {file}");
         };
         if !path.is_file() {
+            log::warn!("[fast-context] readfile 文件不存在: {}", path.display());
             return format!("Error: file not found: {file}");
         }
         let content = match fs::read_to_string(&path) {
             Ok(content) => content,
-            Err(err) => return format!("Error: {err}"),
+            Err(err) => {
+                log::warn!(
+                    "[fast-context] readfile 读取失败: path={}, error={}",
+                    path.display(),
+                    err
+                );
+                return format!("Error: {err}");
+            }
         };
         let start = start_line.unwrap_or(1).max(1);
         let end = end_line
@@ -1381,48 +1660,80 @@ impl ToolExecutor {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        truncate_output(&output)
+        let result = truncate_output(&output);
+        log::info!(
+            "[fast-context] readfile 完成: path={}, range={}-{}, output_len={}",
+            path.display(),
+            start,
+            end,
+            result.len()
+        );
+        result
     }
 
     fn tree(&self, path: &str, levels: Option<u8>) -> String {
         let Ok(real_path) = self.real_path(path) else {
+            log::warn!("[fast-context] tree 目录无法映射: {}", path);
             return format!("Error: dir not found: {path}");
         };
         if !real_path.is_dir() {
+            log::warn!("[fast-context] tree 目录不存在: {}", real_path.display());
             return format!("Error: dir not found: {path}");
         }
         let label = self.virtual_label(path);
-        truncate_output(&self.remap(&build_tree(
+        let result = truncate_output(&self.remap(&build_tree(
             &real_path,
             &label,
             levels.unwrap_or(3).clamp(1, 6),
             &[],
-        )))
+        )));
+        log::info!(
+            "[fast-context] tree 完成: path={}, output_len={}",
+            real_path.display(),
+            result.len()
+        );
+        result
     }
 
     fn ls(&self, path: &str, long_format: bool, all: bool) -> String {
         let Ok(real_path) = self.real_path(path) else {
+            log::warn!("[fast-context] ls 目录无法映射: {}", path);
             return format!("Error: dir not found: {path}");
         };
         if !real_path.is_dir() {
+            log::warn!("[fast-context] ls 不是目录: {}", real_path.display());
             return format!("Error: not a directory: {path}");
         }
         let mut entries = match fs::read_dir(&real_path) {
             Ok(entries) => entries.filter_map(|entry| entry.ok()).collect::<Vec<_>>(),
-            Err(err) => return format!("Error: {err}"),
+            Err(err) => {
+                log::warn!(
+                    "[fast-context] ls 读取目录失败: path={}, error={}",
+                    real_path.display(),
+                    err
+                );
+                return format!("Error: {err}");
+            }
         };
         entries.sort_by_key(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase());
         if !all {
             entries.retain(|entry| !entry.file_name().to_string_lossy().starts_with('.'));
         }
         if !long_format {
-            return truncate_output(
+            let result = truncate_output(
                 &entries
                     .iter()
                     .map(|entry| entry.file_name().to_string_lossy().to_string())
                     .collect::<Vec<_>>()
                     .join("\n"),
             );
+            log::info!(
+                "[fast-context] ls 完成: path={}, entries={}, output_len={}",
+                real_path.display(),
+                entries.len(),
+                result.len()
+            );
+            return result;
         }
 
         let mut lines = vec![format!("total {}", entries.len())];
@@ -1439,37 +1750,56 @@ impl ToolExecutor {
                 entry.file_name().to_string_lossy()
             ));
         }
-        truncate_output(&lines.join("\n"))
+        let result = truncate_output(&lines.join("\n"));
+        log::info!(
+            "[fast-context] ls 长格式完成: path={}, output_len={}",
+            real_path.display(),
+            result.len()
+        );
+        result
     }
 
     fn glob(&self, pattern: &str, path: &str, type_filter: &str) -> String {
         if pattern.trim().is_empty() {
+            log::warn!("[fast-context] glob 缺少 pattern");
             return "Error: missing or invalid pattern".to_string();
         }
         let Ok(root) = self.real_path(path) else {
+            log::warn!("[fast-context] glob 路径无法映射: {}", path);
             return format!("Error: path does not exist: {path}");
         };
         if !root.exists() {
+            log::warn!("[fast-context] glob 路径不存在: {}", root.display());
             return format!("Error: path does not exist: {path}");
         }
         let matcher = match GlobBuilder::new(pattern).literal_separator(true).build() {
             Ok(glob) => glob.compile_matcher(),
-            Err(err) => return format!("Error: invalid glob: {err}"),
+            Err(err) => {
+                log::warn!("[fast-context] glob 表达式无效: {}", err);
+                return format!("Error: invalid glob: {err}");
+            }
         };
         let mut matches = Vec::new();
         collect_glob_matches(&root, &root, &matcher, type_filter, &mut matches);
         matches.sort();
         matches.truncate(100);
         if matches.is_empty() {
+            log::info!("[fast-context] glob 无匹配: pattern={}", pattern);
             "(no matches)".to_string()
         } else {
-            self.remap(
+            let result = self.remap(
                 &matches
                     .iter()
                     .map(|path| normalize_path(path))
                     .collect::<Vec<_>>()
                     .join("\n"),
-            )
+            );
+            log::info!(
+                "[fast-context] glob 完成: matches={}, output_len={}",
+                matches.len(),
+                result.len()
+            );
+            result
         }
     }
 
