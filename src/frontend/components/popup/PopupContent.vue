@@ -365,6 +365,40 @@ function showTemporaryCheck(triggerEl: HTMLElement) {
   }, 1600)
 }
 
+// 复制文本：优先使用 Clipboard API，失败时回退到传统 textarea 方案。
+async function copyTextWithFallback(text: string): Promise<'clipboard' | 'fallback'> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return 'clipboard'
+    }
+  }
+  catch {
+    // 中文注释：安全上下文或权限异常时继续尝试传统 textarea 复制，提升 WebView 兼容性。
+  }
+
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.setAttribute('readonly', 'true')
+  textarea.style.position = 'fixed'
+  textarea.style.left = '-9999px'
+  textarea.style.top = '0'
+  document.body.appendChild(textarea)
+
+  try {
+    textarea.focus()
+    textarea.select()
+    const copied = document.execCommand('copy')
+    if (!copied) {
+      throw new Error('execCommand copy returned false')
+    }
+    return 'fallback'
+  }
+  finally {
+    textarea.remove()
+  }
+}
+
 // 复制原始 Markdown 内容到剪贴板
 async function copyRawMarkdown() {
   const content = props.request?.message
@@ -373,11 +407,11 @@ async function copyRawMarkdown() {
     return
   }
   try {
-    await navigator.clipboard.writeText(content)
-    message.success('Markdown 原文已复制')
+    const mode = await copyTextWithFallback(content)
+    message.success(mode === 'fallback' ? 'Markdown 原文已复制（兼容模式）' : 'Markdown 原文已复制')
   }
   catch {
-    message.error('复制失败')
+    message.error('复制失败，请手动选择文本')
   }
 }
 

@@ -694,15 +694,21 @@ async fn check_rate_limit(client: &Client, api_key: &str, jwt: &str) -> Result<b
     request.write_message(1, &build_metadata(api_key, jwt)?);
     request.write_string(3, &ws_model());
 
-    match unary_request(
-        client,
-        &format!("{API_BASE}/CheckUserMessageRateLimit"),
-        &request.into_bytes(),
-        true,
-        30_000,
+    handle_rate_limit_result(
+        unary_request(
+            client,
+            &format!("{API_BASE}/CheckUserMessageRateLimit"),
+            &request.into_bytes(),
+            true,
+            30_000,
+        )
+        .await,
     )
-    .await
-    {
+}
+
+/// 将 rate-limit HTTP 调用结果收敛为业务语义，便于单元测试覆盖错误分支。
+fn handle_rate_limit_result(result: FcResult<Vec<u8>>) -> Result<bool> {
+    match result {
         Ok(_) => Ok(true),
         Err(err) if err.status == Some(429) => Ok(false),
         // #4 严格化：非 429 网络/HTTP 错误向上抛，避免后续浪费 LLM 配额
@@ -823,14 +829,8 @@ async fn streaming_request(
                     err.code,
                     started_at.elapsed().as_millis()
                 );
-                // #4 429 速率限制不应重试（继续打只会更糟），4xx（除外）也不重试
-                if err.status == Some(429) {
-                    return Err(err);
-                }
-                if err
-                    .status
-                    .is_some_and(|s| (400..500).contains(&s) && s != 429)
-                {
+                // #4 429 / 其他 4xx 不应重试，避免无效请求继续消耗远端配额
+                if !should_retry_streaming_error(&err) {
                     return Err(err);
                 }
                 last_error = Some(err);
@@ -850,13 +850,17 @@ async fn streaming_request(
 
         if attempt < max_retries {
             // #4 指数退避 + jitter：避免雷霆群与服务器同步震荡
-            let base_ms = 1000u64 * (attempt as u64 + 1);
             let jitter_ms = pseudo_jitter_ms(attempt);
-            tokio::time::sleep(Duration::from_millis(base_ms + jitter_ms)).await;
+            tokio::time::sleep(Duration::from_millis(retry_delay_ms(attempt, jitter_ms))).await;
         }
     }
 
     Err(last_error.unwrap_or_else(|| FastContextError::timeout("streaming request timed out")))
+}
+
+/// 判断 streaming 请求失败后是否值得重试：4xx 属于请求/鉴权/限流问题，继续重试只会浪费配额。
+fn should_retry_streaming_error(err: &FastContextError) -> bool {
+    !matches!(err.status, Some(400..=499))
 }
 
 /// 基于纳秒时间戳的轻量 jitter（0~400ms），无需引入 rand 依赖
@@ -865,8 +869,18 @@ fn pseudo_jitter_ms(attempt: usize) -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos() as u64)
         .unwrap_or(0);
+    jitter_ms_from_seed(attempt, nanos)
+}
+
+/// 从可控 seed 计算 jitter，保留随机扰动逻辑同时让边界可测试。
+fn jitter_ms_from_seed(attempt: usize, nanos: u64) -> u64 {
     let seed = nanos.wrapping_add(attempt as u64 * 7919);
     seed % 400
+}
+
+/// 计算最终重试等待时间，保证指数退避基础值与 jitter 组合逻辑可测试。
+fn retry_delay_ms(attempt: usize, jitter_ms: u64) -> u64 {
+    1000u64 * (attempt as u64 + 1) + jitter_ms
 }
 
 fn classify_reqwest_error(err: reqwest::Error) -> FastContextError {
@@ -2614,6 +2628,67 @@ mod tests {
         );
         // 空字符串安全
         assert_eq!(chinese_ratio(""), 0.0);
+    }
+
+    #[test]
+    fn rate_limit_429_returns_false() {
+        let result = handle_rate_limit_result(Err(FastContextError::status(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+        )))
+        .expect("429 应被转换为限流状态而不是错误");
+
+        assert!(!result, "429 应返回 false，提示调用方当前被限流");
+    }
+
+    #[test]
+    fn rate_limit_non_429_error_is_propagated() {
+        let error = handle_rate_limit_result(Err(FastContextError::status(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        )))
+        .expect_err("非 429 错误应向上抛出，避免静默消耗配额");
+
+        assert!(error.to_string().contains("rate-limit 检查失败"));
+        assert!(error.to_string().contains("SERVER_ERROR"));
+    }
+
+    #[test]
+    fn streaming_4xx_errors_are_not_retryable() {
+        for status in [
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::BAD_REQUEST,
+        ] {
+            let err = FastContextError::status(status);
+            assert!(
+                !should_retry_streaming_error(&err),
+                "HTTP {} 不应进入重试",
+                status.as_u16()
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_5xx_timeout_and_network_errors_are_retryable() {
+        let server_error = FastContextError::status(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+        let timeout = FastContextError::timeout("请求超时");
+        let network = FastContextError::network("网络断开");
+
+        assert!(should_retry_streaming_error(&server_error));
+        assert!(should_retry_streaming_error(&timeout));
+        assert!(should_retry_streaming_error(&network));
+    }
+
+    #[test]
+    fn jitter_and_retry_delay_are_bounded_and_additive() {
+        for attempt in 0..8 {
+            let jitter = jitter_ms_from_seed(attempt, u64::MAX - attempt as u64);
+            assert!(jitter < 400, "jitter 必须保持在 0..400ms 范围内");
+            assert_eq!(
+                retry_delay_ms(attempt, jitter),
+                1000u64 * (attempt as u64 + 1) + jitter
+            );
+        }
     }
 
     #[test]
