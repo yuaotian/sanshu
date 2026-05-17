@@ -17,8 +17,10 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Instant;
 use std::time::Duration;
+use std::time::SystemTime;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -34,6 +36,52 @@ const RESULT_MAX_LINES: usize = 50;
 const LINE_MAX_CHARS: usize = 250;
 const FINAL_FORCE_ANSWER: &str =
     "You have no turns left. Now you MUST provide your final ANSWER, even if it's not complete.";
+
+/// JWT 内存缓存：避免每次查询都重新走 GetUserJwt RTT（约 100-300ms）。
+/// 保守地用 10 分钟窗口，远小于 JWT 真实过期时间。
+const JWT_CACHE_TTL_SECS: u64 = 600;
+
+#[derive(Debug, Clone)]
+struct CachedJwt {
+    api_key_fingerprint: u64,
+    jwt: String,
+    fetched_at: SystemTime,
+}
+
+static JWT_CACHE: OnceLock<Mutex<Option<CachedJwt>>> = OnceLock::new();
+
+fn jwt_cache() -> &'static Mutex<Option<CachedJwt>> {
+    JWT_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// 用 FNV-1a 计算 api_key 指纹，避免把明文丢进缓存键
+fn api_key_fp(api_key: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for b in api_key.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// 计算字符串中 CJK 汉字字符占比（用于触发中文翻译提示）
+fn chinese_ratio(text: &str) -> f32 {
+    let total = text.chars().count();
+    if total == 0 {
+        return 0.0;
+    }
+    let cjk = text
+        .chars()
+        .filter(|c| {
+            let v = *c as u32;
+            // CJK 统一表意文字 + CJK 扩展 A + CJK 兼容表意文字
+            (0x4E00..=0x9FFF).contains(&v)
+                || (0x3400..=0x4DBF).contains(&v)
+                || (0xF900..=0xFAFF).contains(&v)
+        })
+        .count();
+    cjk as f32 / total as f32
+}
 
 #[derive(Debug, Clone)]
 pub struct SearchOptions {
@@ -236,9 +284,15 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
     let executor = Arc::new(ToolExecutor::new(project_root.clone()));
     let tool_defs = build_tool_definitions(opts.max_commands);
     let system_prompt = build_system_prompt(opts.max_turns, opts.max_commands, opts.max_results);
+    // [D] 中文 query 提示：当中文字符占比超过 30%，user prompt 内追加翻译提醒
+    let language_hint = if chinese_ratio(&opts.query) > 0.30 {
+        "\n\nLanguage note: The Problem Statement above is in Chinese. The codebase identifiers are most likely in English — translate domain terms into English keywords before searching (e.g. 截图→screenshot/capture, 剪贴板→clipboard, 配置→config, 服务→service, 控制器→controller)."
+    } else {
+        ""
+    };
     let user_content = format!(
-        "Problem Statement: {}\n\nRepo Map (tree -L {} /codebase):\n```text\n{}\n```{}",
-        opts.query, repo_map.depth, repo_map.tree, project_summary
+        "Problem Statement: {}\n\nRepo Map (tree -L {} /codebase):\n```text\n{}\n```{}{}",
+        opts.query, repo_map.depth, repo_map.tree, project_summary, language_hint
     );
 
     let mut messages = vec![
@@ -250,6 +304,7 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
     let mut force_answer_injected = false;
 
     let mut turn = 0usize;
+    let mut empty_answer_retried = false;
     while turn < total_api_calls + compensated_turns {
         log::info!(
             "[fast-context] 搜索轮次开始: turn={}, messages={}, compensated_turns={}, force_answer_injected={}",
@@ -318,7 +373,25 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
                     files.len(),
                     started_at.elapsed().as_millis()
                 );
-                // #3 把 ToolExecutor 已缓存的 readfile 内容透传给格式化层，避免再读一次磁盘
+                // [C] 空 answer 自动重试：LLM 偶发直接返回 0 文件，但还有 turn 余量时给一次重试
+                // 触发条件：解析得到 0 个文件、未重试过、且剩余 turn 至少 1 个
+                let effective_used = turn.saturating_sub(compensated_turns) + 1;
+                let turns_left = (opts.max_turns as usize).saturating_sub(effective_used);
+                if files.is_empty() && !empty_answer_retried && turns_left >= 1 {
+                    log::warn!(
+                        "[fast-context] 检测到空 ANSWER，触发自动重试: turn={}, turns_left={}",
+                        turn + 1,
+                        turns_left
+                    );
+                    empty_answer_retried = true;
+                    // 用 user role 注入更具体的搜索指令，让 LLM 必须先 rg 再 answer
+                    messages.push(ChatMessage::new(
+                        1,
+                        "Your previous answer was empty. Re-attempt the search: first issue a restricted_exec call with 2-3 broad rg searches against the most likely source directories (e.g. src/), then read the top matches, and finally provide a non-empty ANSWER with concrete file paths.".to_string(),
+                    ));
+                    turn += 1;
+                    continue;
+                }
                 return Ok(SearchResult {
                     files,
                     rg_patterns: executor.collected_rg_patterns().await,
@@ -530,6 +603,26 @@ fn windsurf_state_db_path() -> Result<PathBuf> {
 }
 
 async fn fetch_jwt(client: &Client, api_key: &str) -> Result<String> {
+    // [A] JWT 内存缓存：命中则跳过远端 GetUserJwt（节省 100-300ms / 查询）
+    let fp = api_key_fp(api_key);
+    {
+        let cache = jwt_cache().lock().await;
+        if let Some(cached) = cache.as_ref() {
+            if cached.api_key_fingerprint == fp {
+                if let Ok(age) = SystemTime::now().duration_since(cached.fetched_at) {
+                    if age.as_secs() < JWT_CACHE_TTL_SECS {
+                        log::info!(
+                            "[fast-context] JWT 缓存命中: age_secs={}, ttl_secs={}",
+                            age.as_secs(),
+                            JWT_CACHE_TTL_SECS
+                        );
+                        return Ok(cached.jwt.clone());
+                    }
+                }
+            }
+        }
+    }
+
     let mut meta = ProtobufEncoder::default();
     meta.write_string(1, WS_APP);
     meta.write_string(2, &ws_app_ver());
@@ -551,7 +644,20 @@ async fn fetch_jwt(client: &Client, api_key: &str) -> Result<String> {
     .await
     .map_err(|e| anyhow!("获取 Windsurf JWT 失败: {}", e))?;
 
-    extract_jwt_from_response(&response).ok_or_else(|| anyhow!("无法从 GetUserJwt 响应中提取 JWT"))
+    let jwt = extract_jwt_from_response(&response)
+        .ok_or_else(|| anyhow!("无法从 GetUserJwt 响应中提取 JWT"))?;
+
+    // 写入缓存
+    {
+        let mut cache = jwt_cache().lock().await;
+        *cache = Some(CachedJwt {
+            api_key_fingerprint: fp,
+            jwt: jwt.clone(),
+            fetched_at: SystemTime::now(),
+        });
+    }
+
+    Ok(jwt)
 }
 
 fn extract_jwt_from_response(response: &[u8]) -> Option<String> {
@@ -1184,10 +1290,16 @@ Environment:
 - Tool-call protocol is text based: call tools by outputting `[TOOL_CALLS]restricted_exec[ARGS]{{...}}` or `[TOOL_CALLS]answer[ARGS]{{...}}` exactly.
 - You may use exactly one restricted_exec tool call per search turn.
 - Each restricted_exec call may include at most {max_commands} commands.
+- **STRONGLY PREFER batching multiple commands within a single restricted_exec call** — they run in parallel locally, so issuing 2–4 commands per turn is dramatically faster than 1 command per turn.
 - Available command types: rg, readfile, tree, ls, glob.
 - Prefer narrow rg searches first, then read complete semantic blocks.
 - Avoid generated, vendored, dependency, build, and cache directories unless directly relevant.
 - You have at most {max_turns} search turns before final answer.
+
+Language handling (IMPORTANT):
+- If the Problem Statement is not in English (e.g. Chinese, Japanese), first internally translate the user's intent to English. Code identifiers (class/function/file names) in most repositories are English, so search using English keywords.
+- When the question uses Chinese terms like "类" / "函数" / "调用链" / "实现"，treat them as English "class" / "function" / "call chain" / "implementation" and search for the corresponding English identifiers in the codebase.
+- If the question mentions a domain concept (e.g. "屏幕截图" → "screenshot/capture", "剪贴板" → "clipboard"), translate to English and try multiple synonyms in your rg patterns.
 
 Final answer:
 - Use the answer tool by outputting `[TOOL_CALLS]answer[ARGS]{{"answer":"<ANSWER>...</ANSWER>"}}`.
@@ -2478,12 +2590,38 @@ mod tests {
         let dup = executor.count_repeat_commands(&args1).await;
         assert_eq!(dup, 1, "完全一致的命令应被检测为重复");
 
-        // 命令缓存命中验证：第二次同样调用应返回相同结果，且不产生新读盘（间接通过结果一致性验证）
+        // 命令缓存命中验证：第二次同样调用应返回相同结果
         let args2 = args1.clone();
         let out_second = ToolExecutor::exec_tool_call(executor.clone(), &args2).await;
         assert!(
             out_second.contains("alpha"),
             "缓存命中后输出仍应包含原文件内容"
         );
+    }
+
+    #[test]
+    fn chinese_ratio_detects_chinese_dominant_text() {
+        // 纯英文：0
+        assert!(chinese_ratio("Find ImageCodec class") < 0.05);
+        // 纯中文：接近 1
+        assert!(chinese_ratio("找到图像编码器类的实现位置") > 0.9);
+        // 中英混合（约一半中文）
+        let ratio = chinese_ratio("找到 ImageCodec 类的实现");
+        assert!(
+            ratio > 0.30 && ratio < 0.80,
+            "中英混合中文占比应在 30%~80%，实际 {}",
+            ratio
+        );
+        // 空字符串安全
+        assert_eq!(chinese_ratio(""), 0.0);
+    }
+
+    #[test]
+    fn api_key_fingerprint_is_deterministic_and_distinct() {
+        let a = api_key_fp("sk-test-aaaaaa");
+        let b = api_key_fp("sk-test-aaaaaa");
+        let c = api_key_fp("sk-test-bbbbbb");
+        assert_eq!(a, b, "同一 key 应得到相同指纹");
+        assert_ne!(a, c, "不同 key 应得到不同指纹");
     }
 }

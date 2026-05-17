@@ -81,7 +81,7 @@ impl SouTool {
                 },
                 "query": {
                     "type": "string",
-                    "description": "用于查找相关代码上下文的自然语言搜索查询。"
+                    "description": "用于查找相关代码上下文的自然语言搜索查询。提示：代码标识符通常为英文，使用中文描述时建议混入英文类名/函数名/文件名（如 GestureRecognizer、ImageCodec），可以显著提升命中率与稳定性。"
                 },
                 "backend": {
                     "type": "string",
@@ -121,7 +121,7 @@ impl SouTool {
             Tool {
                 name: Cow::Borrowed("sou"),
                 description: Some(Cow::Borrowed(
-                    "代码上下文检索工具。支持 ACE、fast-context、自动回退与双后端合并返回。",
+                    "代码上下文检索工具。支持 ACE、fast-context、自动回退与双后端合并返回。\n\n查询建议：\n- 代码标识符通常为英文，使用中文时建议混入英文类名/函数名/文件名（如 GestureRecognizer、ImageCodec、ClipboardService）。\n- 长中文描述容易让模型空 answer；如果第一次返回 0 结果，请拆成更具体的子问题或显式给出英文关键词重试。\n- 给出模块/目录提示（如 'gesture 模块' / 'src/capture/'）有助于快速定位。",
                 )),
                 input_schema: Arc::new(schema_map),
                 annotations: None,

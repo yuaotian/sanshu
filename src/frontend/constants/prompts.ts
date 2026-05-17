@@ -162,7 +162,11 @@ export const MCP_TOOLS_CONFIG: ToolPromptConfig[] = [
       whenToUse: [
         '分析前必须先用 `sou` 定位证据，再用 Read/Grep 确认',
       ],
-      howToUse: [],
+      howToUse: [
+        '代码标识符通常为英文：用中文 query 时建议混入英文类名/函数名/文件名（如 `GestureRecognizer`、`ImageCodec`），可显著提升首轮命中率',
+        '若第一次返回 0 文件，请拆成更具体的子问题或显式给出英文关键词重试',
+        '给出模块/目录提示（如「gesture 模块」/「src/capture/」）有助于快速定位',
+      ],
     },
     ui: {
       enabled: false, // 默认关闭：依赖第三方 acemcp 服务
