@@ -365,6 +365,22 @@ function showTemporaryCheck(triggerEl: HTMLElement) {
   }, 1600)
 }
 
+// 复制原始 Markdown 内容到剪贴板
+async function copyRawMarkdown() {
+  const content = props.request?.message
+  if (!content) {
+    message.warning('暂无内容可复制')
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(content)
+    message.success('Markdown 原文已复制')
+  }
+  catch {
+    message.error('复制失败')
+  }
+}
+
 // 事件委托 — 处理 markdown 内容区域的点击
 async function handleMarkdownClick(e: MouseEvent) {
   const target = e.target as HTMLElement
@@ -686,6 +702,17 @@ onBeforeUnmount(() => {
           >
             <div class="i-carbon-code" />
             <span>原始 MD</span>
+          </button>
+          <!-- 复制原始 Markdown 内容 -->
+          <button
+            v-if="showRawMarkdown"
+            type="button"
+            class="markdown-view-copy"
+            title="复制原始 Markdown 全部内容"
+            @click="copyRawMarkdown"
+          >
+            <div class="i-carbon-copy" />
+            <span>复制</span>
           </button>
         </div>
       </div>

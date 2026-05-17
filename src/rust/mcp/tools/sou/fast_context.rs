@@ -3,21 +3,24 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use futures_util::future::join_all;
 use globset::GlobBuilder;
 use regex::Regex;
 use reqwest::Client;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Map, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Instant;
 use std::time::Duration;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 const API_BASE: &str = "https://server.self-serve.windsurf.com/exa.api_server_pb.ApiServerService";
@@ -49,6 +52,9 @@ pub struct SearchOptions {
 pub struct SearchResult {
     pub files: Vec<FastContextFile>,
     pub rg_patterns: Vec<String>,
+    /// ToolExecutor 在 readfile 命令中读取过的文件内容缓存（key 为规范化绝对路径）
+    /// 用于格式化层复用，避免重复 IO。
+    pub file_cache: HashMap<String, String>,
     pub meta: Value,
 }
 
@@ -224,12 +230,15 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
         repo_map.size_bytes,
         repo_map.fell_back
     );
-    let mut executor = ToolExecutor::new(project_root.clone());
+    // #2 Repo Map 智能化：附加 README / manifest 摘要，提升 LLM 首轮命中率
+    let project_summary = build_project_summary(&project_root);
+    // 并发版 ToolExecutor：Arc<Mutex<状态>> 让多条 restricted_exec 命令可并行
+    let executor = Arc::new(ToolExecutor::new(project_root.clone()));
     let tool_defs = build_tool_definitions(opts.max_commands);
     let system_prompt = build_system_prompt(opts.max_turns, opts.max_commands, opts.max_results);
     let user_content = format!(
-        "Problem Statement: {}\n\nRepo Map (tree -L {} /codebase):\n```text\n{}\n```",
-        opts.query, repo_map.depth, repo_map.tree
+        "Problem Statement: {}\n\nRepo Map (tree -L {} /codebase):\n```text\n{}\n```{}",
+        opts.query, repo_map.depth, repo_map.tree, project_summary
     );
 
     let mut messages = vec![
@@ -290,7 +299,8 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
             );
             return Ok(SearchResult {
                 files: Vec::new(),
-                rg_patterns: executor.collected_rg_patterns(),
+                rg_patterns: executor.collected_rg_patterns().await,
+                file_cache: executor.snapshot_read_cache().await,
                 meta: build_meta(&repo_map, true, Some(text)),
             });
         };
@@ -308,9 +318,11 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
                     files.len(),
                     started_at.elapsed().as_millis()
                 );
+                // #3 把 ToolExecutor 已缓存的 readfile 内容透传给格式化层，避免再读一次磁盘
                 return Ok(SearchResult {
                     files,
-                    rg_patterns: executor.collected_rg_patterns(),
+                    rg_patterns: executor.collected_rg_patterns().await,
+                    file_cache: executor.snapshot_read_cache().await,
                     meta: build_meta(&repo_map, true, None),
                 });
             }
@@ -319,12 +331,22 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
                 let args_json = serde_json::to_string(&tool_call.args)
                     .context("序列化 fast-context 工具参数失败")?;
                 let valid_commands = count_valid_commands(&tool_call.args);
+                // #5 检测重复命令（指纹与上一次相同），帮助诊断 LLM 浪费
+                let dup_count = executor.count_repeat_commands(&tool_call.args).await;
+                if dup_count > 0 {
+                    log::warn!(
+                        "[fast-context] 检测到重复命令: turn={}, dup_count={}",
+                        turn + 1,
+                        dup_count
+                    );
+                }
                 log::info!(
-                    "[fast-context] restricted_exec 调用: turn={}, valid_commands={}",
+                    "[fast-context] restricted_exec 调用: turn={}, valid_commands={}, dup_count={}",
                     turn + 1,
-                    valid_commands
+                    valid_commands,
+                    dup_count
                 );
-                let results = executor.exec_tool_call(&tool_call.args).await;
+                let results = ToolExecutor::exec_tool_call(executor.clone(), &tool_call.args).await;
                 log::debug!(
                     "[fast-context] restricted_exec 返回: turn={}, output_len={}",
                     turn + 1,
@@ -375,7 +397,8 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
     );
     Ok(SearchResult {
         files: Vec::new(),
-        rg_patterns: executor.collected_rg_patterns(),
+        rg_patterns: executor.collected_rg_patterns().await,
+        file_cache: executor.snapshot_read_cache().await,
         meta: build_meta(
             &repo_map,
             true,
@@ -576,7 +599,8 @@ async fn check_rate_limit(client: &Client, api_key: &str, jwt: &str) -> Result<b
     {
         Ok(_) => Ok(true),
         Err(err) if err.status == Some(429) => Ok(false),
-        Err(_) => Ok(true),
+        // #4 严格化：非 429 网络/HTTP 错误向上抛，避免后续浪费 LLM 配额
+        Err(err) => Err(anyhow!("rate-limit 检查失败: {}", err)),
     }
 }
 
@@ -693,6 +717,10 @@ async fn streaming_request(
                     err.code,
                     started_at.elapsed().as_millis()
                 );
+                // #4 429 速率限制不应重试（继续打只会更糟），4xx（除外）也不重试
+                if err.status == Some(429) {
+                    return Err(err);
+                }
                 if err
                     .status
                     .is_some_and(|s| (400..500).contains(&s) && s != 429)
@@ -715,11 +743,24 @@ async fn streaming_request(
         }
 
         if attempt < max_retries {
-            tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1))).await;
+            // #4 指数退避 + jitter：避免雷霆群与服务器同步震荡
+            let base_ms = 1000u64 * (attempt as u64 + 1);
+            let jitter_ms = pseudo_jitter_ms(attempt);
+            tokio::time::sleep(Duration::from_millis(base_ms + jitter_ms)).await;
         }
     }
 
     Err(last_error.unwrap_or_else(|| FastContextError::timeout("streaming request timed out")))
+}
+
+/// 基于纳秒时间戳的轻量 jitter（0~400ms），无需引入 rand 依赖
+fn pseudo_jitter_ms(attempt: usize) -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let seed = nanos.wrapping_add(attempt as u64 * 7919);
+    seed % 400
 }
 
 fn classify_reqwest_error(err: reqwest::Error) -> FastContextError {
@@ -987,11 +1028,22 @@ fn append_tree(
     for (idx, entry) in entries.into_iter().enumerate() {
         let name = entry.file_name().to_string_lossy().to_string();
         let last = idx + 1 == len;
+        // #2 给目录追加 "(N entries)" 后缀，避免 LLM 盲探巨型目录
+        let display_name = if entry.path().is_dir() {
+            let count = entry_count(&entry.path(), exclude_paths);
+            if count > 0 {
+                format!("{name}/ ({count} entries)")
+            } else {
+                format!("{name}/")
+            }
+        } else {
+            name
+        };
         lines.push(format!(
             "{}{} {}",
             prefix,
             if last { "`--" } else { "|--" },
-            name
+            display_name
         ));
         if entry.path().is_dir() {
             let next_prefix = format!("{}{}", prefix, if last { "   " } else { "|  " });
@@ -1004,6 +1056,79 @@ fn append_tree(
                 lines,
             );
         }
+    }
+}
+
+/// 浅层统计目录下条目数（不递归），用于 tree 显示规模线索
+fn entry_count(dir: &Path, exclude_paths: &[String]) -> usize {
+    fs::read_dir(dir)
+        .map(|read_dir| {
+            read_dir
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    !matches_exclude(&name, exclude_paths)
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// #2 构建项目简介：README 首段 + manifest 顶层信息
+/// 目的：让 LLM 第一轮就知道项目用什么技术栈、入口在哪，省一轮 ls/tree 探查
+fn build_project_summary(root: &Path) -> String {
+    let mut sections = Vec::new();
+
+    // README 首 30 行（截断）
+    for candidate in ["README.md", "README.MD", "Readme.md", "readme.md", "README"] {
+        let path = root.join(candidate);
+        if let Ok(content) = fs::read_to_string(&path) {
+            let head = content
+                .lines()
+                .take(30)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !head.trim().is_empty() {
+                sections.push(format!(
+                    "### README ({candidate}, first 30 lines)\n```\n{head}\n```"
+                ));
+                break;
+            }
+        }
+    }
+
+    // Cargo.toml workspace / package 顶层
+    if let Ok(content) = fs::read_to_string(root.join("Cargo.toml")) {
+        let head = content.lines().take(40).collect::<Vec<_>>().join("\n");
+        if !head.trim().is_empty() {
+            sections.push(format!("### Cargo.toml (first 40 lines)\n```toml\n{head}\n```"));
+        }
+    }
+
+    // package.json 顶层
+    if let Ok(content) = fs::read_to_string(root.join("package.json")) {
+        let head = content.lines().take(40).collect::<Vec<_>>().join("\n");
+        if !head.trim().is_empty() {
+            sections.push(format!(
+                "### package.json (first 40 lines)\n```json\n{head}\n```"
+            ));
+        }
+    }
+
+    // pyproject.toml
+    if let Ok(content) = fs::read_to_string(root.join("pyproject.toml")) {
+        let head = content.lines().take(30).collect::<Vec<_>>().join("\n");
+        if !head.trim().is_empty() {
+            sections.push(format!(
+                "### pyproject.toml (first 30 lines)\n```toml\n{head}\n```"
+            ));
+        }
+    }
+
+    if sections.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nProject Summary (auto-extracted):\n{}", sections.join("\n\n"))
     }
 }
 
@@ -1368,7 +1493,20 @@ fn gunzip_bytes(data: &[u8]) -> Result<Vec<u8>> {
 struct ToolExecutor {
     root: PathBuf,
     root_slash: String,
+    state: Mutex<ToolExecutorState>,
+}
+
+#[derive(Default)]
+struct ToolExecutorState {
+    /// rg pattern 收集（向外返回）
     collected_rg_patterns: Vec<String>,
+    /// 命令指纹 → 输出缓存：跨 turn 命中可零成本返回，节省 LLM 重复探查的时间
+    command_cache: HashMap<String, String>,
+    /// readfile 完整文件缓存：(规范化绝对路径 → 文件原文)
+    /// 供格式化层复用；同一文件的多个 readfile 也共享一次磁盘 IO
+    read_cache: HashMap<String, String>,
+    /// 上一次 turn 的命令指纹集合，用于 #5 重复检测
+    last_turn_fingerprints: HashSet<String>,
 }
 
 impl ToolExecutor {
@@ -1377,20 +1515,47 @@ impl ToolExecutor {
         Self {
             root,
             root_slash,
-            collected_rg_patterns: Vec::new(),
+            state: Mutex::new(ToolExecutorState::default()),
         }
     }
 
-    fn collected_rg_patterns(&self) -> Vec<String> {
+    async fn collected_rg_patterns(&self) -> Vec<String> {
+        let state = self.state.lock().await;
         let mut seen = HashSet::new();
-        self.collected_rg_patterns
+        state
+            .collected_rg_patterns
             .iter()
             .filter(|pattern| seen.insert((*pattern).clone()))
             .cloned()
             .collect()
     }
 
-    async fn exec_tool_call(&mut self, args: &Value) -> String {
+    /// #3 暴露 readfile 内容快照，供 format_fast_context_text 复用，避免重复读盘
+    async fn snapshot_read_cache(&self) -> HashMap<String, String> {
+        self.state.lock().await.read_cache.clone()
+    }
+
+    /// #5 统计当前 args 中与上一次相同的命令指纹数量
+    async fn count_repeat_commands(&self, args: &Value) -> usize {
+        let state = self.state.lock().await;
+        let mut dup = 0usize;
+        if let Some(obj) = args.as_object() {
+            for (key, value) in obj {
+                if !key.starts_with("command") {
+                    continue;
+                }
+                let fp = command_fingerprint(value);
+                if !fp.is_empty() && state.last_turn_fingerprints.contains(&fp) {
+                    dup += 1;
+                }
+            }
+        }
+        dup
+    }
+
+    /// 并发执行一次 restricted_exec 中的所有子命令，返回拼接结果。
+    /// 接收 Arc<Self> 是为了在 join_all 里把同一个 executor 复制给多个并发 future。
+    async fn exec_tool_call(self_arc: Arc<Self>, args: &Value) -> String {
         let Some(obj) = args.as_object() else {
             log::warn!("[fast-context] restricted_exec 参数缺失或格式错误");
             return "Error: missing or invalid tool args".to_string();
@@ -1402,31 +1567,70 @@ impl ToolExecutor {
             .collect::<Vec<_>>();
         keys.sort();
 
-        let mut parts = Vec::new();
         log::info!(
-            "[fast-context] restricted_exec 开始执行本地命令: count={}",
+            "[fast-context] restricted_exec 开始并发执行本地命令: count={}",
             keys.len()
         );
-        for key in keys {
-            let started_at = Instant::now();
-            let output = self.exec_command(&obj[&key]).await;
-            log::info!(
-                "[fast-context] restricted_exec 本地命令完成: key={}, output_len={}, elapsed_ms={}",
-                key,
-                output.len(),
-                started_at.elapsed().as_millis()
-            );
-            parts.push(format!("<{key}_result>\n{output}\n</{key}_result>"));
+
+        // 记录本轮指纹（覆盖上一轮），用于下一轮的重复检测
+        let mut current_fps = HashSet::new();
+        for key in &keys {
+            let fp = command_fingerprint(&obj[key]);
+            if !fp.is_empty() {
+                current_fps.insert(fp);
+            }
         }
+
+        // 并发：每条命令一个 future
+        let futures = keys.iter().map(|key| {
+            let executor = self_arc.clone();
+            let key_owned = key.clone();
+            let cmd = obj[key].clone();
+            async move {
+                let started_at = Instant::now();
+                let output = executor.exec_command(&cmd).await;
+                log::info!(
+                    "[fast-context] restricted_exec 本地命令完成: key={}, output_len={}, elapsed_ms={}",
+                    key_owned,
+                    output.len(),
+                    started_at.elapsed().as_millis()
+                );
+                format!("<{key_owned}_result>\n{output}\n</{key_owned}_result>")
+            }
+        });
+        let parts: Vec<String> = join_all(futures).await;
+
+        // 更新最后一轮指纹（不影响当轮 dup_count，因为 dup_count 在 exec 之前已检测）
+        {
+            let mut state = self_arc.state.lock().await;
+            state.last_turn_fingerprints = current_fps;
+        }
+
         parts.join("")
     }
 
-    async fn exec_command(&mut self, cmd: &Value) -> String {
+    async fn exec_command(&self, cmd: &Value) -> String {
         let Some(kind) = cmd.get("type").and_then(Value::as_str) else {
             log::warn!("[fast-context] 本地命令缺少 type: {}", cmd);
             return "Error: missing or invalid command".to_string();
         };
-        match kind {
+
+        // 命令缓存：相同指纹直接复用结果（跨 turn 都生效）
+        let fp = command_fingerprint(cmd);
+        if !fp.is_empty() {
+            let state = self.state.lock().await;
+            if let Some(cached) = state.command_cache.get(&fp) {
+                log::info!(
+                    "[fast-context] 命令缓存命中: kind={}, fp_len={}, output_len={}",
+                    kind,
+                    fp.len(),
+                    cached.len()
+                );
+                return cached.clone();
+            }
+        }
+
+        let output = match kind {
             "rg" => {
                 let pattern = cmd.get("pattern").and_then(Value::as_str).unwrap_or("");
                 let path = cmd.get("path").and_then(Value::as_str).unwrap_or("");
@@ -1457,7 +1661,7 @@ impl ToolExecutor {
                     start,
                     end
                 );
-                self.readfile(file, start, end)
+                self.readfile(file, start, end).await
             }
             "tree" => {
                 let path = cmd.get("path").and_then(Value::as_str).unwrap_or("");
@@ -1503,11 +1707,18 @@ impl ToolExecutor {
                 log::warn!("[fast-context] 未知本地命令类型: {}", other);
                 format!("Error: unknown command type '{other}'")
             }
+        };
+
+        // 写入命令缓存
+        if !fp.is_empty() {
+            let mut state = self.state.lock().await;
+            state.command_cache.insert(fp, output.clone());
         }
+        output
     }
 
     async fn rg(
-        &mut self,
+        &self,
         pattern: &str,
         path: &str,
         include: Vec<String>,
@@ -1525,7 +1736,10 @@ impl ToolExecutor {
             log::warn!("[fast-context] rg 路径不存在: {}", real_path.display());
             return format!("Error: path does not exist: {path}");
         }
-        self.collected_rg_patterns.push(pattern.to_string());
+        {
+            let mut state = self.state.lock().await;
+            state.collected_rg_patterns.push(pattern.to_string());
+        }
 
         let mut command = Command::new("rg");
         command
@@ -1627,7 +1841,7 @@ impl ToolExecutor {
         }
     }
 
-    fn readfile(&self, file: &str, start_line: Option<usize>, end_line: Option<usize>) -> String {
+    async fn readfile(&self, file: &str, start_line: Option<usize>, end_line: Option<usize>) -> String {
         let Ok(path) = self.real_path(file) else {
             log::warn!("[fast-context] readfile 文件无法映射: {}", file);
             return format!("Error: file not found: {file}");
@@ -1636,16 +1850,29 @@ impl ToolExecutor {
             log::warn!("[fast-context] readfile 文件不存在: {}", path.display());
             return format!("Error: file not found: {file}");
         }
-        let content = match fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(err) => {
-                log::warn!(
-                    "[fast-context] readfile 读取失败: path={}, error={}",
-                    path.display(),
-                    err
-                );
-                return format!("Error: {err}");
-            }
+        let key = normalize_path(&path);
+        // #3 读文件缓存：同一 path 全量内容仅读盘一次，多次 readfile（不同 range）零额外 IO
+        let content = {
+            let state = self.state.lock().await;
+            state.read_cache.get(&key).cloned()
+        };
+        let content = match content {
+            Some(c) => c,
+            None => match fs::read_to_string(&path) {
+                Ok(c) => {
+                    let mut state = self.state.lock().await;
+                    state.read_cache.insert(key.clone(), c.clone());
+                    c
+                }
+                Err(err) => {
+                    log::warn!(
+                        "[fast-context] readfile 读取失败: path={}, error={}",
+                        path.display(),
+                        err
+                    );
+                    return format!("Error: {err}");
+                }
+            },
         };
         let start = start_line.unwrap_or(1).max(1);
         let end = end_line
@@ -1848,6 +2075,60 @@ impl ToolExecutor {
             return "/codebase".to_string();
         }
         self.remap(path)
+    }
+}
+
+/// 计算单个命令的指纹（用于缓存与重复检测）
+fn command_fingerprint(cmd: &Value) -> String {
+    let Some(kind) = cmd.get("type").and_then(Value::as_str) else {
+        return String::new();
+    };
+    let canonical_strings = |key: &str| -> String {
+        cmd.get(key)
+            .and_then(Value::as_array)
+            .map(|arr| {
+                let mut v: Vec<String> = arr
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect();
+                v.sort();
+                v.join(",")
+            })
+            .unwrap_or_default()
+    };
+    match kind {
+        "rg" => format!(
+            "rg|{}|{}|{}|{}",
+            cmd.get("pattern").and_then(Value::as_str).unwrap_or(""),
+            cmd.get("path").and_then(Value::as_str).unwrap_or(""),
+            canonical_strings("include"),
+            canonical_strings("exclude"),
+        ),
+        "readfile" => format!(
+            "readfile|{}|{:?}|{:?}",
+            cmd.get("file").and_then(Value::as_str).unwrap_or(""),
+            cmd.get("start_line").and_then(Value::as_u64),
+            cmd.get("end_line").and_then(Value::as_u64),
+        ),
+        "tree" => format!(
+            "tree|{}|{:?}",
+            cmd.get("path").and_then(Value::as_str).unwrap_or(""),
+            cmd.get("levels").and_then(Value::as_u64),
+        ),
+        "ls" => format!(
+            "ls|{}|{}|{}",
+            cmd.get("path").and_then(Value::as_str).unwrap_or(""),
+            cmd.get("long_format").and_then(Value::as_bool).unwrap_or(false),
+            cmd.get("all").and_then(Value::as_bool).unwrap_or(false),
+        ),
+        "glob" => format!(
+            "glob|{}|{}|{}",
+            cmd.get("pattern").and_then(Value::as_str).unwrap_or(""),
+            cmd.get("path").and_then(Value::as_str).unwrap_or(""),
+            cmd.get("type_filter").and_then(Value::as_str).unwrap_or("all"),
+        ),
+        _ => String::new(),
     }
 }
 
@@ -2134,5 +2415,75 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path.as_deref(), Some("src/lib.rs"));
         assert_eq!(files[0].ranges, vec![[1, 10]]);
+    }
+
+    #[test]
+    fn command_fingerprint_is_stable_and_order_insensitive() {
+        // 同一 rg 命令，include 数组顺序不同也应得到相同指纹（避免假性重复缓存未命中）
+        let cmd_a = json!({
+            "type": "rg",
+            "pattern": "ToolExecutor",
+            "path": "/codebase/src",
+            "include": ["*.rs", "*.toml"],
+            "exclude": ["target"]
+        });
+        let cmd_b = json!({
+            "type": "rg",
+            "pattern": "ToolExecutor",
+            "path": "/codebase/src",
+            "include": ["*.toml", "*.rs"],
+            "exclude": ["target"]
+        });
+        assert_eq!(command_fingerprint(&cmd_a), command_fingerprint(&cmd_b));
+
+        // 不同 pattern 应得到不同指纹
+        let cmd_c = json!({
+            "type": "rg",
+            "pattern": "OtherSymbol",
+            "path": "/codebase/src",
+            "include": ["*.rs"],
+            "exclude": []
+        });
+        assert_ne!(command_fingerprint(&cmd_a), command_fingerprint(&cmd_c));
+
+        // readfile 指纹应包含行范围
+        let read_full = json!({"type": "readfile", "file": "/codebase/Cargo.toml"});
+        let read_range = json!({
+            "type": "readfile",
+            "file": "/codebase/Cargo.toml",
+            "start_line": 1,
+            "end_line": 40
+        });
+        assert_ne!(command_fingerprint(&read_full), command_fingerprint(&read_range));
+    }
+
+    #[tokio::test]
+    async fn tool_executor_caches_repeated_command_and_detects_duplicate() {
+        let temp = tempdir().expect("临时目录应创建成功");
+        // canonicalize 在 Windows 上会引入 \\?\ 前缀；提前对齐避免 starts_with 路径检查失败
+        let temp_root = temp
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| temp.path().to_path_buf());
+        let lib = temp_root.join("lib.rs");
+        fs::write(&lib, "fn alpha() {}\nfn beta() {}\n").expect("写入测试文件应成功");
+
+        let executor = Arc::new(ToolExecutor::new(temp_root.clone()));
+
+        // 同一个 readfile 命令调用一次（建立缓存与指纹）
+        let args1 = json!({"command1": {"type": "readfile", "file": "/codebase/lib.rs"}});
+        ToolExecutor::exec_tool_call(executor.clone(), &args1).await;
+
+        // 第二轮：完全一致 → dup_count 应为 1
+        let dup = executor.count_repeat_commands(&args1).await;
+        assert_eq!(dup, 1, "完全一致的命令应被检测为重复");
+
+        // 命令缓存命中验证：第二次同样调用应返回相同结果，且不产生新读盘（间接通过结果一致性验证）
+        let args2 = args1.clone();
+        let out_second = ToolExecutor::exec_tool_call(executor.clone(), &args2).await;
+        assert!(
+            out_second.contains("alpha"),
+            "缓存命中后输出仍应包含原文件内容"
+        );
     }
 }

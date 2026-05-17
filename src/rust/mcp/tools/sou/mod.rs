@@ -540,7 +540,13 @@ fn format_fast_context_text(
         for range in ranges {
             let start = range[0].max(1);
             let end = range[1].max(start).min(start.saturating_add(220));
-            let snippet = read_line_range(&path, start, end)?;
+            // #3 优先用 ToolExecutor 中已读取的文件内容（fast-context 阶段 readfile 命中）
+            let cache_key = normalize_path(&path);
+            let snippet = if let Some(content) = response.file_cache.get(&cache_key) {
+                extract_line_range(content, start, end)
+            } else {
+                read_line_range(&path, start, end)?
+            };
             if snippet.trim().is_empty() {
                 log_important!(
                     warn,
@@ -604,6 +610,11 @@ fn resolve_fast_context_file(root: &Path, file: &FastContextFile) -> Result<Opti
 fn read_line_range(path: &Path, start: usize, end: usize) -> Result<String> {
     let content =
         fs::read_to_string(path).with_context(|| format!("读取文件失败: {}", path.display()))?;
+    Ok(extract_line_range(&content, start, end))
+}
+
+/// 从已知文件内容中切片指定行范围；与 read_line_range 输出格式保持一致
+fn extract_line_range(content: &str, start: usize, end: usize) -> String {
     let mut out = Vec::new();
     for (index, line) in content.lines().enumerate() {
         let line_no = index + 1;
@@ -614,7 +625,7 @@ fn read_line_range(path: &Path, start: usize, end: usize) -> Result<String> {
             break;
         }
     }
-    Ok(out.join("\n"))
+    out.join("\n")
 }
 
 fn call_result_text(result: &CallToolResult) -> String {
