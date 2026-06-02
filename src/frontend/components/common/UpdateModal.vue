@@ -42,6 +42,28 @@ const {
 // 判断是否为 Windows 平台
 const isWindows = computed(() => platformInfo.value === 'windows')
 
+type StatusTagType = 'success' | 'warning' | 'error' | 'info'
+
+interface StatusMeta {
+  title: string
+  description: string
+  tagText: string
+  tagType: StatusTagType
+  icon: string
+  panelClass: string
+  progressColor: string
+}
+
+interface NetworkDetailRow {
+  key: string
+  label: string
+  value: string
+  icon: string
+  title?: string
+  mono?: boolean
+  tagType?: StatusTagType
+}
+
 // 自动退出监听器清理函数
 let unlistenAutoExit: (() => void) | null = null
 
@@ -64,6 +86,76 @@ onUnmounted(() => {
 
 // 网络状态面板展开状态
 const showNetworkDetails = ref(false)
+
+// 将更新状态集中映射为展示元信息，避免模板里堆叠复杂三元表达式
+const updateStatusMeta = computed<StatusMeta>(() => {
+  switch (updateStatus.value) {
+    case 'checking':
+      return {
+        title: '正在校验更新',
+        description: '正在确认版本与下载地址，请稍候。',
+        tagText: '检查中',
+        tagType: 'info',
+        icon: 'i-carbon-search text-info',
+        panelClass: 'border-info/40 bg-info/10',
+        progressColor: '#3b82f6',
+      }
+    case 'downloading':
+      return {
+        title: '正在下载更新包',
+        description: '下载期间请保持网络连接稳定。',
+        tagText: '下载中',
+        tagType: 'info',
+        icon: 'i-carbon-download text-info',
+        panelClass: 'border-info/40 bg-info/10',
+        progressColor: '#3b82f6',
+      }
+    case 'installing':
+      return {
+        title: '正在安装更新',
+        description: '更新包已下载，正在写入安装流程。',
+        tagText: '安装中',
+        tagType: 'warning',
+        icon: 'i-carbon-renew text-warning',
+        panelClass: 'border-warning/40 bg-warning/10',
+        progressColor: '#f59e0b',
+      }
+    case 'completed':
+      return {
+        title: '更新已准备完成',
+        description: isWindows.value ? '点击完成更新后应用会退出并完成替换。' : '请重启应用以使用最新版本。',
+        tagText: '已完成',
+        tagType: 'success',
+        icon: 'i-carbon-checkmark-filled text-success',
+        panelClass: 'border-success/40 bg-success/10',
+        progressColor: '#22c55e',
+      }
+    case 'error':
+      return {
+        title: '更新未完成',
+        description: '请检查网络状态后重试，必要时可手动下载最新版本。',
+        tagText: '异常',
+        tagType: 'error',
+        icon: 'i-carbon-warning-alt text-error',
+        panelClass: 'border-error/40 bg-error/10',
+        progressColor: '#ef4444',
+      }
+    default:
+      return {
+        title: '准备更新',
+        description: '确认后将自动下载并安装最新版本。',
+        tagText: '待开始',
+        tagType: 'info',
+        icon: 'i-carbon-upgrade text-primary-500',
+        panelClass: 'border-primary-500/30 bg-primary-500/10',
+        progressColor: '#14b8a6',
+      }
+  }
+})
+
+const showStatusPanel = computed(() =>
+  isUpdating.value || updateStatus.value === 'completed' || updateStatus.value === 'error',
+)
 
 // 获取国家名称（简单映射）
 function getCountryName(code: string): string {
@@ -89,10 +181,82 @@ const connectionDescription = computed(() => {
     return '检测中...'
   if (networkStatus.value.using_proxy) {
     const proxyType = networkStatus.value.proxy_type?.toUpperCase() || 'HTTP'
-    return `代理 (${proxyType} ${networkStatus.value.proxy_host}:${networkStatus.value.proxy_port})`
+    const proxyHost = networkStatus.value.proxy_host || '代理节点'
+    const proxyPort = networkStatus.value.proxy_port ? `:${networkStatus.value.proxy_port}` : ''
+    return `代理 (${proxyType} ${proxyHost}${proxyPort})`
   }
   return '直连'
 })
+
+const networkTagType = computed<StatusTagType>(() => {
+  if (!networkStatus.value)
+    return 'info'
+  return networkStatus.value.github_reachable ? 'success' : 'warning'
+})
+
+const networkTagText = computed(() => {
+  if (!networkStatus.value)
+    return '检测中'
+  return networkStatus.value.github_reachable ? '正常' : '受限'
+})
+
+const networkSummary = computed(() => {
+  if (!networkStatus.value)
+    return '正在检测网络环境'
+  const location = `${getCountryName(networkStatus.value.country)} (${networkStatus.value.country})`
+  const github = networkStatus.value.github_reachable ? 'GitHub 可达' : 'GitHub 受限'
+  return `${connectionDescription.value} / ${location} / ${github}`
+})
+
+const networkDetailRows = computed<NetworkDetailRow[]>(() => {
+  const status = networkStatus.value
+  const location = status ? `${getCountryName(status.country)} (${status.country})` : '检测中...'
+  const rows: NetworkDetailRow[] = [
+    {
+      key: 'location',
+      label: '当前位置',
+      value: location,
+      icon: 'i-carbon-location text-info',
+      title: location,
+    },
+    {
+      key: 'connection',
+      label: '连接方式',
+      value: connectionDescription.value,
+      icon: status?.using_proxy ? 'i-carbon-connection-signal text-primary-500' : 'i-carbon-direct-link text-primary-500',
+      title: connectionDescription.value,
+    },
+    {
+      key: 'github',
+      label: 'GitHub 连接',
+      value: status ? (status.github_reachable ? '正常' : '不可达') : '检测中',
+      icon: 'i-carbon-logo-github text-on-surface-secondary',
+      tagType: status ? (status.github_reachable ? 'success' : 'error') : 'info',
+    },
+  ]
+
+  if (status?.ip && status.ip !== 'unknown') {
+    rows.push({
+      key: 'ip',
+      label: '出口 IP',
+      value: status.ip,
+      icon: 'i-carbon-ip text-info',
+      title: status.ip,
+      mono: true,
+    })
+  }
+
+  return rows
+})
+
+function formatBytes(value?: number): string {
+  if (!value)
+    return '0 KB'
+  const kb = value / 1024
+  if (kb < 1024)
+    return `${Math.round(kb * 100) / 100} KB`
+  return `${Math.round(kb / 1024 * 100) / 100} MB`
+}
 
 // 使用共享 markdown 实例渲染更新说明
 const formattedReleaseNotes = computed(() => {
@@ -118,7 +282,7 @@ async function handleConfirmUpdate() {
   }
   catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error)
-    console.error('❌ 更新失败:', errorMsg)
+    console.error('更新失败:', errorMsg)
 
     // 如果是需要手动下载的错误，引导用户手动下载
     if (errorMsg.includes('手动下载') || errorMsg.includes('网络请求受限') || errorMsg.includes('403')) {
@@ -136,7 +300,7 @@ async function handleConfirmUpdate() {
           window.open(props.versionInfo.releaseUrl, '_blank')
         }
         catch (openError) {
-          console.error('❌ 打开下载页面失败:', openError)
+          console.error('打开下载页面失败:', openError)
           message.error('无法打开下载页面，请手动访问 GitHub 下载最新版本')
         }
       }
@@ -200,127 +364,147 @@ async function handleExitForUpdate() {
     :mask-closable="false"
     :close-on-esc="false"
     preset="dialog"
-    class="max-w-lg"
-    :style="{ maxHeight: '80vh' }"
+    class="update-modal w-[92vw] max-w-[94vw] sm:w-[560px] md:w-[640px]"
+    :style="{ maxHeight: '86vh' }"
   >
     <template #header>
-      <div class="flex items-center gap-3">
-        <div class="i-carbon-upgrade text-xl text-blue-500" />
-        <span class="font-medium text-lg">🚀 发现新版本</span>
+      <div class="flex items-start gap-3">
+        <div class="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-primary-500/30 bg-primary-500/10">
+          <div class="i-carbon-upgrade h-5 w-5 text-primary-500" />
+        </div>
+        <div class="min-w-0">
+          <div class="text-base font-semibold leading-6 text-on-surface">
+            发现新版本
+          </div>
+          <div v-if="versionInfo" class="mt-0.5 truncate text-xs text-on-surface-secondary">
+            已检测到 v{{ versionInfo.latest }}，当前运行 v{{ versionInfo.current }}
+          </div>
+        </div>
       </div>
     </template>
 
-    <div class="space-y-4">
+    <div class="max-h-[72vh] overflow-hidden">
       <!-- 版本信息 -->
-      <div v-if="versionInfo" class="space-y-3">
-        <div class="p-4 bg-surface-100 dark:bg-surface-800 rounded-lg border border-surface-200 dark:border-surface-700">
-          <div class="flex items-center justify-between mb-3">
-            <span class="text-sm text-on-surface-secondary">当前版本:</span>
-            <n-tag size="small" type="info">
-              v{{ versionInfo.current }}
-            </n-tag>
-          </div>
-          <div class="flex items-center justify-between">
-            <span class="text-sm text-on-surface-secondary">最新版本:</span>
-            <n-tag size="small" type="success">
-              v{{ versionInfo.latest }}
-            </n-tag>
+      <div v-if="versionInfo" class="space-y-4">
+        <div class="rounded-lg border border-primary-500/30 bg-primary-500/10 p-4">
+          <div class="version-compare-grid grid items-center gap-3">
+            <div class="min-w-0 rounded-lg border border-surface-200 bg-surface-50 p-3 dark:border-surface-700 dark:bg-surface-100">
+              <div class="mb-1 text-xs text-on-surface-secondary">
+                当前版本
+              </div>
+              <div class="truncate font-mono text-sm font-semibold text-on-surface" :title="`v${versionInfo.current}`">
+                v{{ versionInfo.current }}
+              </div>
+            </div>
+
+            <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-primary-500/30 bg-primary-500/10">
+              <div class="i-carbon-arrow-right h-4 w-4 text-primary-500" />
+            </div>
+
+            <div class="min-w-0 rounded-lg border border-primary-500/40 bg-primary-500/10 p-3">
+              <div class="mb-1 text-xs text-on-surface-secondary">
+                最新版本
+              </div>
+              <div class="truncate font-mono text-sm font-semibold text-primary-500" :title="`v${versionInfo.latest}`">
+                v{{ versionInfo.latest }}
+              </div>
+            </div>
           </div>
         </div>
 
         <!-- 网络状态（可折叠） -->
-        <div class="rounded-lg border border-surface-200 dark:border-surface-700 overflow-hidden">
+        <div class="overflow-hidden rounded-lg border border-surface-200 bg-surface-50 dark:border-surface-700 dark:bg-surface-100">
           <!-- 折叠头部 -->
           <div
-            class="flex items-center justify-between p-3 bg-surface-50 dark:bg-surface-900 cursor-pointer hover:bg-surface-100 dark:hover:bg-surface-800 transition-colors"
+            class="flex cursor-pointer items-center justify-between gap-3 p-3 transition-colors hover:bg-surface-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/30 dark:hover:bg-surface-200"
+            role="button"
+            tabindex="0"
+            :aria-expanded="showNetworkDetails"
+            aria-label="展开或收起网络状态详情"
             @click="showNetworkDetails = !showNetworkDetails"
+            @keydown.enter.space.prevent="showNetworkDetails = !showNetworkDetails"
           >
-            <div class="flex items-center gap-2">
-              <div class="i-carbon-network-3 text-green-500" />
-              <span class="text-sm font-medium text-on-surface">网络状态</span>
-              <!-- 简要状态指示 -->
-              <n-tag
-                v-if="networkStatus"
-                size="tiny"
-                :type="networkStatus.github_reachable ? 'success' : 'warning'"
-              >
-                {{ networkStatus.github_reachable ? '正常' : '受限' }}
-              </n-tag>
+            <div class="flex min-w-0 items-center gap-3">
+              <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-success/10">
+                <div class="i-carbon-network-3 h-4 w-4 text-success" />
+              </div>
+              <div class="min-w-0">
+                <div class="flex items-center gap-2">
+                  <span class="text-sm font-medium text-on-surface">网络状态</span>
+                  <!-- 简要状态指示 -->
+                  <n-tag
+                    size="tiny"
+                    :type="networkTagType"
+                  >
+                    {{ networkTagText }}
+                  </n-tag>
+                </div>
+                <div class="mt-0.5 truncate text-xs text-on-surface-secondary" :title="networkSummary">
+                  {{ networkSummary }}
+                </div>
+              </div>
             </div>
             <div
-              class="i-carbon-chevron-down text-on-surface-secondary transition-transform duration-200"
+              class="i-carbon-chevron-down h-4 w-4 shrink-0 text-on-surface-secondary transition-transform duration-200"
               :class="{ 'rotate-180': showNetworkDetails }"
             />
           </div>
 
           <!-- 折叠内容 -->
           <n-collapse-transition :show="showNetworkDetails">
-            <div class="p-3 bg-surface-100 dark:bg-surface-800 space-y-2 border-t border-surface-200 dark:border-surface-700">
-              <!-- 当前位置 -->
-              <div class="flex items-center justify-between text-sm">
-                <div class="flex items-center gap-2 text-on-surface-secondary">
-                  <div class="i-carbon-location text-blue-400" />
-                  <span>当前位置</span>
-                </div>
-                <span class="text-on-surface font-medium">
-                  {{ networkStatus ? `${getCountryName(networkStatus.country)} (${networkStatus.country})` : '检测中...' }}
-                </span>
-              </div>
-
-              <!-- 连接方式 -->
-              <div class="flex items-center justify-between text-sm">
-                <div class="flex items-center gap-2 text-on-surface-secondary">
-                  <div
-                    class="text-purple-400"
-                    :class="networkStatus?.using_proxy ? 'i-carbon-connection-signal' : 'i-carbon-direct-link'"
-                  />
-                  <span>连接方式</span>
-                </div>
-                <span class="text-on-surface font-medium">
-                  {{ connectionDescription }}
-                </span>
-              </div>
-
-              <!-- GitHub 连接状态 -->
-              <div class="flex items-center justify-between text-sm">
-                <div class="flex items-center gap-2 text-on-surface-secondary">
-                  <div class="i-carbon-logo-github text-gray-400" />
-                  <span>GitHub 连接</span>
+            <div class="grid gap-2 border-t border-surface-200 p-3 dark:border-surface-700 sm:grid-cols-2">
+              <div
+                v-for="row in networkDetailRows"
+                :key="row.key"
+                class="min-w-0 rounded-lg border border-surface-200 bg-surface p-3 dark:border-surface-700"
+              >
+                <div class="mb-1 flex items-center gap-2 text-xs text-on-surface-secondary">
+                  <div :class="[row.icon, 'h-3.5 w-3.5 shrink-0']" />
+                  <span>{{ row.label }}</span>
                 </div>
                 <n-tag
+                  v-if="row.tagType"
                   size="tiny"
-                  :type="networkStatus?.github_reachable ? 'success' : 'error'"
+                  :type="row.tagType"
                 >
-                  {{ networkStatus?.github_reachable ? '正常' : '不可达' }}
+                  {{ row.value }}
                 </n-tag>
-              </div>
-
-              <!-- IP 地址（如果有） -->
-              <div v-if="networkStatus?.ip && networkStatus.ip !== 'unknown'" class="flex items-center justify-between text-sm">
-                <div class="flex items-center gap-2 text-on-surface-secondary">
-                  <div class="i-carbon-ip text-cyan-400" />
-                  <span>出口 IP</span>
+                <div
+                  v-else
+                  class="truncate text-sm font-medium text-on-surface"
+                  :class="{ 'font-mono text-xs': row.mono }"
+                  :title="row.title || row.value"
+                >
+                  {{ row.value }}
                 </div>
-                <span class="text-on-surface font-mono text-xs">
-                  {{ networkStatus.ip }}
-                </span>
               </div>
             </div>
           </n-collapse-transition>
         </div>
 
-        <!-- 更新进度 -->
-        <div v-if="isUpdating" class="p-4 bg-blue-50 dark:bg-blue-900/30 rounded-lg border border-blue-200 dark:border-blue-700">
+        <!-- 更新状态与进度 -->
+        <div
+          v-if="showStatusPanel"
+          class="rounded-lg border p-4 transition-colors"
+          :class="updateStatusMeta.panelClass"
+        >
           <div class="space-y-3">
-            <div class="flex items-center gap-2">
-              <n-spin size="small" />
-              <span class="text-sm font-medium text-on-surface dark:text-on-surface">
-                {{ updateStatus === 'checking' ? '检查更新中...'
-                  : updateStatus === 'downloading' ? '下载更新中...'
-                    : updateStatus === 'installing' ? '安装更新中...'
-                      : updateStatus === 'completed' ? '更新完成！'
-                        : '更新中...' }}
-              </span>
+            <div class="flex items-start gap-3">
+              <div class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface/80">
+                <n-spin v-if="isUpdating && updateStatus !== 'completed' && updateStatus !== 'error'" size="small" />
+                <div v-else :class="[updateStatusMeta.icon, 'h-4 w-4']" />
+              </div>
+              <div class="min-w-0 flex-1">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="text-sm font-semibold text-on-surface">{{ updateStatusMeta.title }}</span>
+                  <n-tag size="tiny" :type="updateStatusMeta.tagType">
+                    {{ updateStatusMeta.tagText }}
+                  </n-tag>
+                </div>
+                <p class="mt-1 text-xs leading-5 text-on-surface-secondary">
+                  {{ updateStatusMeta.description }}
+                </p>
+              </div>
             </div>
 
             <!-- 下载进度条 -->
@@ -330,12 +514,12 @@ async function handleExitForUpdate() {
                 :percentage="Math.round(updateProgress.percentage)"
                 :show-indicator="false"
                 :height="8"
-                color="#3b82f6"
+                :color="updateStatusMeta.progressColor"
               />
-              <div class="flex justify-between text-xs text-on-surface-secondary dark:text-on-surface-secondary">
-                <span>{{ Math.round(updateProgress.downloaded / 1024 / 1024 * 100) / 100 }}MB</span>
+              <div class="flex flex-wrap justify-between gap-2 text-xs text-on-surface-secondary">
+                <span>{{ formatBytes(updateProgress.downloaded) }}</span>
                 <span v-if="updateProgress.content_length">
-                  / {{ Math.round(updateProgress.content_length / 1024 / 1024 * 100) / 100 }}MB
+                  / {{ formatBytes(updateProgress.content_length) }}
                 </span>
                 <span>{{ Math.round(updateProgress.percentage) }}%</span>
               </div>
@@ -345,29 +529,35 @@ async function handleExitForUpdate() {
 
         <!-- 更新说明 -->
         <div v-if="versionInfo.releaseNotes && !isUpdating" class="space-y-3">
-          <div class="flex items-center gap-2">
-            <div class="i-carbon-document text-blue-500" />
-            <h4 class="text-sm font-medium text-on-surface">
-              更新内容
-            </h4>
+          <div class="flex items-center justify-between gap-3">
+            <div class="flex items-center gap-2">
+              <div class="i-carbon-document h-4 w-4 text-primary-500" />
+              <h4 class="text-sm font-semibold text-on-surface">
+                更新内容
+              </h4>
+            </div>
+            <n-tag size="tiny" type="info">
+              Release Notes
+            </n-tag>
           </div>
-          <div class="max-h-40 overflow-y-auto">
-            <div class="text-sm p-4 rounded-lg border bg-surface-50 dark:bg-surface-900 border-surface-200 dark:border-surface-700 text-on-surface-secondary">
+          <n-scrollbar class="release-notes-scroll max-h-[260px] rounded-lg border border-surface-200 bg-surface-50 dark:border-surface-700 dark:bg-surface-100">
+            <div class="p-4 text-sm text-on-surface-secondary">
               <div
                 class="release-notes-content space-y-2"
                 v-html="formattedReleaseNotes"
               />
             </div>
-          </div>
+          </n-scrollbar>
         </div>
       </div>
     </div>
 
     <template #action>
-      <div class="flex justify-end gap-3">
+      <div class="flex w-full flex-col-reverse gap-2 sm:flex-row sm:justify-end sm:gap-3">
         <!-- 关闭按钮 -->
         <n-button
           v-if="updateStatus !== 'completed'"
+          class="w-full sm:w-auto"
           :disabled="isUpdating"
           @click="handleDismiss"
         >
@@ -377,6 +567,7 @@ async function handleExitForUpdate() {
         <!-- 立即更新按钮 -->
         <n-button
           v-if="updateStatus !== 'completed'"
+          class="w-full sm:w-auto"
           type="primary"
           :loading="isUpdating"
           @click="handleConfirmUpdate"
@@ -390,6 +581,7 @@ async function handleExitForUpdate() {
         <!-- Windows 平台：自动退出倒计时按钮 -->
         <n-button
           v-if="updateStatus === 'completed' && isWindows"
+          class="w-full sm:w-auto"
           type="success"
           :loading="autoExitCountdown > 0"
           @click="handleExitForUpdate"
@@ -403,6 +595,7 @@ async function handleExitForUpdate() {
         <!-- 非 Windows 平台：重启按钮 -->
         <n-button
           v-if="updateStatus === 'completed' && !isWindows"
+          class="w-full sm:w-auto"
           type="success"
           @click="handleRestart"
         >
@@ -417,6 +610,30 @@ async function handleExitForUpdate() {
 </template>
 
 <style scoped>
+.update-modal :deep(.n-dialog__content) {
+  padding-top: 4px;
+}
+
+.release-notes-scroll :deep(.n-scrollbar-content) {
+  min-width: 0;
+}
+
+.version-compare-grid {
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+}
+
+.release-notes-content {
+  overflow-wrap: anywhere;
+}
+
+.release-notes-content :deep(:first-child) {
+  margin-top: 0;
+}
+
+.release-notes-content :deep(:last-child) {
+  margin-bottom: 0;
+}
+
 .release-notes-content :deep(h1),
 .release-notes-content :deep(h2),
 .release-notes-content :deep(h3),
@@ -427,7 +644,7 @@ async function handleExitForUpdate() {
 }
 
 .release-notes-content :deep(h2) {
-  font-size: 1.1em;
+  font-size: 1.05em;
   border-bottom: 1px solid var(--border-color);
   padding-bottom: 0.25rem;
 }
@@ -438,18 +655,18 @@ async function handleExitForUpdate() {
 
 .release-notes-content :deep(p) {
   margin: 0.5rem 0;
-  line-height: 1.5;
+  line-height: 1.6;
 }
 
 .release-notes-content :deep(ul),
 .release-notes-content :deep(ol) {
   margin: 0.5rem 0;
-  padding-left: 1.5rem;
+  padding-left: 1.25rem;
 }
 
 .release-notes-content :deep(li) {
   margin: 0.25rem 0;
-  line-height: 1.4;
+  line-height: 1.55;
 }
 
 .release-notes-content :deep(strong) {
@@ -479,7 +696,7 @@ async function handleExitForUpdate() {
   border-radius: 0 0.25rem 0.25rem 0;
 }
 
-/* 代码块样式 */
+/* 代码块使用横向滚动，避免长路径撑破弹窗 */
 .release-notes-content :deep(pre) {
   margin: 0.75rem 0;
   padding: 0.75rem 1rem;
@@ -499,7 +716,7 @@ async function handleExitForUpdate() {
   font-size: inherit;
 }
 
-/* 链接样式 */
+/* 链接保持主色，和项目主题变量一致 */
 .release-notes-content :deep(a) {
   color: var(--primary-color);
   text-decoration: none;
