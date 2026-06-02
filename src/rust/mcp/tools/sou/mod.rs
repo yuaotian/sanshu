@@ -577,13 +577,14 @@ fn format_fast_context_text(
         ));
     }
     parts.push(format!(
-        "[fast-context stats] commands_seen={}, commands_executed={}, commands_useful={}, commands_invalid={}, repaired={}, path_missing={}, cache_hits={}, useful_command_rate={}%, invalid_command_rate={}%",
+        "[fast-context stats] commands_seen={}, commands_executed={}, commands_useful={}, commands_invalid={}, repaired={}, path_missing={}, path_repaired={}, cache_hits={}, useful_command_rate={}%, invalid_command_rate={}%",
         response.stats.commands_seen,
         response.stats.commands_executed,
         response.stats.commands_useful,
         response.stats.commands_invalid,
         response.stats.commands_repaired,
         response.stats.path_missing,
+        response.stats.path_repaired,
         response.stats.cache_hits,
         response.stats.useful_rate(),
         response.stats.invalid_rate()

@@ -122,6 +122,7 @@ pub struct SearchStats {
     pub commands_invalid: usize,
     pub commands_repaired: usize,
     pub path_missing: usize,
+    pub path_repaired: usize,
     pub cache_hits: usize,
     pub error_outputs: usize,
 }
@@ -134,6 +135,7 @@ impl SearchStats {
         self.commands_invalid += other.commands_invalid;
         self.commands_repaired += other.commands_repaired;
         self.path_missing += other.path_missing;
+        self.path_repaired += other.path_repaired;
         self.cache_hits += other.cache_hits;
         self.error_outputs += other.error_outputs;
     }
@@ -154,6 +156,7 @@ impl SearchStats {
             "commandsInvalid": self.commands_invalid,
             "commandsRepaired": self.commands_repaired,
             "pathMissing": self.path_missing,
+            "pathRepaired": self.path_repaired,
             "cacheHits": self.cache_hits,
             "errorOutputs": self.error_outputs,
             "usefulCommandRate": self.useful_rate(),
@@ -1572,17 +1575,27 @@ fn copy_optional_keys(source: &Map<String, Value>, target: &mut Map<String, Valu
 
 fn classify_output(output: &str, stats: &mut SearchStats) {
     let trimmed = output.trim();
-    if is_useful_output(trimmed) {
+    let has_repair_warning = trimmed.contains("Warning: requested path missing");
+    let has_missing_hint = trimmed.contains("Hint: requested path missing");
+    if has_repair_warning {
+        stats.path_missing = 1;
+        stats.path_repaired = 1;
+    } else if has_missing_hint {
+        stats.path_missing = 1;
+    }
+
+    let effective = strip_diagnostic_lines(trimmed);
+    if is_useful_output(&effective) {
         stats.commands_useful = 1;
         return;
     }
 
-    if trimmed.starts_with("Error:") {
+    if effective.starts_with("Error:") {
         stats.error_outputs = 1;
-        if trimmed.contains("path does not exist")
-            || trimmed.contains("file not found")
-            || trimmed.contains("dir not found")
-            || trimmed.contains("not a directory")
+        if effective.contains("path does not exist")
+            || effective.contains("file not found")
+            || effective.contains("dir not found")
+            || effective.contains("not a directory")
         {
             stats.path_missing = 1;
         }
@@ -1592,6 +1605,58 @@ fn classify_output(output: &str, stats: &mut SearchStats) {
 fn is_useful_output(output: &str) -> bool {
     let trimmed = output.trim();
     !trimmed.is_empty() && !trimmed.starts_with("Error:") && trimmed != "(no matches)"
+}
+
+fn strip_diagnostic_lines(output: &str) -> String {
+    output
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with("Warning: requested path missing")
+                && !trimmed.starts_with("Hint: requested path missing")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn normalize_virtual_path(path: &str) -> String {
+    let normalized = path.trim().replace('\\', "/");
+    if normalized.starts_with("/codebase") {
+        normalized
+    } else {
+        format!("/codebase/{}", normalized.trim_start_matches('/'))
+    }
+}
+
+fn format_path_fallback_warning(command: &str, fallback: &PathFallback) -> String {
+    let candidates = if fallback.candidates.is_empty() {
+        "(no siblings)".to_string()
+    } else {
+        fallback.candidates.join(", ")
+    };
+    format!(
+        "Warning: requested path missing for {command}; requested={}; searched_nearest_existing_parent={}; sibling_candidates={}",
+        fallback.requested, fallback.fallback_label, candidates
+    )
+}
+
+fn format_path_missing_hint(command: &str, fallback: &PathFallback) -> String {
+    let candidates = if fallback.candidates.is_empty() {
+        "(no siblings)".to_string()
+    } else {
+        fallback.candidates.join(", ")
+    };
+    format!(
+        "Hint: requested path missing for {command}; requested={}; nearest_existing_parent={}; sibling_candidates={}",
+        fallback.requested, fallback.fallback_label, candidates
+    )
+}
+
+fn prepend_warning(warning: Option<&str>, output: &str) -> String {
+    match warning {
+        Some(warning) => format!("{warning}\n{output}"),
+        None => output.to_string(),
+    }
 }
 
 fn trim_messages(messages: &mut Vec<ChatMessage>) {
@@ -1819,6 +1884,14 @@ struct BatchExecution {
 struct CommandExecution {
     output: String,
     stats: SearchStats,
+}
+
+#[derive(Debug, Clone)]
+struct PathFallback {
+    requested: String,
+    fallback_path: PathBuf,
+    fallback_label: String,
+    candidates: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -2182,6 +2255,52 @@ impl ToolExecutor {
         self.real_path(value).is_ok()
     }
 
+    fn path_fallback(&self, requested: &str) -> Option<PathFallback> {
+        let missing = self.real_path(requested).ok()?;
+        if missing.exists() {
+            return None;
+        }
+        let mut parent = missing.parent();
+        while let Some(candidate) = parent {
+            if candidate.exists() && candidate.is_dir() && candidate.starts_with(&self.root) {
+                let candidates = self.path_candidates(candidate);
+                return Some(PathFallback {
+                    requested: normalize_virtual_path(requested),
+                    fallback_path: candidate.to_path_buf(),
+                    fallback_label: self.remap(&normalize_path(candidate)),
+                    candidates,
+                });
+            }
+            parent = candidate.parent();
+        }
+        None
+    }
+
+    fn path_candidates(&self, dir: &Path) -> Vec<String> {
+        let mut entries = sorted_entries(dir, &self.exclude_paths)
+            .into_iter()
+            .take(8)
+            .map(|entry| {
+                let path = entry.path();
+                let suffix = if path.is_dir() { "/" } else { "" };
+                format!("{}{}", self.remap(&normalize_path(&path)), suffix)
+            })
+            .collect::<Vec<_>>();
+        entries.sort();
+        entries
+    }
+
+    fn path_missing_message(&self, command: &str, requested: &str, prefix: &str) -> String {
+        if let Some(fallback) = self.path_fallback(requested) {
+            format!(
+                "{prefix}: {requested}\n{}",
+                format_path_missing_hint(command, &fallback)
+            )
+        } else {
+            format!("{prefix}: {requested}")
+        }
+    }
+
     async fn rg(
         &self,
         pattern: &str,
@@ -2197,10 +2316,20 @@ impl ToolExecutor {
             log::warn!("[fast-context] rg 路径无法映射: {}", path);
             return format!("Error: path does not exist: {path}");
         };
-        if !real_path.exists() {
+        let (real_path, path_warning) = if real_path.exists() {
+            (real_path, None)
+        } else if let Some(fallback) = self.path_fallback(path) {
+            log::warn!(
+                "[fast-context] rg 路径不存在，已回退到最近存在父目录: requested={}, fallback={}",
+                path,
+                fallback.fallback_label
+            );
+            let warning = format_path_fallback_warning("rg", &fallback);
+            (fallback.fallback_path, Some(warning))
+        } else {
             log::warn!("[fast-context] rg 路径不存在: {}", real_path.display());
             return format!("Error: path does not exist: {path}");
-        }
+        };
         {
             let mut state = self.state.lock().await;
             state.collected_rg_patterns.push(pattern.to_string());
@@ -2234,11 +2363,11 @@ impl ToolExecutor {
                     real_path.display(),
                     result.len()
                 );
-                result
+                prepend_warning(path_warning.as_deref(), &result)
             }
             Ok(Ok(output)) if output.status.code() == Some(1) => {
                 log::info!("[fast-context] rg 无匹配: pattern={}", pattern);
-                "(no matches)".to_string()
+                prepend_warning(path_warning.as_deref(), "(no matches)")
             }
             Ok(Ok(output)) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2252,7 +2381,7 @@ impl ToolExecutor {
                     output.status.code(),
                     result.len()
                 );
-                result
+                prepend_warning(path_warning.as_deref(), &result)
             }
             // 本机未安装 rg 时走 Rust 内置搜索，保证 fast-context 不因外部二进制缺失不可用。
             Ok(Err(err)) => {
@@ -2260,7 +2389,10 @@ impl ToolExecutor {
                     "[fast-context] 启动 rg 失败，改用 Rust 内置搜索: error={}",
                     err
                 );
-                self.rg_fallback(pattern, &real_path, &include, &exclude)
+                prepend_warning(
+                    path_warning.as_deref(),
+                    &self.rg_fallback(pattern, &real_path, &include, &exclude),
+                )
             }
             Err(_) => {
                 log::warn!("[fast-context] rg 超时: pattern={}", pattern);
@@ -2314,11 +2446,11 @@ impl ToolExecutor {
     ) -> String {
         let Ok(path) = self.real_path(file) else {
             log::warn!("[fast-context] readfile 文件无法映射: {}", file);
-            return format!("Error: file not found: {file}");
+            return self.path_missing_message("readfile", file, "Error: file not found");
         };
         if !path.is_file() {
             log::warn!("[fast-context] readfile 文件不存在: {}", path.display());
-            return format!("Error: file not found: {file}");
+            return self.path_missing_message("readfile", file, "Error: file not found");
         }
         let key = normalize_path(&path);
         // #3 读文件缓存：同一 path 全量内容仅读盘一次，多次 readfile（不同 range）零额外 IO
@@ -2371,11 +2503,11 @@ impl ToolExecutor {
     fn tree(&self, path: &str, levels: Option<u8>) -> String {
         let Ok(real_path) = self.real_path(path) else {
             log::warn!("[fast-context] tree 目录无法映射: {}", path);
-            return format!("Error: dir not found: {path}");
+            return self.path_missing_message("tree", path, "Error: dir not found");
         };
         if !real_path.is_dir() {
             log::warn!("[fast-context] tree 目录不存在: {}", real_path.display());
-            return format!("Error: dir not found: {path}");
+            return self.path_missing_message("tree", path, "Error: dir not found");
         }
         let label = self.virtual_label(path);
         let result = truncate_output(&self.remap(&build_tree(
@@ -2395,11 +2527,11 @@ impl ToolExecutor {
     fn ls(&self, path: &str, long_format: bool, all: bool) -> String {
         let Ok(real_path) = self.real_path(path) else {
             log::warn!("[fast-context] ls 目录无法映射: {}", path);
-            return format!("Error: dir not found: {path}");
+            return self.path_missing_message("ls", path, "Error: dir not found");
         };
         if !real_path.is_dir() {
             log::warn!("[fast-context] ls 不是目录: {}", real_path.display());
-            return format!("Error: not a directory: {path}");
+            return self.path_missing_message("ls", path, "Error: not a directory");
         }
         let mut entries = match fs::read_dir(&real_path) {
             Ok(entries) => entries.filter_map(|entry| entry.ok()).collect::<Vec<_>>(),
@@ -2465,10 +2597,20 @@ impl ToolExecutor {
             log::warn!("[fast-context] glob 路径无法映射: {}", path);
             return format!("Error: path does not exist: {path}");
         };
-        if !root.exists() {
+        let (root, path_warning) = if root.exists() {
+            (root, None)
+        } else if let Some(fallback) = self.path_fallback(path) {
+            log::warn!(
+                "[fast-context] glob 路径不存在，已回退到最近存在父目录: requested={}, fallback={}",
+                path,
+                fallback.fallback_label
+            );
+            let warning = format_path_fallback_warning("glob", &fallback);
+            (fallback.fallback_path, Some(warning))
+        } else {
             log::warn!("[fast-context] glob 路径不存在: {}", root.display());
             return format!("Error: path does not exist: {path}");
-        }
+        };
         let matcher = match GlobBuilder::new(pattern).literal_separator(true).build() {
             Ok(glob) => glob.compile_matcher(),
             Err(err) => {
@@ -2489,7 +2631,7 @@ impl ToolExecutor {
         matches.truncate(100);
         if matches.is_empty() {
             log::info!("[fast-context] glob 无匹配: pattern={}", pattern);
-            "(no matches)".to_string()
+            prepend_warning(path_warning.as_deref(), "(no matches)")
         } else {
             let result = self.remap(
                 &matches
@@ -2503,7 +2645,7 @@ impl ToolExecutor {
                 matches.len(),
                 result.len()
             );
-            result
+            prepend_warning(path_warning.as_deref(), &result)
         }
     }
 
@@ -3036,6 +3178,53 @@ mod tests {
             second.stats.cache_hits, 0,
             "无效命令不应写入缓存，避免错误缓存被统计为命中"
         );
+    }
+
+    #[tokio::test]
+    async fn missing_rg_path_falls_back_to_nearest_parent() {
+        let temp = tempdir().expect("临时目录应创建成功");
+        let temp_root = temp
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| temp.path().to_path_buf());
+        let src = temp_root.join("src");
+        fs::create_dir_all(&src).expect("src 目录应创建成功");
+        fs::write(src.join("payment.rs"), "fn payment_status() {}\n").expect("测试文件应写入成功");
+
+        let executor = Arc::new(ToolExecutor::new(temp_root, vec![]));
+        let args = json!({
+            "command1": {"type": "rg", "pattern": "payment_status", "path": "/codebase/src/missing-module"}
+        });
+        let output = ToolExecutor::exec_tool_call(executor, &args).await;
+
+        assert!(output.output.contains("Warning: requested path missing"));
+        assert!(output.output.contains("payment_status"));
+        assert_eq!(output.stats.commands_useful, 1);
+        assert_eq!(output.stats.path_missing, 1);
+        assert_eq!(output.stats.path_repaired, 1);
+    }
+
+    #[tokio::test]
+    async fn missing_readfile_path_reports_candidates_without_repairing() {
+        let temp = tempdir().expect("临时目录应创建成功");
+        let temp_root = temp
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| temp.path().to_path_buf());
+        fs::write(temp_root.join("payment.rs"), "fn payment_status() {}\n")
+            .expect("测试文件应写入成功");
+
+        let executor = Arc::new(ToolExecutor::new(temp_root, vec![]));
+        let args = json!({
+            "command1": {"type": "readfile", "file": "/codebase/missing/payment.rs"}
+        });
+        let output = ToolExecutor::exec_tool_call(executor, &args).await;
+
+        assert!(output.output.contains("Hint: requested path missing"));
+        assert!(output.output.contains("/codebase/payment.rs"));
+        assert_eq!(output.stats.commands_useful, 0);
+        assert_eq!(output.stats.path_missing, 1);
+        assert_eq!(output.stats.path_repaired, 0);
     }
 
     #[test]
