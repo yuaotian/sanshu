@@ -361,6 +361,95 @@ const backendStrategySummary = computed(() => {
   }
 })
 
+type DebugStatusTone = 'neutral' | 'info' | 'success' | 'warning' | 'danger'
+
+interface DebugStatusItem {
+  key: string
+  label: string
+  value: string
+  detail: string
+  icon: string
+  tone: DebugStatusTone
+}
+
+const debugBackendLabel = computed(() =>
+  backendOptions.find(item => item.value === debugBackend.value)?.label || '默认配置',
+)
+
+const debugCanRun = computed(() =>
+  debugProjectRoot.value.trim().length > 0 && debugQuery.value.trim().length > 0,
+)
+
+// 中文说明：顶部状态栏集中展示运行前最关键的环境信息，减少用户在多个区块之间来回判断。
+const debugStatusItems = computed<DebugStatusItem[]>(() => {
+  const lastResult = debugResultData.value
+  const lastDebugTone: DebugStatusTone = lastResult
+    ? (lastResult.success ? 'success' : 'danger')
+    : 'neutral'
+
+  return [
+    {
+      key: 'backend',
+      label: '调试后端',
+      value: debugBackendLabel.value,
+      detail: debugBackend.value === 'default' ? '跟随默认策略' : '本次运行指定',
+      icon: 'i-carbon-assembly-cluster',
+      tone: debugBackend.value === 'default' ? 'info' : 'success',
+    },
+    {
+      key: 'proxy',
+      label: '代理',
+      value: config.value.proxy_enabled ? '已启用' : '未启用',
+      detail: config.value.proxy_enabled
+        ? `${config.value.proxy_type.toUpperCase()} ${config.value.proxy_host}:${config.value.proxy_port}`
+        : '直连或系统默认网络',
+      icon: config.value.proxy_enabled ? 'i-carbon-connection-signal' : 'i-carbon-direct-link',
+      tone: config.value.proxy_enabled ? 'success' : 'neutral',
+    },
+    {
+      key: 'projects',
+      label: '索引项目',
+      value: `${debugProjectOptions.value.length} 个`,
+      detail: debugProjectOptionsLoading.value
+        ? '正在刷新项目列表'
+        : (debugProjectOptions.value.length > 0 ? '可直接选择调试' : '聚焦项目框加载'),
+      icon: 'i-carbon-folder-shared',
+      tone: debugProjectOptions.value.length > 0 ? 'success' : 'warning',
+    },
+    {
+      key: 'last-debug',
+      label: '上次调试',
+      value: lastResult ? (lastResult.success ? '成功' : '失败') : '未执行',
+      detail: lastResult
+        ? `${lastResult.total_duration_ms}ms · ${lastResult.result_count ?? '-'} 结果`
+        : '等待运行',
+      icon: lastResult
+        ? (lastResult.success ? 'i-carbon-checkmark-filled' : 'i-carbon-warning-alt')
+        : 'i-carbon-pending',
+      tone: lastDebugTone,
+    },
+  ]
+})
+
+const debugResultTagType = computed<'success' | 'error'>(() =>
+  debugResultData.value?.success ? 'success' : 'error',
+)
+
+const debugResultIcon = computed(() =>
+  debugResultData.value?.success ? 'i-carbon-checkmark-filled' : 'i-carbon-warning-alt',
+)
+
+const debugResultTitle = computed(() =>
+  debugResultData.value?.success ? '调试成功' : '调试失败',
+)
+
+const debugResultSubtitle = computed(() => {
+  if (!debugResultData.value)
+    return ''
+
+  return `${formatDebugTime(debugResultData.value.response_time)} · ${debugBackendLabel.value}`
+})
+
 // --- 操作函数 ---
 
 function normalizeBaseUrl(value: string): string {
@@ -1285,265 +1374,256 @@ defineExpose({ saveConfig })
       <!-- Sou 专属调试 -->
       <n-tab-pane name="debug" tab="调试">
         <n-scrollbar class="tab-scrollbar">
-          <n-space vertical size="large" class="tab-content">
-            <ConfigSection title="工具调试" :no-card="true">
-              <n-alert type="info" :bordered="false" class="info-alert">
-                <template #icon>
+          <div class="tab-content debug-tab">
+            <section class="debug-topbar">
+              <div class="debug-topbar-main">
+                <div class="debug-eyebrow">
                   <div class="i-carbon-terminal" />
-                </template>
-                全局日志已迁移到主界面的“日志”页；此处仅保留 Sou / ACE 连接、缓存和搜索调试。
-              </n-alert>
-
-              <n-space class="mt-3">
+                  Sou 调试工作台
+                </div>
+                <div class="debug-status-grid">
+                  <div
+                    v-for="item in debugStatusItems"
+                    :key="item.key"
+                    class="debug-status-pill"
+                    :class="`debug-status-pill--${item.tone}`"
+                  >
+                    <div class="debug-status-icon">
+                      <div :class="item.icon" />
+                    </div>
+                    <div class="debug-status-copy">
+                      <div class="debug-status-label">
+                        {{ item.label }}
+                      </div>
+                      <div class="debug-status-value">
+                        {{ item.value }}
+                      </div>
+                      <div class="debug-status-detail">
+                        {{ item.detail }}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="debug-topbar-actions">
                 <n-button size="small" secondary :disabled="!aceEnabledInStrategy" @click="testConnection">
                   <template #icon>
                     <div class="i-carbon-connection-signal" />
                   </template>
-                  测试 ACE 连接
+                  测试 ACE
                 </n-button>
-                <n-button size="small" secondary @click="clearCache">
+                <n-button size="small" tertiary @click="clearCache">
                   <template #icon>
                     <div class="i-carbon-clean" />
                   </template>
-                  清除缓存
+                  清缓存
                 </n-button>
-              </n-space>
-            </ConfigSection>
+              </div>
+            </section>
 
-            <!-- 状态信息卡片 -->
-            <ConfigSection title="运行状态" :no-card="true">
-              <n-grid :x-gap="12" :y-gap="12" :cols="12">
-                <n-grid-item :span="4">
-                  <div class="status-card">
-                    <div class="status-icon">
-                      <div :class="config.proxy_enabled ? 'i-carbon-checkmark-outline text-emerald-500' : 'i-carbon-close-outline text-slate-400'" />
-                    </div>
-                    <div class="status-info">
-                      <div class="status-title">
-                        代理状态
-                      </div>
-                      <div class="status-value">
-                        {{ config.proxy_enabled ? '已启用' : '未启用' }}
-                      </div>
-                      <div v-if="config.proxy_enabled" class="status-detail">
-                        {{ config.proxy_host }}:{{ config.proxy_port }}
-                      </div>
-                    </div>
-                  </div>
-                </n-grid-item>
-                <n-grid-item :span="4">
-                  <div class="status-card">
-                    <div class="status-icon">
-                      <div class="i-carbon-folder-shared text-blue-500" />
-                    </div>
-                    <div class="status-info">
-                      <div class="status-title">
-                        索引项目
-                      </div>
-                      <div class="status-value">
-                        {{ debugProjectOptions.length }} 个
-                      </div>
-                    </div>
-                  </div>
-                </n-grid-item>
-                <n-grid-item :span="4">
-                  <div class="status-card">
-                    <div class="status-icon">
-                      <div :class="debugResultData?.success ? 'i-carbon-checkmark-filled text-emerald-500' : (debugResultData === null ? 'i-carbon-pending text-slate-400' : 'i-carbon-warning-alt text-amber-500')" />
-                    </div>
-                    <div class="status-info">
-                      <div class="status-title">
-                        上次调试
-                      </div>
-                      <div class="status-value">
-                        {{ debugResultData ? (debugResultData.success ? '成功' : '失败') : '未执行' }}
-                      </div>
-                      <div v-if="debugResultData" class="status-detail">
-                        {{ debugResultData.total_duration_ms }}ms
-                      </div>
-                    </div>
-                  </div>
-                </n-grid-item>
-              </n-grid>
-            </ConfigSection>
+            <n-alert type="info" :bordered="false" class="info-alert debug-note">
+              <template #icon>
+                <div class="i-carbon-information" />
+              </template>
+              全局日志已迁移到主界面的“日志”页；此处仅保留 Sou / ACE 连接、缓存和搜索调试。
+            </n-alert>
 
-            <ConfigSection title="搜索调试" description="模拟搜索请求以验证配置">
-              <n-space vertical size="medium">
-                <!-- 项目选择 -->
-                <n-form-item :show-feedback="false">
-                  <template #label>
-                    <div class="flex items-center gap-2">
-                      <span>项目路径</span>
-                      <n-button
-                        text
-                        size="tiny"
-                        type="primary"
-                        @click="debugUseManualInput = !debugUseManualInput"
-                      >
-                        {{ debugUseManualInput ? '选择已索引' : '手动输入' }}
-                      </n-button>
-                    </div>
-                  </template>
-                  <n-select
-                    v-if="!debugUseManualInput"
-                    v-model:value="debugProjectRoot"
-                    :options="debugProjectOptions"
-                    :loading="debugProjectOptionsLoading"
-                    placeholder="选择已索引的项目..."
-                    filterable
-                    clearable
-                    @focus="loadDebugProjectOptions"
-                  />
-                  <n-input
-                    v-else
-                    v-model:value="debugProjectRoot"
-                    placeholder="/abs/path/to/project"
-                    clearable
-                  />
-                </n-form-item>
-
-                <n-form-item label="搜索后端" :show-feedback="false">
-                  <n-select
-                    v-model:value="debugBackend"
-                    :options="backendOptions"
-                  />
-                </n-form-item>
-
-                <n-form-item label="查询语句" :show-feedback="false">
-                  <n-input
-                    v-model:value="debugQuery"
-                    type="textarea"
-                    :rows="2"
-                    placeholder="输入搜索意图..."
-                  />
-                </n-form-item>
-
-                <n-button
-                  type="primary"
-                  ghost
-                  :loading="debugLoading"
-                  :disabled="!debugProjectRoot || !debugQuery"
-                  @click="runToolDebug"
-                >
-                  <template #icon>
-                    <div class="i-carbon-play" />
-                  </template>
-                  运行调试
-                </n-button>
-
-                <!-- 骨架屏加载态 -->
-                <div v-if="debugLoading" class="debug-skeleton">
-                  <n-skeleton text :repeat="3" />
-                  <n-skeleton text style="width: 60%" />
-                </div>
-
-                <!-- 结构化结果展示 -->
-                <n-collapse-transition :show="debugResultData !== null && !debugLoading">
-                  <div v-if="debugResultData" class="debug-result-panel">
-                    <!-- 请求信息 -->
-                    <div class="result-section">
-                      <div class="section-header">
-                        <div class="i-carbon-send text-blue-500" />
-                        <span>请求信息</span>
-                      </div>
-                      <div class="section-content">
-                        <div class="info-row">
-                          <span class="info-label">项目:</span>
-                          <code class="info-value">{{ debugResultData.project_path }}</code>
-                        </div>
-                        <div class="info-row">
-                          <span class="info-label">查询:</span>
-                          <span class="info-value">{{ debugResultData.query }}</span>
-                        </div>
-                        <div class="info-row">
-                          <span class="info-label">发送时间:</span>
-                          <span class="info-value">{{ formatDebugTime(debugResultData.request_time) }}</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <!-- 性能指标 -->
-                    <div class="result-section">
-                      <div class="section-header">
-                        <div class="i-carbon-timer text-amber-500" />
-                        <span>性能指标</span>
-                      </div>
-                      <div class="section-content">
-                        <n-grid :x-gap="12" :cols="12">
-                          <n-grid-item :span="4">
-                            <div class="metric-item">
-                              <div class="metric-value" :class="debugResultData.success ? 'text-emerald-500' : 'text-red-500'">
-                                {{ debugResultData.total_duration_ms }}ms
-                              </div>
-                              <div class="metric-label">
-                                总耗时
-                              </div>
-                            </div>
-                          </n-grid-item>
-                          <n-grid-item :span="4">
-                            <div class="metric-item">
-                              <div class="metric-value">
-                                {{ debugResultData.result_count ?? '-' }}
-                              </div>
-                              <div class="metric-label">
-                                结果数
-                              </div>
-                            </div>
-                          </n-grid-item>
-                          <n-grid-item :span="4">
-                            <div class="metric-item">
-                              <n-tag :type="debugResultData.success ? 'success' : 'error'" size="small">
-                                {{ debugResultData.success ? '成功' : '失败' }}
-                              </n-tag>
-                              <div class="metric-label">
-                                状态
-                              </div>
-                            </div>
-                          </n-grid-item>
-                        </n-grid>
-                      </div>
-                    </div>
-
-                    <!-- 响应数据 / 错误信息 -->
-                    <div class="result-section">
-                      <div class="section-header">
-                        <div :class="debugResultData.success ? 'i-carbon-document text-emerald-500' : 'i-carbon-warning text-red-500'" />
-                        <span>{{ debugResultData.success ? '响应数据' : '错误信息' }}</span>
+            <ConfigSection title="搜索调试" description="模拟 Sou 搜索请求，验证后端策略、项目索引和响应内容。">
+              <div class="debug-console">
+                <div class="debug-console-row debug-console-row--controls">
+                  <n-form-item :show-feedback="false" class="debug-field debug-field--project">
+                    <template #label>
+                      <div class="debug-field-label">
+                        <span>项目路径</span>
                         <n-button
-                          v-if="debugResultData.success && debugResultData.result"
-                          size="tiny"
                           text
-                          class="ml-auto"
-                          @click="copyDebugResult"
+                          size="tiny"
+                          type="primary"
+                          @click="debugUseManualInput = !debugUseManualInput"
                         >
-                          <template #icon>
-                            <div class="i-carbon-copy" />
-                          </template>
-                          复制
+                          {{ debugUseManualInput ? '选择已索引' : '手动输入' }}
                         </n-button>
                       </div>
-                      <div class="section-content">
-                        <n-alert
-                          v-if="debugResultData.success"
-                          type="info"
-                          :bordered="false"
-                          class="compact-alert mb-2"
-                        >
-                          fast-context 的 Path/Lines/L行号 是三术按 answer 文件范围本地读取后生成的 ACE 兼容格式，不是 fast-context 原生直出文本。
-                        </n-alert>
-                        <div v-if="debugResultData.error" class="error-content">
-                          {{ debugResultData.error }}
+                    </template>
+                    <n-select
+                      v-if="!debugUseManualInput"
+                      v-model:value="debugProjectRoot"
+                      :options="debugProjectOptions"
+                      :loading="debugProjectOptionsLoading"
+                      placeholder="选择已索引的项目..."
+                      filterable
+                      clearable
+                      @focus="loadDebugProjectOptions"
+                    />
+                    <n-input
+                      v-else
+                      v-model:value="debugProjectRoot"
+                      placeholder="/abs/path/to/project"
+                      clearable
+                    />
+                  </n-form-item>
+
+                  <n-form-item label="搜索后端" :show-feedback="false" class="debug-field debug-field--backend">
+                    <n-select
+                      v-model:value="debugBackend"
+                      :options="backendOptions"
+                    />
+                  </n-form-item>
+                </div>
+
+                <div class="debug-console-row debug-console-row--query">
+                  <n-form-item label="查询语句" :show-feedback="false" class="debug-field debug-field--query">
+                    <n-input
+                      v-model:value="debugQuery"
+                      type="textarea"
+                      :rows="3"
+                      placeholder="输入搜索意图，例如：SouConfig 调试 tab 状态栏"
+                    />
+                  </n-form-item>
+
+                  <div class="debug-run-panel">
+                    <n-button
+                      type="primary"
+                      size="large"
+                      :loading="debugLoading"
+                      :disabled="!debugCanRun"
+                      class="debug-run-button"
+                      @click="runToolDebug"
+                    >
+                      <template #icon>
+                        <div class="i-carbon-play" />
+                      </template>
+                      运行调试
+                    </n-button>
+                    <div class="debug-run-hint">
+                      {{ debugCanRun ? '将按当前后端策略执行一次真实搜索' : '请先选择项目并填写查询语句' }}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 骨架屏加载态 -->
+              <div v-if="debugLoading" class="debug-skeleton">
+                <div class="debug-skeleton-header">
+                  <div class="i-carbon-in-progress animate-spin" />
+                  正在请求 Sou 后端...
+                </div>
+                <n-skeleton text :repeat="3" />
+                <n-skeleton text style="width: 60%" />
+              </div>
+
+              <!-- 结构化结果展示 -->
+              <n-collapse-transition :show="debugResultData !== null && !debugLoading">
+                <div v-if="debugResultData" class="debug-result-panel">
+                  <div class="debug-result-header" :class="debugResultData.success ? 'is-success' : 'is-error'">
+                    <div class="debug-result-title-group">
+                      <div class="debug-result-icon">
+                        <div :class="debugResultIcon" />
+                      </div>
+                      <div>
+                        <div class="debug-result-title">
+                          {{ debugResultTitle }}
                         </div>
-                        <n-scrollbar v-else style="max-height: 200px">
-                          <pre class="result-pre">{{ debugResultData.result || '无返回结果' }}</pre>
-                        </n-scrollbar>
+                        <div class="debug-result-subtitle">
+                          {{ debugResultSubtitle }}
+                        </div>
+                      </div>
+                    </div>
+                    <div class="debug-result-actions">
+                      <n-tag :type="debugResultTagType" size="small" :bordered="false">
+                        {{ debugResultData.success ? '成功' : '失败' }}
+                      </n-tag>
+                      <n-button
+                        v-if="debugResultData.success && debugResultData.result"
+                        size="tiny"
+                        secondary
+                        @click="copyDebugResult"
+                      >
+                        <template #icon>
+                          <div class="i-carbon-copy" />
+                        </template>
+                        复制结果
+                      </n-button>
+                    </div>
+                  </div>
+
+                  <!-- 性能指标 -->
+                  <div class="result-section result-section--metrics">
+                    <div class="metric-item">
+                      <div class="metric-value" :class="debugResultData.success ? 'text-emerald-500' : 'text-red-500'">
+                        {{ debugResultData.total_duration_ms }}ms
+                      </div>
+                      <div class="metric-label">
+                        总耗时
+                      </div>
+                    </div>
+                    <div class="metric-item">
+                      <div class="metric-value">
+                        {{ debugResultData.result_count ?? '-' }}
+                      </div>
+                      <div class="metric-label">
+                        结果数
+                      </div>
+                    </div>
+                    <div class="metric-item">
+                      <div class="metric-value metric-value--small">
+                        {{ debugBackendLabel }}
+                      </div>
+                      <div class="metric-label">
+                        本次后端
                       </div>
                     </div>
                   </div>
-                </n-collapse-transition>
-              </n-space>
+
+                  <!-- 请求信息 -->
+                  <div class="result-section">
+                    <div class="section-header">
+                      <div class="i-carbon-send text-blue-500" />
+                      <span>请求信息</span>
+                    </div>
+                    <div class="section-content debug-info-grid">
+                      <div class="info-row">
+                        <span class="info-label">项目</span>
+                        <code class="info-value">{{ debugResultData.project_path }}</code>
+                      </div>
+                      <div class="info-row">
+                        <span class="info-label">查询</span>
+                        <span class="info-value">{{ debugResultData.query }}</span>
+                      </div>
+                      <div class="info-row">
+                        <span class="info-label">发送时间</span>
+                        <span class="info-value">{{ formatDebugTime(debugResultData.request_time) }}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 响应数据 / 错误信息 -->
+                  <div class="result-section">
+                    <div class="section-header">
+                      <div :class="debugResultData.success ? 'i-carbon-document text-emerald-500' : 'i-carbon-warning text-red-500'" />
+                      <span>{{ debugResultData.success ? '响应数据' : '错误信息' }}</span>
+                    </div>
+                    <div class="section-content">
+                      <n-alert
+                        v-if="debugResultData.success"
+                        type="info"
+                        :bordered="false"
+                        class="compact-alert mb-2"
+                      >
+                        fast-context 的 Path/Lines/L行号 是三术按 answer 文件范围本地读取后生成的 ACE 兼容格式，不是 fast-context 原生直出文本。
+                      </n-alert>
+                      <div v-if="debugResultData.error" class="error-content">
+                        {{ debugResultData.error }}
+                      </div>
+                      <n-scrollbar v-else class="result-scrollbar">
+                        <pre class="result-pre">{{ debugResultData.result || '无返回结果' }}</pre>
+                      </n-scrollbar>
+                    </div>
+                  </div>
+                </div>
+              </n-collapse-transition>
             </ConfigSection>
-          </n-space>
+          </div>
         </n-scrollbar>
       </n-tab-pane>
 
@@ -2050,87 +2130,340 @@ defineExpose({ saveConfig })
   align-items: center;
 }
 
-/* 调试界面 - 状态卡片 */
-.status-card {
+/* 调试界面 - 专业工作台布局 */
+.debug-tab {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.debug-topbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
+  align-items: stretch;
   padding: 12px;
-  border-radius: 10px;
-  background: var(--color-container, rgba(128, 128, 128, 0.06));
-  border: 1px solid var(--color-border, rgba(128, 128, 128, 0.12));
-  transition: all 0.2s ease;
+  border: 1px solid rgba(20, 184, 166, 0.16);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(20, 184, 166, 0.08), rgba(59, 130, 246, 0.05)),
+    var(--color-container, rgba(249, 250, 251, 0.82));
+  box-shadow: 0 12px 30px -24px rgba(15, 23, 42, 0.45);
 }
 
-.status-card:hover {
-  border-color: rgba(99, 102, 241, 0.3);
+:root.dark .debug-topbar {
+  border-color: rgba(45, 212, 191, 0.16);
+  background:
+    linear-gradient(135deg, rgba(20, 184, 166, 0.12), rgba(59, 130, 246, 0.08)),
+    rgba(24, 24, 28, 0.78);
+  box-shadow: 0 16px 34px -26px rgba(0, 0, 0, 0.8);
 }
 
-:root.dark .status-card {
-  background: rgba(30, 30, 35, 0.6);
-  border-color: rgba(255, 255, 255, 0.08);
-}
-
-.status-icon {
-  font-size: 20px;
-}
-
-.status-info {
-  flex: 1;
+.debug-topbar-main {
   min-width: 0;
 }
 
-.status-title {
-  font-size: 11px;
-  color: var(--color-on-surface-muted, #9ca3af);
-  margin-bottom: 2px;
-}
-
-.status-value {
-  font-size: 14px;
+.debug-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  color: rgb(13, 148, 136);
+  font-size: 12px;
   font-weight: 600;
-  color: var(--color-on-surface, #111827);
 }
 
-:root.dark .status-value {
+:root.dark .debug-eyebrow {
+  color: #5eead4;
+}
+
+.debug-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.debug-status-pill {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 1px solid var(--debug-pill-border, rgba(148, 163, 184, 0.18));
+  border-radius: 8px;
+  background: var(--debug-pill-bg, rgba(255, 255, 255, 0.48));
+  transition: border-color 0.18s ease, background-color 0.18s ease, transform 0.18s ease;
+}
+
+.debug-status-pill:hover {
+  transform: translateY(-1px);
+  border-color: var(--debug-pill-border-hover, rgba(20, 184, 166, 0.32));
+}
+
+.debug-status-pill--neutral {
+  --debug-pill-bg: rgba(148, 163, 184, 0.08);
+  --debug-pill-border: rgba(148, 163, 184, 0.18);
+  --debug-pill-color: #64748b;
+}
+
+.debug-status-pill--info {
+  --debug-pill-bg: rgba(59, 130, 246, 0.08);
+  --debug-pill-border: rgba(59, 130, 246, 0.18);
+  --debug-pill-color: #3b82f6;
+}
+
+.debug-status-pill--success {
+  --debug-pill-bg: rgba(20, 184, 166, 0.09);
+  --debug-pill-border: rgba(20, 184, 166, 0.22);
+  --debug-pill-color: #0d9488;
+}
+
+.debug-status-pill--warning {
+  --debug-pill-bg: rgba(245, 158, 11, 0.08);
+  --debug-pill-border: rgba(245, 158, 11, 0.2);
+  --debug-pill-color: #d97706;
+}
+
+.debug-status-pill--danger {
+  --debug-pill-bg: rgba(244, 63, 94, 0.08);
+  --debug-pill-border: rgba(244, 63, 94, 0.2);
+  --debug-pill-color: #e11d48;
+}
+
+:root.dark .debug-status-pill {
+  background: var(--debug-pill-bg, rgba(255, 255, 255, 0.05));
+  border-color: var(--debug-pill-border, rgba(255, 255, 255, 0.08));
+}
+
+.debug-status-icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  color: var(--debug-pill-color, #64748b);
+  background: rgba(255, 255, 255, 0.55);
+  font-size: 16px;
+}
+
+:root.dark .debug-status-icon {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.debug-status-copy {
+  min-width: 0;
+}
+
+.debug-status-label,
+.debug-status-detail {
+  overflow: hidden;
+  color: var(--color-on-surface-muted, #9ca3af);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.debug-status-value {
+  overflow: hidden;
+  margin: 1px 0;
+  color: var(--color-on-surface, #111827);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 18px;
+}
+
+:root.dark .debug-status-value {
   color: #f3f4f6;
 }
 
-.status-detail {
-  font-size: 11px;
+.debug-topbar-actions {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  min-width: 104px;
+}
+
+.debug-note {
+  margin-top: -2px;
+}
+
+.debug-console {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.debug-console-row {
+  display: grid;
+  gap: 12px;
+}
+
+.debug-console-row--controls {
+  grid-template-columns: minmax(0, 1fr) minmax(190px, 0.38fr);
+}
+
+.debug-console-row--query {
+  grid-template-columns: minmax(0, 1fr) 150px;
+  align-items: stretch;
+}
+
+.debug-field {
+  margin-bottom: 0;
+}
+
+.debug-field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.debug-run-panel {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 22px;
+}
+
+.debug-run-button {
+  width: 100%;
+  min-height: 40px;
+}
+
+.debug-run-hint {
   color: var(--color-on-surface-muted, #9ca3af);
-  margin-top: 2px;
-  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 16px;
 }
 
 /* 调试界面 - 骨架屏 */
 .debug-skeleton {
-  padding: 16px;
-  border-radius: 10px;
-  background: var(--color-container, rgba(128, 128, 128, 0.06));
-  border: 1px solid var(--color-border, rgba(128, 128, 128, 0.12));
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid rgba(20, 184, 166, 0.16);
+  border-radius: 8px;
+  background: rgba(20, 184, 166, 0.05);
 }
 
 :root.dark .debug-skeleton {
-  background: rgba(30, 30, 35, 0.6);
-  border-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(45, 212, 191, 0.14);
+  background: rgba(20, 184, 166, 0.08);
 }
 
-/* 调试界面 - 结果面板 */
+.debug-skeleton-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: rgb(13, 148, 136);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+:root.dark .debug-skeleton-header {
+  color: #5eead4;
+}
+
+/* 调试界面 - 结果工作台 */
 .debug-result-panel {
-  border-radius: 10px;
-  background: var(--color-container, rgba(128, 128, 128, 0.04));
-  border: 1px solid var(--color-border, rgba(128, 128, 128, 0.12));
+  margin-top: 12px;
   overflow: hidden;
+  border: 1px solid var(--color-border, rgba(128, 128, 128, 0.14));
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 14px 28px -24px rgba(15, 23, 42, 0.55);
 }
 
 :root.dark .debug-result-panel {
-  background: rgba(20, 20, 25, 0.5);
   border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(20, 20, 25, 0.62);
+  box-shadow: 0 16px 34px -28px rgba(0, 0, 0, 0.9);
+}
+
+.debug-result-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--color-border, rgba(128, 128, 128, 0.14));
+  background: linear-gradient(135deg, rgba(20, 184, 166, 0.08), rgba(148, 163, 184, 0.05));
+}
+
+.debug-result-header.is-error {
+  background: linear-gradient(135deg, rgba(244, 63, 94, 0.08), rgba(245, 158, 11, 0.05));
+}
+
+:root.dark .debug-result-header {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+  background: linear-gradient(135deg, rgba(20, 184, 166, 0.12), rgba(148, 163, 184, 0.06));
+}
+
+:root.dark .debug-result-header.is-error {
+  background: linear-gradient(135deg, rgba(244, 63, 94, 0.12), rgba(245, 158, 11, 0.07));
+}
+
+.debug-result-title-group,
+.debug-result-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.debug-result-actions {
+  flex: 0 0 auto;
+}
+
+.debug-result-icon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  color: #0d9488;
+  background: rgba(20, 184, 166, 0.12);
+  font-size: 18px;
+}
+
+.debug-result-header.is-error .debug-result-icon {
+  color: #e11d48;
+  background: rgba(244, 63, 94, 0.12);
+}
+
+.debug-result-title {
+  color: var(--color-on-surface, #111827);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 20px;
+}
+
+.debug-result-subtitle {
+  overflow: hidden;
+  max-width: 430px;
+  color: var(--color-on-surface-secondary, #6b7280);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+:root.dark .debug-result-title {
+  color: #f3f4f6;
+}
+
+:root.dark .debug-result-subtitle {
+  color: #9ca3af;
 }
 
 .result-section {
-  padding: 12px 16px;
+  padding: 13px 16px;
   border-bottom: 1px solid var(--color-border, rgba(128, 128, 128, 0.1));
 }
 
@@ -2142,14 +2475,25 @@ defineExpose({ saveConfig })
   border-bottom-color: rgba(255, 255, 255, 0.06);
 }
 
+.result-section--metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  background: rgba(148, 163, 184, 0.05);
+}
+
+:root.dark .result-section--metrics {
+  background: rgba(255, 255, 255, 0.03);
+}
+
 .section-header {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--color-on-surface, #374151);
   margin-bottom: 10px;
+  color: var(--color-on-surface, #374151);
+  font-size: 13px;
+  font-weight: 600;
 }
 
 :root.dark .section-header {
@@ -2160,26 +2504,27 @@ defineExpose({ saveConfig })
   font-size: 12px;
 }
 
-.info-row {
-  display: flex;
-  align-items: flex-start;
+.debug-info-grid {
+  display: grid;
   gap: 8px;
-  margin-bottom: 6px;
 }
 
-.info-row:last-child {
-  margin-bottom: 0;
+.info-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: flex-start;
+  gap: 10px;
 }
 
 .info-label {
   color: var(--color-on-surface-muted, #9ca3af);
   white-space: nowrap;
-  min-width: 60px;
 }
 
 .info-value {
+  min-width: 0;
   color: var(--color-on-surface, #374151);
-  word-break: break-all;
+  word-break: break-word;
 }
 
 :root.dark .info-value {
@@ -2188,21 +2533,32 @@ defineExpose({ saveConfig })
 
 /* 调试界面 - 性能指标 */
 .metric-item {
-  text-align: center;
-  padding: 8px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border, rgba(128, 128, 128, 0.12));
   border-radius: 8px;
-  background: rgba(128, 128, 128, 0.04);
+  background: rgba(255, 255, 255, 0.62);
 }
 
 :root.dark .metric-item {
-  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.045);
 }
 
 .metric-value {
+  overflow: hidden;
+  margin-bottom: 3px;
+  color: var(--color-on-surface, #111827);
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 18px;
   font-weight: 700;
-  color: var(--color-on-surface, #111827);
-  margin-bottom: 4px;
+  line-height: 24px;
+}
+
+.metric-value--small {
+  font-size: 13px;
+  font-weight: 650;
 }
 
 :root.dark .metric-value {
@@ -2210,41 +2566,93 @@ defineExpose({ saveConfig })
 }
 
 .metric-label {
-  font-size: 11px;
   color: var(--color-on-surface-muted, #9ca3af);
+  font-size: 11px;
+  line-height: 15px;
 }
 
 /* 调试界面 - 错误内容 */
 .error-content {
   padding: 12px;
+  border: 1px solid rgba(244, 63, 94, 0.18);
   border-radius: 8px;
-  background: rgba(239, 68, 68, 0.08);
-  color: #dc2626;
+  background: rgba(244, 63, 94, 0.08);
+  color: #be123c;
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.55;
 }
 
 :root.dark .error-content {
-  background: rgba(239, 68, 68, 0.15);
-  color: #fca5a5;
+  border-color: rgba(251, 113, 133, 0.22);
+  background: rgba(244, 63, 94, 0.14);
+  color: #fda4af;
 }
 
 /* 调试界面 - 结果预览 */
+.result-scrollbar {
+  max-height: 260px;
+}
+
 .result-pre {
   margin: 0;
-  padding: 12px;
-  font-size: 12px;
-  font-family: ui-monospace, monospace;
-  line-height: 1.5;
+  padding: 13px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.035);
+  color: var(--color-on-surface, #374151);
   white-space: pre-wrap;
   word-break: break-word;
-  background: rgba(128, 128, 128, 0.04);
-  border-radius: 8px;
-  color: var(--color-on-surface, #374151);
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+  line-height: 1.55;
 }
 
 :root.dark .result-pre {
-  background: rgba(0, 0, 0, 0.3);
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.28);
   color: #d1d5db;
+}
+
+@media (max-width: 820px) {
+  .debug-topbar,
+  .debug-console-row--query {
+    grid-template-columns: 1fr;
+  }
+
+  .debug-topbar-actions {
+    flex-direction: row;
+    justify-content: flex-start;
+  }
+
+  .debug-status-grid,
+  .debug-console-row--controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .debug-run-panel {
+    padding-top: 0;
+  }
+}
+
+@media (max-width: 560px) {
+  .debug-status-grid,
+  .debug-console-row--controls,
+  .result-section--metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .debug-result-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .debug-result-actions {
+    flex-wrap: wrap;
+  }
+
+  .info-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
 }
 </style>
