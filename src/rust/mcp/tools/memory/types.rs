@@ -118,7 +118,7 @@ fn default_enable_dedup() -> bool {
     true
 }
 
-fn default_upsert_threshold() -> f64 {
+pub fn default_upsert_threshold() -> f64 {
     0.55
 }
 

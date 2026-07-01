@@ -280,6 +280,9 @@ pub struct MemoryConfigDto {
     pub similarity_threshold: f64,
     pub dedup_on_startup: bool,
     pub enable_dedup: bool,
+    /// 同类 upsert 阈值（0.0 ~ 1.0）：同类近义改写就地更新的相似度下限
+    #[serde(default = "crate::mcp::tools::memory::types::default_upsert_threshold")]
+    pub upsert_threshold: f64,
 }
 
 /// 去重结果 DTO
@@ -358,6 +361,7 @@ pub async fn get_memory_config(project_path: String) -> Result<MemoryConfigDto, 
         similarity_threshold: config.similarity_threshold,
         dedup_on_startup: config.dedup_on_startup,
         enable_dedup: config.enable_dedup,
+        upsert_threshold: config.upsert_threshold,
     })
 }
 
@@ -374,8 +378,8 @@ pub async fn save_memory_config(
         similarity_threshold: config.similarity_threshold.clamp(0.5, 0.95),
         dedup_on_startup: config.dedup_on_startup,
         enable_dedup: config.enable_dedup,
-        // upsert_threshold 不经此 DTO 暴露，保留当前值（默认 0.55）
-        upsert_threshold: manager.config().upsert_threshold,
+        // upsert 阈值：限制在 [0.4, 0.9]，且必须严格小于去重阈值才有意义
+        upsert_threshold: config.upsert_threshold.clamp(0.4, 0.9),
     };
 
     manager

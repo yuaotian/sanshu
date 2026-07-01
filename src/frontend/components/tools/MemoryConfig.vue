@@ -28,6 +28,7 @@ interface MemoryConfig {
   similarity_threshold: number
   dedup_on_startup: boolean
   enable_dedup: boolean
+  upsert_threshold: number
 }
 
 interface MemoryStats {
@@ -63,6 +64,7 @@ const config = ref<MemoryConfig>({
   similarity_threshold: 0.70,
   dedup_on_startup: true,
   enable_dedup: true,
+  upsert_threshold: 0.55,
 })
 const configLoading = ref(false)
 const configSaving = ref(false)
@@ -106,6 +108,13 @@ const thresholdPercent = computed({
   get: () => Math.round(config.value.similarity_threshold * 100),
   set: (val: number) => {
     config.value.similarity_threshold = val / 100
+  },
+})
+
+const upsertPercent = computed({
+  get: () => Math.round(config.value.upsert_threshold * 100),
+  set: (val: number) => {
+    config.value.upsert_threshold = val / 100
   },
 })
 
@@ -312,6 +321,28 @@ onMounted(async () => {
                       </div>
                       <div class="text-xs text-gray-500 mt-2">
                         超过此相似度的内容将被视为重复。建议值：70%
+                      </div>
+                    </div>
+                  </n-form-item>
+
+                  <!-- 同类 upsert 阈值滑块 -->
+                  <n-form-item label="同类更新阈值">
+                    <div class="w-full">
+                      <div class="flex items-center gap-4">
+                        <n-slider
+                          v-model:value="upsertPercent"
+                          :min="40"
+                          :max="90"
+                          :step="5"
+                          :marks="{ 40: '40%', 55: '55%', 90: '90%' }"
+                          class="flex-1"
+                        />
+                        <n-tag type="warning" :bordered="false">
+                          {{ upsertPercent }}%
+                        </n-tag>
+                      </div>
+                      <div class="text-xs text-gray-500 mt-2">
+                        同分类记忆相似度达到此值（但未达去重阈值）时，就地更新旧记忆而非新增，抑制近义改写堆积。应低于相似度阈值。建议值：55%
                       </div>
                     </div>
                   </n-form-item>
