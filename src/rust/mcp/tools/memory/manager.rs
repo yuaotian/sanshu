@@ -5,11 +5,16 @@
 //! - 启动时自动迁移和去重
 //! - JSON 格式存储
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::cleanup::{
+    parse_backup_timestamp, preview_cleanup, BackupInfo, CleanupApplyRequest, CleanupApplyResult,
+    CleanupPreviewRequest, CleanupPreviewResult, RestoreBackupResult,
+};
 use super::dedup::MemoryDeduplicator;
 use super::migration::MemoryMigrator;
 use super::similarity::TextSimilarity;
@@ -55,6 +60,10 @@ pub enum AddOutcome {
 impl MemoryManager {
     /// 存储文件名
     const STORE_FILE: &'static str = "memories.json";
+    /// 运行时自动备份目录名
+    const BACKUP_DIR: &'static str = "back";
+    /// 最多保留的自动备份数量
+    const MAX_BACKUPS: usize = 10;
 
     /// 创建新的记忆管理器
     ///
@@ -220,11 +229,7 @@ impl MemoryManager {
     /// 3. 否则 → 新增。
     ///
     /// 相比 [`add_memory`]，本方法从源头抑制「同一条规则的不同表述」堆积。
-    pub fn upsert_memory(
-        &mut self,
-        content: &str,
-        category: MemoryCategory,
-    ) -> Result<AddOutcome> {
+    pub fn upsert_memory(&mut self, content: &str, category: MemoryCategory) -> Result<AddOutcome> {
         let content = content.trim();
         if content.is_empty() {
             return Err(anyhow::anyhow!("记忆内容不能为空"));
@@ -307,8 +312,11 @@ impl MemoryManager {
     /// 返回移除的记忆数量
     pub fn deduplicate(&mut self) -> Result<usize> {
         let dedup = MemoryDeduplicator::new(self.store.config.similarity_threshold);
-        let (deduped, stats) = dedup.deduplicate(std::mem::take(&mut self.store.entries));
+        let (deduped, stats) = dedup.deduplicate(self.store.entries.clone());
 
+        if stats.removed_count > 0 {
+            self.create_backup("deduplicate")?;
+        }
         self.store.entries = deduped;
         self.store.last_dedup_at = Utc::now();
         self.save_store()?;
@@ -321,8 +329,11 @@ impl MemoryManager {
     /// 用于前端可视化展示
     pub fn deduplicate_with_stats(&mut self) -> Result<super::dedup::DedupResult> {
         let dedup = MemoryDeduplicator::new(self.store.config.similarity_threshold);
-        let (deduped, stats) = dedup.deduplicate(std::mem::take(&mut self.store.entries));
+        let (deduped, stats) = dedup.deduplicate(self.store.entries.clone());
 
+        if stats.removed_count > 0 {
+            self.create_backup("deduplicate")?;
+        }
         self.store.entries = deduped;
         self.store.last_dedup_at = Utc::now();
         self.save_store()?;
@@ -334,25 +345,237 @@ impl MemoryManager {
     /// 删除指定 ID 的记忆条目
     /// 返回被删除的记忆内容（用于确认）
     pub fn delete_memory(&mut self, memory_id: &str) -> Result<Option<String>> {
-        let original_count = self.store.entries.len();
-        let mut deleted_content = None;
+        if let Some(idx) = self
+            .store
+            .entries
+            .iter()
+            .position(|entry| entry.id == memory_id)
+        {
+            let deleted_content = self.store.entries[idx].content.clone();
+            self.create_backup("delete")?;
+            self.store.entries.remove(idx);
+            log_debug!("已删除记忆: {}", memory_id);
+            self.save_store()?;
+            Ok(Some(deleted_content))
+        } else {
+            Ok(None) // 未找到该 ID
+        }
+    }
 
+    /// 生成历史清理预览，不修改任何记忆。
+    pub fn preview_cleanup(&self, request: CleanupPreviewRequest) -> CleanupPreviewResult {
+        preview_cleanup(&self.store.entries, &request)
+    }
+
+    /// 应用用户确认后的历史清理计划。
+    pub fn apply_cleanup_plan(
+        &mut self,
+        request: CleanupApplyRequest,
+    ) -> Result<CleanupApplyResult> {
+        let existing_ids: HashSet<String> = self
+            .store
+            .entries
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect();
+        let mut remove_ids = HashSet::new();
+
+        for group in &request.groups {
+            if !existing_ids.contains(&group.keep_id) {
+                return Err(anyhow::anyhow!(
+                    "清理计划已过期：保留项不存在 ({})",
+                    group.keep_id
+                ));
+            }
+
+            for delete_id in &group.delete_ids {
+                if delete_id == &group.keep_id {
+                    continue;
+                }
+                if !existing_ids.contains(delete_id) {
+                    return Err(anyhow::anyhow!(
+                        "清理计划已过期：删除项不存在 ({})",
+                        delete_id
+                    ));
+                }
+                remove_ids.insert(delete_id.clone());
+            }
+        }
+
+        if remove_ids.is_empty() {
+            return Ok(CleanupApplyResult {
+                backup_file: None,
+                removed_count: 0,
+                remaining_count: self.store.entries.len(),
+                removed_ids: Vec::new(),
+            });
+        }
+
+        let backup_file = if request.auto_backup {
+            Some(self.create_backup("cleanup")?.file_name)
+        } else {
+            None
+        };
+
+        let mut removed_ids = Vec::new();
         self.store.entries.retain(|entry| {
-            if entry.id == memory_id {
-                deleted_content = Some(entry.content.clone());
-                false // 移除该条目
+            if remove_ids.contains(&entry.id) {
+                removed_ids.push(entry.id.clone());
+                false
             } else {
                 true
             }
         });
+        self.store.last_dedup_at = Utc::now();
+        self.save_store()?;
 
-        if self.store.entries.len() < original_count {
+        Ok(CleanupApplyResult {
+            backup_file,
+            removed_count: removed_ids.len(),
+            remaining_count: self.store.entries.len(),
+            removed_ids,
+        })
+    }
+
+    /// 创建当前 memories.json 的运行时备份。
+    pub fn create_backup(&self, reason: &str) -> Result<BackupInfo> {
+        let backup_dir = self.backup_dir();
+        fs::create_dir_all(&backup_dir)?;
+
+        let source = self.store_path();
+        if !source.exists() {
             self.save_store()?;
-            log_debug!("已删除记忆: {}", memory_id);
-            Ok(deleted_content)
-        } else {
-            Ok(None) // 未找到该 ID
         }
+
+        let now = Utc::now();
+        let file_name = format!(
+            "{}-{:03}.memories.json",
+            now.format("%Y%m%d-%H%M%S"),
+            now.timestamp_subsec_millis()
+        );
+        let backup_path = backup_dir.join(&file_name);
+        fs::copy(&source, &backup_path).with_context(|| {
+            format!(
+                "创建记忆备份失败: {} -> {}",
+                source.display(),
+                backup_path.display()
+            )
+        })?;
+        log_debug!("已创建记忆备份({}): {}", reason, backup_path.display());
+
+        self.prune_backups(Self::MAX_BACKUPS)?;
+        Self::backup_info_from_path(&backup_path)
+    }
+
+    /// 列出最近的记忆备份。
+    pub fn list_backups(&self) -> Result<Vec<BackupInfo>> {
+        let backup_dir = self.backup_dir();
+        if !backup_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut backups = Vec::new();
+        for entry in fs::read_dir(&backup_dir)? {
+            let path = entry?.path();
+            if path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.ends_with(".memories.json"))
+                    .unwrap_or(false)
+            {
+                backups.push(Self::backup_info_from_path(&path)?);
+            }
+        }
+        backups.sort_by(|a, b| b.file_name.cmp(&a.file_name));
+        Ok(backups)
+    }
+
+    /// 读取备份文件内容，用于前端导出。
+    pub fn export_backup(&self, file_name: &str) -> Result<String> {
+        let backup_path = self.safe_backup_path(file_name)?;
+        fs::read_to_string(&backup_path)
+            .with_context(|| format!("读取备份失败: {}", backup_path.display()))
+    }
+
+    /// 恢复指定备份。恢复前会自动备份当前状态。
+    pub fn restore_backup(&mut self, file_name: &str) -> Result<RestoreBackupResult> {
+        let backup_path = self.safe_backup_path(file_name)?;
+        let content = fs::read_to_string(&backup_path)
+            .with_context(|| format!("读取备份失败: {}", backup_path.display()))?;
+        let restored_store: MemoryStore = serde_json::from_str(&content)
+            .with_context(|| format!("备份文件格式无效: {}", backup_path.display()))?;
+
+        let safety_backup = self.create_backup("restore")?;
+        self.store = restored_store;
+        self.save_store()?;
+
+        Ok(RestoreBackupResult {
+            restored_file: file_name.to_string(),
+            safety_backup_file: Some(safety_backup.file_name),
+            entry_count: self.store.entries.len(),
+        })
+    }
+
+    fn store_path(&self) -> PathBuf {
+        self.memory_dir.join(Self::STORE_FILE)
+    }
+
+    fn backup_dir(&self) -> PathBuf {
+        self.memory_dir.join(Self::BACKUP_DIR)
+    }
+
+    fn safe_backup_path(&self, file_name: &str) -> Result<PathBuf> {
+        if file_name.contains('/') || file_name.contains('\\') || file_name.contains("..") {
+            return Err(anyhow::anyhow!("备份文件名非法: {}", file_name));
+        }
+        let path = self.backup_dir().join(file_name);
+        if !path.exists() {
+            return Err(anyhow::anyhow!("备份不存在: {}", file_name));
+        }
+        Ok(path)
+    }
+
+    fn prune_backups(&self, max_count: usize) -> Result<()> {
+        let mut backups = self.list_backups()?;
+        if backups.len() <= max_count {
+            return Ok(());
+        }
+
+        backups.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+        let remove_count = backups.len() - max_count;
+        for backup in backups.into_iter().take(remove_count) {
+            let path = self.backup_dir().join(&backup.file_name);
+            if path.exists() {
+                fs::remove_file(&path)
+                    .with_context(|| format!("删除旧备份失败: {}", path.display()))?;
+                log_debug!("已清理旧记忆备份: {}", path.display());
+            }
+        }
+        Ok(())
+    }
+
+    fn backup_info_from_path(path: &Path) -> Result<BackupInfo> {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow::anyhow!("备份文件名无效: {}", path.display()))?
+            .to_string();
+        let metadata = fs::metadata(path)?;
+        let content = fs::read_to_string(path)?;
+        let entry_count = serde_json::from_str::<MemoryStore>(&content)
+            .map(|store| store.entries.len())
+            .unwrap_or(0);
+        let created_at = parse_backup_timestamp(&file_name)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| file_name.clone());
+
+        Ok(BackupInfo {
+            file_name,
+            created_at,
+            size_bytes: metadata.len(),
+            entry_count,
+        })
     }
 
     /// 获取记忆统计信息
@@ -575,6 +798,7 @@ pub struct MemoryStats {
 
 #[cfg(test)]
 mod tests {
+    use super::super::cleanup::CleanupApplyGroup;
     use super::*;
     use tempfile::TempDir;
 
@@ -586,16 +810,37 @@ mod tests {
         (dir, manager)
     }
 
+    fn make_entry(
+        id: &str,
+        content: &str,
+        category: MemoryCategory,
+        updated_offset: i64,
+    ) -> MemoryEntry {
+        let now = Utc::now() + chrono::Duration::seconds(updated_offset);
+        MemoryEntry {
+            id: id.to_string(),
+            content: content.to_string(),
+            content_normalized: TextSimilarity::normalize(content),
+            category,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
     #[test]
     fn test_upsert_added_then_duplicate() {
         let (_dir, mut m) = make_manager();
 
         // 首次新增
-        let r = m.upsert_memory("使用 KISS 原则", MemoryCategory::Rule).unwrap();
+        let r = m
+            .upsert_memory("使用 KISS 原则", MemoryCategory::Rule)
+            .unwrap();
         assert!(matches!(r, AddOutcome::Added(_)), "首次应新增: {:?}", r);
 
         // 近乎相同（仅去空格）→ 应判为重复
-        let r = m.upsert_memory("使用KISS原则", MemoryCategory::Rule).unwrap();
+        let r = m
+            .upsert_memory("使用KISS原则", MemoryCategory::Rule)
+            .unwrap();
         assert!(
             matches!(r, AddOutcome::Duplicate { .. }),
             "高相似应判重复: {:?}",
@@ -671,9 +916,7 @@ mod tests {
         // 内容相近但分类不同 → 不触发 upsert，应各自新增
         let text = "不要生成测试脚本，不要编译，不要运行";
         m.upsert_memory(text, MemoryCategory::Rule).unwrap();
-        let r = m
-            .upsert_memory(text, MemoryCategory::Context)
-            .unwrap();
+        let r = m.upsert_memory(text, MemoryCategory::Context).unwrap();
         // 注意：跨分类，但全局去重仍会先拦截高相似内容
         // 这里内容完全相同 → 会被全局去重判为重复（符合预期，避免跨类重复）
         assert!(
@@ -687,7 +930,8 @@ mod tests {
     fn test_upsert_unrelated_adds_new() {
         let (_dir, mut m) = make_manager();
 
-        m.upsert_memory("使用 KISS 原则", MemoryCategory::Rule).unwrap();
+        m.upsert_memory("使用 KISS 原则", MemoryCategory::Rule)
+            .unwrap();
         let r = m
             .upsert_memory("配置数据库连接池大小为 20", MemoryCategory::Rule)
             .unwrap();
@@ -697,5 +941,76 @@ mod tests {
             r
         );
         assert_eq!(m.get_all_memories().len(), 2);
+    }
+
+    #[test]
+    fn test_cleanup_apply_creates_backup_and_removes_selected() {
+        let (_dir, mut m) = make_manager();
+        m.store.entries = vec![
+            make_entry("a", "不要编译，用户自己编译", MemoryCategory::Rule, 0),
+            make_entry("b", "禁止编译，用户自己编译", MemoryCategory::Rule, 10),
+            make_entry("c", "配置数据库连接池大小", MemoryCategory::Rule, 0),
+        ];
+        m.save_store().unwrap();
+
+        let preview = m.preview_cleanup(CleanupPreviewRequest {
+            threshold: 0.55,
+            categories: vec!["规范".to_string()],
+            include_cross_category: false,
+        });
+        assert_eq!(preview.candidate_group_count, 1);
+        let group = &preview.groups[0];
+
+        let result = m
+            .apply_cleanup_plan(CleanupApplyRequest {
+                auto_backup: true,
+                groups: vec![CleanupApplyGroup {
+                    group_id: group.group_id.clone(),
+                    keep_id: group.recommended_keep_id.clone(),
+                    delete_ids: group.default_delete_ids.clone(),
+                }],
+            })
+            .unwrap();
+
+        assert_eq!(result.removed_count, 1);
+        assert!(result.backup_file.is_some());
+        assert_eq!(m.get_all_memories().len(), 2);
+        assert_eq!(m.list_backups().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_backup_retention_keeps_latest_ten() {
+        let (_dir, m) = make_manager();
+
+        for _ in 0..12 {
+            m.create_backup("retention").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        let backups = m.list_backups().unwrap();
+        assert_eq!(backups.len(), 10);
+    }
+
+    #[test]
+    fn test_restore_backup_creates_safety_backup() {
+        let (_dir, mut m) = make_manager();
+        m.store.entries = vec![make_entry("a", "使用 KISS 原则", MemoryCategory::Rule, 0)];
+        m.save_store().unwrap();
+        let backup = m.create_backup("before-change").unwrap();
+
+        m.store.entries.push(make_entry(
+            "b",
+            "配置数据库连接池大小",
+            MemoryCategory::Rule,
+            0,
+        ));
+        m.save_store().unwrap();
+
+        let result = m.restore_backup(&backup.file_name).unwrap();
+
+        assert_eq!(result.restored_file, backup.file_name);
+        assert!(result.safety_backup_file.is_some());
+        assert_eq!(result.entry_count, 1);
+        assert_eq!(m.get_all_memories().len(), 1);
     }
 }

@@ -263,7 +263,10 @@ pub async fn reset_mcp_tools_config(
 
 // ============ 记忆管理相关命令 ============
 
-use crate::mcp::tools::memory::{MemoryConfig, MemoryManager};
+use crate::mcp::tools::memory::{
+    BackupInfo, CleanupApplyRequest, CleanupApplyResult, CleanupPreviewRequest,
+    CleanupPreviewResult, MemoryConfig, MemoryManager, RestoreBackupResult,
+};
 
 /// 记忆条目 DTO（用于前端展示）
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -374,12 +377,18 @@ pub async fn save_memory_config(
     let mut manager =
         MemoryManager::new(&project_path).map_err(|e| format!("创建记忆管理器失败: {}", e))?;
 
+    let similarity_threshold = config.similarity_threshold.clamp(0.5, 0.95);
+    let upsert_threshold = config.upsert_threshold.clamp(0.4, 0.9);
+    if upsert_threshold >= similarity_threshold {
+        return Err("同类更新阈值必须小于相似度阈值".to_string());
+    }
+
     let new_config = MemoryConfig {
-        similarity_threshold: config.similarity_threshold.clamp(0.5, 0.95),
+        similarity_threshold,
         dedup_on_startup: config.dedup_on_startup,
         enable_dedup: config.enable_dedup,
         // upsert 阈值：限制在 [0.4, 0.9]，且必须严格小于去重阈值才有意义
-        upsert_threshold: config.upsert_threshold.clamp(0.4, 0.9),
+        upsert_threshold,
     };
 
     manager
@@ -451,4 +460,69 @@ pub async fn delete_memory(project_path: String, memory_id: String) -> Result<St
         Ok(None) => Err(format!("未找到指定 ID 的记忆: {}", memory_id)),
         Err(e) => Err(format!("删除记忆失败: {}", e)),
     }
+}
+
+/// 预览历史记忆清理候选组，不修改任何文件
+#[tauri::command]
+pub async fn preview_memory_cleanup(
+    project_path: String,
+    request: CleanupPreviewRequest,
+) -> Result<CleanupPreviewResult, String> {
+    let manager =
+        MemoryManager::new(&project_path).map_err(|e| format!("创建记忆管理器失败: {}", e))?;
+
+    Ok(manager.preview_cleanup(request))
+}
+
+/// 应用用户确认后的历史记忆清理计划
+#[tauri::command]
+pub async fn apply_memory_cleanup(
+    project_path: String,
+    request: CleanupApplyRequest,
+) -> Result<CleanupApplyResult, String> {
+    let mut manager =
+        MemoryManager::new(&project_path).map_err(|e| format!("创建记忆管理器失败: {}", e))?;
+
+    manager
+        .apply_cleanup_plan(request)
+        .map_err(|e| format!("应用清理失败: {}", e))
+}
+
+/// 列出记忆自动备份
+#[tauri::command]
+pub async fn list_memory_backups(project_path: String) -> Result<Vec<BackupInfo>, String> {
+    let manager =
+        MemoryManager::new(&project_path).map_err(|e| format!("创建记忆管理器失败: {}", e))?;
+
+    manager
+        .list_backups()
+        .map_err(|e| format!("读取备份列表失败: {}", e))
+}
+
+/// 恢复指定记忆备份
+#[tauri::command]
+pub async fn restore_memory_backup(
+    project_path: String,
+    file_name: String,
+) -> Result<RestoreBackupResult, String> {
+    let mut manager =
+        MemoryManager::new(&project_path).map_err(|e| format!("创建记忆管理器失败: {}", e))?;
+
+    manager
+        .restore_backup(&file_name)
+        .map_err(|e| format!("恢复备份失败: {}", e))
+}
+
+/// 导出指定记忆备份内容
+#[tauri::command]
+pub async fn export_memory_backup(
+    project_path: String,
+    file_name: String,
+) -> Result<String, String> {
+    let manager =
+        MemoryManager::new(&project_path).map_err(|e| format!("创建记忆管理器失败: {}", e))?;
+
+    manager
+        .export_backup(&file_name)
+        .map_err(|e| format!("导出备份失败: {}", e))
 }

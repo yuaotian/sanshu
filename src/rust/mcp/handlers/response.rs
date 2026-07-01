@@ -322,7 +322,12 @@ fn format_context_block_section(title: &str, blocks: &[&ResponseContextBlock]) -
             .normalized_memory_category()
             .map(|category| format!(" category={}", category))
             .unwrap_or_default();
-        lines.push(format!("- [{}{}] {}", &block.scope, category, block.content.trim()));
+        lines.push(format!(
+            "- [{}{}] {}",
+            &block.scope,
+            category,
+            block.content.trim()
+        ));
     }
     lines.join("\n")
 }

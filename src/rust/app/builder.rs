@@ -181,7 +181,12 @@ pub fn build_tauri_app() -> Builder<tauri::Wry> {
             save_memory_config,
             deduplicate_memories,
             preview_similarity,
-            delete_memory
+            delete_memory,
+            preview_memory_cleanup,
+            apply_memory_cleanup,
+            list_memory_backups,
+            restore_memory_backup,
+            export_memory_backup
         ])
         .setup(|app| {
             let app_handle = app.handle().clone();

@@ -7,6 +7,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { useMessage } from 'naive-ui'
 import { computed, onMounted, ref, watch } from 'vue'
 import ConfigSection from '../common/ConfigSection.vue'
+import MemoryCleanupPanel from './MemoryCleanupPanel.vue'
 
 // Props
 const props = defineProps<{
@@ -159,6 +160,10 @@ async function loadMemories() {
 async function saveConfig() {
   if (!projectPath.value)
     return
+  if (config.value.upsert_threshold >= config.value.similarity_threshold) {
+    message.error('同类更新阈值必须小于相似度阈值')
+    return
+  }
   configSaving.value = true
   try {
     await invoke('save_memory_config', {
@@ -235,6 +240,10 @@ async function deleteMemory(id: string) {
   finally {
     deleteLoading.value = false
   }
+}
+
+async function handleCleanupChanged() {
+  await Promise.all([loadConfig(), loadMemories()])
 }
 
 function formatDate(isoString: string): string {
@@ -452,6 +461,19 @@ onMounted(async () => {
                 </ConfigSection>
               </n-collapse-transition>
             </n-space>
+          </n-scrollbar>
+        </n-tab-pane>
+
+        <!-- 历史清理 Tab -->
+        <n-tab-pane name="cleanup" tab="历史清理">
+          <n-scrollbar class="tab-scrollbar">
+            <div class="tab-content">
+              <MemoryCleanupPanel
+                :project-path="projectPath"
+                :upsert-threshold="config.upsert_threshold"
+                @changed="handleCleanupChanged"
+              />
+            </div>
           </n-scrollbar>
         </n-tab-pane>
 

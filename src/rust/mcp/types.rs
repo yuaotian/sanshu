@@ -1,6 +1,8 @@
 use chrono;
 use serde::{Deserialize, Serialize};
 
+use crate::mcp::tools::memory::CleanupApplyRequest;
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ZhiRequest {
     #[schemars(description = "审阅内容或方案摘要")]
@@ -34,6 +36,8 @@ fn default_render_markdown() -> bool {
 pub struct MemoryConfigRequest {
     #[schemars(description = "相似度阈值 (0.5~0.95)，超过此值视为重复")]
     pub similarity_threshold: Option<f64>,
+    #[schemars(description = "同类更新阈值 (0.4~0.9)，必须小于相似度阈值")]
+    pub upsert_threshold: Option<f64>,
     #[schemars(description = "启动时自动去重")]
     pub dedup_on_startup: Option<bool>,
     #[schemars(description = "启用去重检测")]
@@ -62,6 +66,21 @@ pub struct JiyiRequest {
     #[schemars(description = "记忆ID（删除操作时必需）")]
     #[serde(default)]
     pub memory_id: Option<String>,
+    #[schemars(description = "清理阈值（预览整理时可选，默认使用同类更新阈值）")]
+    #[serde(default)]
+    pub threshold: Option<f64>,
+    #[schemars(description = "清理分类过滤（预览整理时可选）")]
+    #[serde(default)]
+    pub categories: Vec<String>,
+    #[schemars(description = "是否允许跨分类清理（默认 false）")]
+    #[serde(default)]
+    pub include_cross_category: bool,
+    #[schemars(description = "应用整理计划（应用整理时必需）")]
+    #[serde(default)]
+    pub cleanup_plan: Option<CleanupApplyRequest>,
+    #[schemars(description = "备份文件名（恢复备份/导出备份时必需）")]
+    #[serde(default)]
+    pub backup_file: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]

@@ -228,7 +228,7 @@ mod tests {
 
         // 分别在「去重阈值 0.70」与「upsert 阈值 0.55」下测量清理效果
         let (dedup70, stats70) = MemoryDeduplicator::new(0.70).deduplicate(entries.clone());
-        let (_dedup55, stats55) = MemoryDeduplicator::new(0.55).deduplicate(entries);
+        let (dedup55, stats55) = MemoryDeduplicator::new(0.55).deduplicate(entries);
 
         println!(
             "[真实清理效果] 原始 {} 条\n  · 去重阈值 0.70 → 保留 {} / 移除 {}\n  · upsert 阈值 0.55 → 保留 {} / 移除 {}",
@@ -245,13 +245,15 @@ mod tests {
             dedup70.iter().any(|e| e.id == "d1"),
             "真正不同的开发规范不应被误删"
         );
+        assert!(
+            dedup55.iter().any(|e| e.id == "d1"),
+            "upsert 阈值下真正不同的开发规范也不应被误删"
+        );
         // 2) 0.55（方案 B 的 upsert 区间）能比 0.70（纯去重）合并更多近义改写，
         //    体现「B 从源头抑制堆积」的价值——这正是 0.70 抓不到的那一档。
-        assert!(
-            stats55.removed_count >= stats70.removed_count,
-            "更低的 upsert 阈值应合并不少于去重阈值的条目数 (0.55={}, 0.70={})",
-            stats55.removed_count,
-            stats70.removed_count
-        );
+        assert_eq!(stats70.remaining_count, 8, "0.70 应保留全部 8 条");
+        assert_eq!(stats70.removed_count, 0, "0.70 不应移除近义大改写");
+        assert_eq!(stats55.remaining_count, 4, "0.55 应保留 4 条");
+        assert_eq!(stats55.removed_count, 4, "0.55 应移除 4 条近义堆积");
     }
 }

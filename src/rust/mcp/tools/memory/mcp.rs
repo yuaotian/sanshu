@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rmcp::model::{CallToolResult, Content, ErrorData as McpError};
 
-use super::{MemoryCategory, MemoryManager};
+use super::{CleanupPreviewRequest, MemoryCategory, MemoryManager};
 use crate::mcp::{
     utils::{project_path_error, validate_project_path},
     JiyiRequest,
@@ -127,11 +127,14 @@ impl MemoryTool {
                     }) => {
                         // 被去重静默拒绝
                         log_debug!("[ji] 记忆被去重拒绝: 相似度 {:.1}%", similarity * 100.0);
+                        let matched_line = matched_content
+                            .map(|content| format!("\n📝 已有: {}", content))
+                            .unwrap_or_default();
                         format!(
-                            "⚠️ 记忆已存在相似内容（相似度 {:.1}%），未重复添加\n📝 内容: {}\n📝 已有: {}\n📂 分类: {}{}{}",
+                            "⚠️ 记忆已存在相似内容（相似度 {:.1}%），未重复添加\n📝 内容: {}{}\n📂 分类: {}{}{}",
                             similarity * 100.0,
                             request.content,
-                            matched_content.unwrap_or_default(),
+                            matched_line,
                             category.display_name(),
                             index_hint,
                             non_git_hint
@@ -185,6 +188,72 @@ impl MemoryTool {
                         ));
                     }
                 }
+            }
+            "预览整理" => {
+                log_debug!("[ji] 执行历史清理预览");
+                let threshold = request
+                    .threshold
+                    .unwrap_or(manager.config().upsert_threshold)
+                    .clamp(0.0, 1.0);
+                let preview = manager.preview_cleanup(CleanupPreviewRequest {
+                    threshold,
+                    categories: request.categories.clone(),
+                    include_cross_category: request.include_cross_category,
+                });
+                format!(
+                    "🔎 历史清理预览\n{}",
+                    serde_json::to_string_pretty(&preview).unwrap_or_default()
+                )
+            }
+            "应用整理" => {
+                let mut plan = request.cleanup_plan.ok_or_else(|| {
+                    log_important!(warn, "[ji] 应用整理失败: 缺少 cleanup_plan");
+                    McpError::invalid_params("缺少 cleanup_plan".to_string(), None)
+                })?;
+                plan.auto_backup = true;
+                let result = manager.apply_cleanup_plan(plan).map_err(|e| {
+                    log_important!(error, "[ji] 应用整理失败: {}", e);
+                    McpError::internal_error(format!("应用整理失败: {}", e), None)
+                })?;
+                format!(
+                    "✅ 历史清理已应用\n{}",
+                    serde_json::to_string_pretty(&result).unwrap_or_default()
+                )
+            }
+            "备份列表" => {
+                let backups = manager.list_backups().map_err(|e| {
+                    log_important!(error, "[ji] 读取备份列表失败: {}", e);
+                    McpError::internal_error(format!("读取备份列表失败: {}", e), None)
+                })?;
+                format!(
+                    "📦 记忆备份列表\n{}",
+                    serde_json::to_string_pretty(&backups).unwrap_or_default()
+                )
+            }
+            "恢复备份" => {
+                let backup_file = request.backup_file.as_deref().ok_or_else(|| {
+                    log_important!(warn, "[ji] 恢复备份失败: 缺少 backup_file");
+                    McpError::invalid_params("缺少 backup_file".to_string(), None)
+                })?;
+                let result = manager.restore_backup(backup_file).map_err(|e| {
+                    log_important!(error, "[ji] 恢复备份失败: {}", e);
+                    McpError::internal_error(format!("恢复备份失败: {}", e), None)
+                })?;
+                format!(
+                    "↩️ 记忆备份已恢复\n{}",
+                    serde_json::to_string_pretty(&result).unwrap_or_default()
+                )
+            }
+            "导出备份" => {
+                let backup_file = request.backup_file.as_deref().ok_or_else(|| {
+                    log_important!(warn, "[ji] 导出备份失败: 缺少 backup_file");
+                    McpError::invalid_params("缺少 backup_file".to_string(), None)
+                })?;
+                let content = manager.export_backup(backup_file).map_err(|e| {
+                    log_important!(error, "[ji] 导出备份失败: {}", e);
+                    McpError::internal_error(format!("导出备份失败: {}", e), None)
+                })?;
+                format!("📤 记忆备份内容: {}\n{}", backup_file, content)
             }
             // === 新增: 列表 (获取全部记忆) ===
             "列表" => {
@@ -276,11 +345,20 @@ impl MemoryTool {
                         // 验证阈值范围
                         new_config.similarity_threshold = threshold.clamp(0.5, 0.95);
                     }
+                    if let Some(upsert_threshold) = config_req.upsert_threshold {
+                        new_config.upsert_threshold = upsert_threshold.clamp(0.4, 0.9);
+                    }
                     if let Some(dedup_on_startup) = config_req.dedup_on_startup {
                         new_config.dedup_on_startup = dedup_on_startup;
                     }
                     if let Some(enable_dedup) = config_req.enable_dedup {
                         new_config.enable_dedup = enable_dedup;
+                    }
+                    if new_config.upsert_threshold >= new_config.similarity_threshold {
+                        return Err(McpError::invalid_params(
+                            "同类更新阈值必须小于相似度阈值".to_string(),
+                            None,
+                        ));
                     }
 
                     manager.update_config(new_config.clone()).map_err(|e| {
@@ -290,8 +368,9 @@ impl MemoryTool {
 
                     log_important!(
                         info,
-                        "[ji] 配置更新成功: threshold={}, dedup_on_startup={}, enable_dedup={}",
+                        "[ji] 配置更新成功: threshold={}, upsert_threshold={}, dedup_on_startup={}, enable_dedup={}",
                         new_config.similarity_threshold,
+                        new_config.upsert_threshold,
                         new_config.dedup_on_startup,
                         new_config.enable_dedup
                     );
@@ -301,6 +380,7 @@ impl MemoryTool {
                         "message": "配置已更新",
                         "config": {
                             "similarity_threshold": new_config.similarity_threshold,
+                            "upsert_threshold": new_config.upsert_threshold,
                             "dedup_on_startup": new_config.dedup_on_startup,
                             "enable_dedup": new_config.enable_dedup
                         }
@@ -315,6 +395,7 @@ impl MemoryTool {
                     let config = manager.config();
                     let json_result = serde_json::json!({
                         "similarity_threshold": config.similarity_threshold,
+                        "upsert_threshold": config.upsert_threshold,
                         "dedup_on_startup": config.dedup_on_startup,
                         "enable_dedup": config.enable_dedup
                     });
@@ -358,7 +439,7 @@ impl MemoryTool {
             _ => {
                 log_important!(warn, "[ji] 未知操作类型: {}", request.action);
                 return Err(McpError::invalid_params(
-                    format!("未知的操作类型: {}。支持的操作: 记忆 | 回忆 | 整理 | 列表 | 预览相似 | 配置 | 删除", request.action),
+                    format!("未知的操作类型: {}。支持的操作: 记忆 | 回忆 | 整理 | 预览整理 | 应用整理 | 备份列表 | 恢复备份 | 导出备份 | 列表 | 预览相似 | 配置 | 删除", request.action),
                     None
                 ));
             }

@@ -10,6 +10,7 @@
 //! - `manager` - 核心管理器
 //! - `mcp` - MCP 接口
 
+pub mod cleanup;
 pub mod dedup;
 pub mod manager;
 pub mod mcp;
@@ -18,6 +19,10 @@ pub mod similarity;
 pub mod types;
 
 // 重新导出主要类型和功能
+pub use cleanup::{
+    BackupInfo, CleanupApplyGroup, CleanupApplyRequest, CleanupApplyResult, CleanupGroup,
+    CleanupGroupEntry, CleanupPreviewRequest, CleanupPreviewResult, RestoreBackupResult,
+};
 pub use dedup::{DedupResult, DuplicateInfo, MemoryDeduplicator};
 pub use manager::{AddOutcome, MemoryManager};
 pub use mcp::MemoryTool;

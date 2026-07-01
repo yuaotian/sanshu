@@ -233,7 +233,7 @@ impl ServerHandler for ZhiServer {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "description": "操作类型：记忆(添加) | 回忆(查询) | 整理(去重) | 列表(全部记忆) | 预览相似(检测相似度) | 配置(获取/更新) | 删除(移除记忆)"
+                        "description": "操作类型：记忆(添加) | 回忆(查询) | 整理(去重) | 预览整理(候选预览) | 应用整理(按计划清理) | 备份列表 | 恢复备份 | 导出备份 | 列表(全部记忆) | 预览相似(检测相似度) | 配置(获取/更新) | 删除(移除记忆)"
                     },
                     "project_path": {
                         "type": "string",
@@ -255,6 +255,10 @@ impl ServerHandler for ZhiServer {
                                 "type": "number",
                                 "description": "相似度阈值 (0.5~0.95)，超过此值视为重复"
                             },
+                            "upsert_threshold": {
+                                "type": "number",
+                                "description": "同类更新阈值 (0.4~0.9)，必须小于相似度阈值"
+                            },
                             "dedup_on_startup": {
                                 "type": "boolean",
                                 "description": "启动时自动去重"
@@ -268,6 +272,27 @@ impl ServerHandler for ZhiServer {
                     "memory_id": {
                         "type": "string",
                         "description": "记忆ID（删除操作时必需）"
+                    },
+                    "threshold": {
+                        "type": "number",
+                        "description": "清理阈值（预览整理时可选，默认使用同类更新阈值）"
+                    },
+                    "categories": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "清理分类过滤（预览整理时可选）"
+                    },
+                    "include_cross_category": {
+                        "type": "boolean",
+                        "description": "是否允许跨分类清理（默认 false）"
+                    },
+                    "cleanup_plan": {
+                        "type": "object",
+                        "description": "应用整理计划（应用整理时必需）"
+                    },
+                    "backup_file": {
+                        "type": "string",
+                        "description": "备份文件名（恢复备份/导出备份时必需）"
                     }
                 },
                 "required": ["action", "project_path"]
