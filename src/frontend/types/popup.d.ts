@@ -26,6 +26,7 @@ export interface CustomPrompt {
   template_true?: string // 开关为true时的模板
   template_false?: string // 开关为false时的模板
   current_state?: boolean // 当前开关状态
+  context_scope?: ContextScope // 条件上下文作用域：本轮、长期记忆、项目规则
   // MCP 工具联动字段
   linked_mcp_tool?: string // 关联的 MCP 工具 ID（仅对 conditional 类型有效）
 }
@@ -69,10 +70,26 @@ export interface ShortcutKey {
 }
 
 // 新的结构化响应格式
+export type ContextScope = 'turn' | 'memory' | 'rule'
+export type MemoryPolicy = 'never' | 'save'
+export type MemoryCategory = 'rule' | 'preference' | 'pattern' | 'context'
+
+export interface ResponseContextBlock {
+  kind: 'conditional_prompt'
+  scope: ContextScope
+  memory_policy: MemoryPolicy
+  memory_category?: MemoryCategory | null
+  content: string
+  source_id?: string | null
+  source_name?: string | null
+}
+
 export interface McpResponse {
   user_input: string | null
   selected_options: string[]
   images: ImageAttachment[]
+  context_blocks: ResponseContextBlock[]
+  memory_intent: 'none' | 'save_requested'
   metadata: ResponseMetadata
 }
 

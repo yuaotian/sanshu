@@ -146,12 +146,72 @@ pub struct PopupRequest {
 }
 
 /// 新的结构化响应数据格式
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct McpResponse {
     pub user_input: Option<String>,
+    #[serde(default)]
     pub selected_options: Vec<String>,
+    #[serde(default)]
     pub images: Vec<ImageAttachment>,
+    #[serde(default)]
+    pub context_blocks: Vec<ResponseContextBlock>,
+    #[serde(default = "default_memory_intent")]
+    pub memory_intent: String,
     pub metadata: ResponseMetadata,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResponseContextBlock {
+    #[serde(default = "default_context_block_kind")]
+    pub kind: String,
+    #[serde(default = "default_context_block_scope")]
+    pub scope: String,
+    #[serde(default = "default_memory_policy")]
+    pub memory_policy: String,
+    #[serde(default)]
+    pub memory_category: Option<String>,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub source_id: Option<String>,
+    #[serde(default)]
+    pub source_name: Option<String>,
+}
+
+fn default_context_block_kind() -> String {
+    "conditional_prompt".to_string()
+}
+
+fn default_context_block_scope() -> String {
+    "turn".to_string()
+}
+
+fn default_memory_policy() -> String {
+    "never".to_string()
+}
+
+fn default_memory_intent() -> String {
+    "none".to_string()
+}
+
+impl ResponseContextBlock {
+    pub fn normalized_memory_policy(&self) -> &str {
+        if self.memory_policy == "save" {
+            "save"
+        } else {
+            "never"
+        }
+    }
+
+    pub fn normalized_memory_category(&self) -> Option<&str> {
+        match self.memory_category.as_deref() {
+            Some("rule") => Some("rule"),
+            Some("preference") => Some("preference"),
+            Some("pattern") => Some("pattern"),
+            Some("context") => Some("context"),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -161,7 +221,7 @@ pub struct ImageAttachment {
     pub filename: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ResponseMetadata {
     pub timestamp: Option<String>,
     pub request_id: Option<String>,
@@ -199,6 +259,8 @@ pub fn build_mcp_response(
         "user_input": user_input,
         "selected_options": selected_options,
         "images": images,
+        "context_blocks": [],
+        "memory_intent": "none",
         "metadata": {
             "timestamp": chrono::Utc::now().to_rfc3339(),
             "request_id": request_id,

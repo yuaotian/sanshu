@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { McpRequest } from '../../types/popup'
+import type { McpRequest, ResponseContextBlock } from '../../types/popup'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useDialog, useMessage } from 'naive-ui'
@@ -59,6 +59,7 @@ interface PopupInputUpdatePayload {
   userInput: string
   rawUserInput: string
   conditionalContext: string
+  contextBlocks: ResponseContextBlock[]
   selectedOptions: string[]
   draggedImages: string[]
 }
@@ -107,6 +108,7 @@ const selectedOptions = ref<string[]>([])
 const userInput = ref('')
 const rawUserInput = ref('')
 const conditionalContext = ref('')
+const contextBlocks = ref<ResponseContextBlock[]>([])
 const draggedImages = ref<string[]>([])
 const inputRef = ref()
 
@@ -286,6 +288,7 @@ function resetForm() {
   userInput.value = ''
   rawUserInput.value = ''
   conditionalContext.value = ''
+  contextBlocks.value = []
   draggedImages.value = []
   submitting.value = false
 }
@@ -293,9 +296,14 @@ function resetForm() {
 // 构建用户回复摘要（不包含图片原始数据）
 function buildUserReplySummary() {
   const parts: string[] = []
-  const inputText = userInput.value.trim()
+  const inputText = rawUserInput.value.trim()
   if (inputText) {
     parts.push(`用户输入: ${inputText}`)
+  }
+  if (contextBlocks.value.length > 0) {
+    const saveCount = contextBlocks.value.filter(block => block.memory_policy === 'save').length
+    const transientCount = contextBlocks.value.length - saveCount
+    parts.push(`结构化上下文: 临时 ${transientCount} 条，可写记忆 ${saveCount} 条`)
   }
   if (selectedOptions.value.length > 0) {
     parts.push(`选项: ${selectedOptions.value.join(', ')}`)
@@ -307,6 +315,13 @@ function buildUserReplySummary() {
     parts.push('用户输入: 用户确认继续')
   }
   return parts.join('\n')
+}
+
+function buildMemoryIntent(blocks: ResponseContextBlock[], inputText: string): 'none' | 'save_requested' {
+  // 中文注释：只有原始输入明确“请记住”或 UI 作用域选择为可保存时，才声明记忆意图。
+  if (/^\s*请记住/u.test(inputText))
+    return 'save_requested'
+  return blocks.some(block => block.memory_policy === 'save') ? 'save_requested' : 'none'
 }
 
 // 记录 zhi 历史（不影响主流程）
@@ -342,13 +357,15 @@ async function handleSubmit() {
   try {
     // 使用新的结构化数据格式
     const response = {
-      user_input: userInput.value.trim() || null,
+      user_input: rawUserInput.value.trim() || null,
       selected_options: selectedOptions.value,
       images: draggedImages.value.map(imageData => ({
         data: imageData.split(',')[1], // 移除 data:image/png;base64, 前缀
         media_type: 'image/png',
         filename: null,
       })),
+      context_blocks: contextBlocks.value,
+      memory_intent: buildMemoryIntent(contextBlocks.value, rawUserInput.value),
       metadata: {
         timestamp: new Date().toISOString(),
         request_id: props.request?.id || null,
@@ -392,6 +409,7 @@ function handleInputUpdate(data: PopupInputUpdatePayload) {
   userInput.value = data.userInput
   rawUserInput.value = data.rawUserInput
   conditionalContext.value = data.conditionalContext
+  contextBlocks.value = data.contextBlocks
   selectedOptions.value = data.selectedOptions
   draggedImages.value = data.draggedImages
 }
@@ -419,6 +437,8 @@ async function handleContinue() {
       user_input: continuePrompt.value,
       selected_options: [],
       images: [],
+      context_blocks: [],
+      memory_intent: 'none',
       metadata: {
         timestamp: new Date().toISOString(),
         request_id: props.request?.id || null,
@@ -474,6 +494,8 @@ async function handleEnhance() {
       user_input: buildLocalEnhancePrompt(rawInput),
       selected_options: [],
       images: [],
+      context_blocks: [],
+      memory_intent: 'none',
       metadata: {
         timestamp: new Date().toISOString(),
         request_id: props.request?.id || null,

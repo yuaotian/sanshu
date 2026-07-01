@@ -92,7 +92,7 @@ export const CORE_RULES = `
 2. **强制交互**：所有方案确认与任务收尾必须通过 \`三术\` / \`zhi\` 工具展示；未得到完成指令前禁止主动结束对话
 3. **证据优先**：任何分析必须基于真实搜索/读取到的代码；先用 \`sou\` 语义定位，再用 Read/Grep 确认实现，严禁臆测
 4. **知识权威**：需要框架/库的最新文档时优先用 \`context7\`，避免训练数据过时
-5. **持久化记忆**：对话开始时调用 \`ji\` 加载项目记忆；用户说"请记住"时主动存储为合适分类
+5. **持久化记忆**：对话开始时调用 \`ji\` 加载项目记忆；只有用户原始输入明确说"请记住"，或 \`zhi\` 返回的 \`structured_content.context_blocks\` 标记 \`memory_policy=save\` 时，才允许总结后存储为合适分类；\`memory_policy=never\` 的本轮上下文禁止写入记忆
 6. **输出规范**：注释/日志默认中文；修改点必须有中文注释解释意图（why）；引用代码给出 \`文件路径:行号\`
 
 ---
@@ -139,7 +139,8 @@ export const MCP_TOOLS_CONFIG: ToolPromptConfig[] = [
       base: '',
       whenToUse: [
         '对话开始：加载 `project_path`（git 根目录）下的记忆',
-        '用户说「请记住」：总结后存储为合适分类',
+        '用户原始输入说「请记住」：总结后存储为合适分类',
+        '`zhi.structured_content.context_blocks` 中 `memory_policy=save`：按返回的 category 存储；`memory_policy=never` 不得存储',
       ],
       howToUse: [],
     },

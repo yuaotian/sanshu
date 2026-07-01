@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import type { CustomPrompt, CustomPromptConfig } from '../../types/popup'
+import type { ContextScope, CustomPrompt, CustomPromptConfig } from '../../types/popup'
 import { invoke } from '@tauri-apps/api/core'
 import { emit } from '@tauri-apps/api/event'
 import { useMessage } from 'naive-ui'
 import { onMounted, ref } from 'vue'
+import { getContextScopeLabel, normalizeContextScope } from '../../utils/conditionalContext'
 
 const message = useMessage()
 
@@ -32,7 +33,14 @@ const newPrompt = ref({
   template_true: '',
   template_false: '',
   current_state: false,
+  context_scope: 'turn' as ContextScope,
 })
+
+const contextScopeOptions: { label: string, value: ContextScope }[] = [
+  { label: '本轮上下文', value: 'turn' },
+  { label: '长期记忆', value: 'memory' },
+  { label: '项目规则', value: 'rule' },
+]
 
 // 加载配置
 async function loadConfig() {
@@ -103,6 +111,7 @@ async function addPrompt() {
       template_true: newPrompt.value.type === 'conditional' ? newPrompt.value.template_true.trim() || undefined : undefined,
       template_false: newPrompt.value.type === 'conditional' ? newPrompt.value.template_false.trim() || undefined : undefined,
       current_state: newPrompt.value.type === 'conditional' ? newPrompt.value.current_state : undefined,
+      context_scope: newPrompt.value.type === 'conditional' ? normalizeContextScope(newPrompt.value.context_scope) : 'turn',
     }
 
     await invoke('add_custom_prompt', { prompt })
@@ -121,6 +130,7 @@ async function addPrompt() {
       template_true: '',
       template_false: '',
       current_state: false,
+      context_scope: 'turn',
     }
     showAddDialog.value = false
     message.success('添加成功')
@@ -133,7 +143,7 @@ async function addPrompt() {
 
 // 编辑prompt
 function editPrompt(prompt: CustomPrompt) {
-  editingPrompt.value = { ...prompt }
+  editingPrompt.value = { ...prompt, context_scope: normalizeContextScope(prompt.context_scope) }
   showEditDialog.value = true
 }
 
@@ -155,6 +165,9 @@ async function updatePrompt() {
   }
 
   try {
+    if (editingPrompt.value.type === 'conditional') {
+      editingPrompt.value.context_scope = normalizeContextScope(editingPrompt.value.context_scope)
+    }
     editingPrompt.value.updated_at = new Date().toISOString()
     await invoke('update_custom_prompt', { prompt: editingPrompt.value })
 
@@ -309,6 +322,9 @@ onMounted(() => {
                       <div class="text-gray-700 dark:text-white">
                         当前状态：{{ prompt.current_state ? '开启' : '关闭' }}
                       </div>
+                      <div class="text-gray-700 dark:text-white">
+                        作用域：{{ getContextScopeLabel(prompt.context_scope) }}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -394,6 +410,17 @@ onMounted(() => {
               </template>
             </n-switch>
           </n-form-item>
+          <n-form-item label="作用域">
+            <n-radio-group v-model:value="newPrompt.context_scope">
+              <n-radio
+                v-for="option in contextScopeOptions"
+                :key="option.value"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </n-radio>
+            </n-radio-group>
+          </n-form-item>
         </template>
       </n-form>
       <template #footer>
@@ -470,6 +497,17 @@ onMounted(() => {
                 关闭
               </template>
             </n-switch>
+          </n-form-item>
+          <n-form-item label="作用域">
+            <n-radio-group v-model:value="editingPrompt.context_scope">
+              <n-radio
+                v-for="option in contextScopeOptions"
+                :key="option.value"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </n-radio>
+            </n-radio-group>
           </n-form-item>
         </template>
       </n-form>

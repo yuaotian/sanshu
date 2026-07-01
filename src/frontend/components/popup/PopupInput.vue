@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import type { CustomPrompt, McpRequest } from '../../types/popup'
+import type { ContextScope, CustomPrompt, McpRequest, ResponseContextBlock } from '../../types/popup'
 import { invoke } from '@tauri-apps/api/core'
-import { listen } from '@tauri-apps/api/event'
+import { emit as emitTauri, listen } from '@tauri-apps/api/event'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { useIntersectionObserver, useStorage } from '@vueuse/core'
 import { useSortable } from '@vueuse/integrations/useSortable'
@@ -9,7 +9,7 @@ import { useMessage } from 'naive-ui'
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useKeyboard } from '../../composables/useKeyboard'
 import { useMcpToolsReactive } from '../../composables/useMcpTools'
-import { buildConditionalContext } from '../../utils/conditionalContext'
+import { buildConditionalContext, buildConditionalContextBlocks, getContextScopeLabel, normalizeContextScope } from '../../utils/conditionalContext'
 
 interface Props {
   request: McpRequest | null
@@ -23,6 +23,7 @@ interface Emits {
     userInput: string
     rawUserInput: string
     conditionalContext: string
+    contextBlocks: ResponseContextBlock[]
     selectedOptions: string[]
     draggedImages: string[]
   }]
@@ -61,6 +62,10 @@ const normalPrompts = computed(() =>
 
 const conditionalPrompts = computed(() =>
   customPrompts.value.filter(prompt => prompt.type === 'conditional'),
+)
+
+const activeConditionalPrompts = computed(() =>
+  conditionalPrompts.value.filter(prompt => isMcpToolEnabled(prompt.linked_mcp_tool)),
 )
 
 // MCP 工具状态管理
@@ -178,6 +183,12 @@ const COLLAPSE_THRESHOLD = 6 // 条件性 prompt ≥ 此值时默认折叠
 const isContextCollapsed = useStorage('popup-context-collapsed', false) // 折叠/展开状态
 const showContextDescription = useStorage('popup-context-show-desc', true) // 是否显示描述
 
+const contextScopeOptions: { label: string, value: ContextScope }[] = [
+  { label: '本轮', value: 'turn' },
+  { label: '记忆', value: 'memory' },
+  { label: '规则', value: 'rule' },
+]
+
 // 已开启的条件性 prompt 数量（用于折叠时的统计摘要）
 const enabledConditionalCount = computed(() =>
   conditionalPrompts.value.filter(p => p.current_state && isMcpToolEnabled(p.linked_mcp_tool)).length,
@@ -240,16 +251,15 @@ function toggleFloating() {
 
 // 发送更新事件
 function emitUpdate() {
-  // 获取条件性prompt的追加内容
-  const conditionalContent = generateConditionalContent()
-
-  // 将条件性内容追加到用户输入
-  const finalUserInput = userInput.value + conditionalContent
+  // 中文注释：条件上下文通过结构化字段传递，避免污染 user_input 并误触发 ji 记忆。
+  const contextBlocks = generateConditionalContextBlocks()
+  const conditionalContent = formatConditionalContextForDisplay(contextBlocks)
 
   emit('update', {
-    userInput: finalUserInput,
+    userInput: userInput.value,
     rawUserInput: userInput.value,
     conditionalContext: conditionalContent,
+    contextBlocks,
     selectedOptions: selectedOptions.value,
     draggedImages: uploadedImages.value,
   })
@@ -501,11 +511,50 @@ async function handleConditionalToggle(promptId: string, value: boolean) {
   }
 }
 
+// 处理条件性 prompt 作用域变化
+async function handleConditionalScopeChange(promptId: string, value: ContextScope) {
+  const prompt = customPrompts.value.find(p => p.id === promptId)
+  if (!prompt)
+    return
+
+  const previousScope = normalizeContextScope(prompt.context_scope)
+  prompt.context_scope = normalizeContextScope(value)
+  emitUpdate()
+
+  try {
+    // 中文注释：作用域决定 zhi 返回内容是本轮上下文还是允许写入 ji 的候选记忆。
+    await invoke('update_custom_prompt', {
+      prompt: {
+        ...prompt,
+        updated_at: new Date().toISOString(),
+      },
+    })
+    await emitTauri('custom-prompt-updated')
+    message.success(`上下文作用域已设为${getContextScopeLabel(prompt.context_scope)}`)
+  }
+  catch (error) {
+    console.error('保存条件性prompt作用域失败:', error)
+    prompt.context_scope = previousScope
+    emitUpdate()
+    message.error(`保存作用域失败: ${(error as any)?.message || String(error)}`)
+  }
+}
+
 // 生成条件性prompt的追加内容
 function generateConditionalContent(): string {
   // 复用统一的上下文拼接逻辑，保持增强与输入一致
-  const conditionalText = buildConditionalContext(conditionalPrompts.value)
+  const conditionalText = buildConditionalContext(activeConditionalPrompts.value, props.request)
   return conditionalText ? `\n\n${conditionalText}` : ''
+}
+
+function generateConditionalContextBlocks(): ResponseContextBlock[] {
+  return buildConditionalContextBlocks(activeConditionalPrompts.value, props.request)
+}
+
+function formatConditionalContextForDisplay(blocks: ResponseContextBlock[]): string {
+  if (blocks.length === 0)
+    return ''
+  return `\n\n${blocks.map(block => `[${getContextScopeLabel(block.scope)}] ${block.content}`).join('\n')}`
 }
 
 // 获取条件性prompt的自适应描述
@@ -930,6 +979,16 @@ defineExpose({
                   {{ getConditionalDescription(prompt) }}
                 </div>
               </div>
+              <n-select
+                :value="normalizeContextScope(prompt.context_scope)"
+                :options="contextScopeOptions"
+                size="tiny"
+                class="w-16 shrink-0 mr-1"
+                :consistent-menu-width="false"
+                :disabled="!isMcpToolEnabled(prompt.linked_mcp_tool)"
+                :title="`作用域：${getContextScopeLabel(prompt.context_scope)}`"
+                @update:value="value => handleConditionalScopeChange(prompt.id, normalizeContextScope(value))"
+              />
               <!-- 使用 n-tooltip 包裹开关，当 MCP 工具未启用时显示提示 -->
               <n-tooltip :disabled="isMcpToolEnabled(prompt.linked_mcp_tool) || !prompt.linked_mcp_tool">
                 <template #trigger>

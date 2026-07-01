@@ -1,17 +1,31 @@
 use anyhow::Result;
 use rmcp::model::{Content, ErrorData as McpError};
+use serde_json::Value;
 
 use crate::log_debug;
-use crate::mcp::types::{McpResponse, McpResponseContent};
+use crate::mcp::types::{McpResponse, McpResponseContent, ResponseContextBlock};
 use crate::mcp::utils::is_zhi_custom_choice;
+
+pub struct ParsedMcpResponse {
+    pub content: Vec<Content>,
+    pub structured_content: Option<Value>,
+}
 
 /// 解析 MCP 响应内容
 ///
 /// 支持新的结构化格式和旧格式的兼容性，并生成适当的 Content 对象
 pub fn parse_mcp_response(response: &str) -> Result<Vec<Content>, McpError> {
+    Ok(parse_mcp_response_with_structured(response)?.content)
+}
+
+/// 解析 MCP 响应内容，并在新结构化响应中保留 structured_content。
+pub fn parse_mcp_response_with_structured(response: &str) -> Result<ParsedMcpResponse, McpError> {
     if response.trim() == "CANCELLED" || response.trim() == "用户取消了操作" {
         log_debug!("[parse_mcp_response] 收到取消信号");
-        return Ok(vec![Content::text("用户取消了操作".to_string())]);
+        return Ok(ParsedMcpResponse {
+            content: vec![Content::text("用户取消了操作".to_string())],
+            structured_content: None,
+        });
     }
 
     // 首先尝试解析为新的结构化格式
@@ -129,7 +143,10 @@ pub fn parse_mcp_response(response: &str) -> Result<Vec<Content>, McpError> {
                 image_count,
                 result.len()
             );
-            Ok(result)
+            Ok(ParsedMcpResponse {
+                content: result,
+                structured_content: None,
+            })
         }
         Err(_) => {
             // 如果不是JSON格式，作为纯文本处理
@@ -137,13 +154,16 @@ pub fn parse_mcp_response(response: &str) -> Result<Vec<Content>, McpError> {
                 "[parse_mcp_response] 非JSON响应，按纯文本处理: len={}",
                 response.len()
             );
-            Ok(vec![Content::text(response.to_string())])
+            Ok(ParsedMcpResponse {
+                content: vec![Content::text(response.to_string())],
+                structured_content: None,
+            })
         }
     }
 }
 
 /// 解析新的结构化响应格式
-fn parse_structured_response(response: McpResponse) -> Result<Vec<Content>, McpError> {
+fn parse_structured_response(response: McpResponse) -> Result<ParsedMcpResponse, McpError> {
     let mut result = Vec::new();
     let mut text_parts = Vec::new();
 
@@ -176,7 +196,7 @@ fn parse_structured_response(response: McpResponse) -> Result<Vec<Content>, McpE
     }
 
     // 2. 处理用户输入文本
-    if let Some(user_input) = response.user_input {
+    if let Some(user_input) = response.user_input.as_ref() {
         if !user_input.trim().is_empty() {
             if custom_selected {
                 text_parts.push(format!("用户最终要求: {}", user_input.trim()));
@@ -186,7 +206,22 @@ fn parse_structured_response(response: McpResponse) -> Result<Vec<Content>, McpE
         }
     }
 
-    // 3. 处理图片附件
+    // 3. 处理条件上下文块。文本回退明确区分临时上下文与可写记忆，避免误触发 ji。
+    let (transient_blocks, memory_blocks) = split_context_blocks(&response.context_blocks);
+    if !transient_blocks.is_empty() {
+        text_parts.push(format_context_block_section(
+            "本轮临时上下文（禁止写入 ji）",
+            &transient_blocks,
+        ));
+    }
+    if !memory_blocks.is_empty() {
+        text_parts.push(format_context_block_section(
+            "可写记忆候选（仅这些内容允许按 category 调用 ji）",
+            &memory_blocks,
+        ));
+    }
+
+    // 4. 处理图片附件
     let mut image_info_parts = Vec::new();
     for (index, image) in response.images.iter().enumerate() {
         // 添加图片到结果中（图片在前）
@@ -228,11 +263,11 @@ fn parse_structured_response(response: McpResponse) -> Result<Vec<Content>, McpE
         image_info_parts.push(image_info);
     }
 
-    // 4. 合并所有文本内容
+    // 5. 合并所有文本内容
     let mut all_text_parts = text_parts;
     all_text_parts.extend(image_info_parts);
 
-    // 5. 添加兼容性说明
+    // 6. 添加兼容性说明
     if !response.images.is_empty() {
         all_text_parts.push(format!(
             "💡 注意：用户提供了 {} 张图片。如果 AI 助手无法显示图片，图片数据已包含在上述 Base64 信息中。",
@@ -240,18 +275,102 @@ fn parse_structured_response(response: McpResponse) -> Result<Vec<Content>, McpE
         ));
     }
 
-    // 6. 将文本内容添加到结果中（图片后面）
+    // 7. 将文本内容添加到结果中（图片后面）
     if !all_text_parts.is_empty() {
         let combined_text = all_text_parts.join("\n\n");
         result.push(Content::text(combined_text));
     }
 
-    // 7. 如果没有任何内容，添加默认响应
+    // 8. 如果没有任何内容，添加默认响应
     if result.is_empty() {
         result.push(Content::text("用户未提供任何内容".to_string()));
     }
 
-    Ok(result)
+    let structured_content = build_structured_content(&response);
+
+    Ok(ParsedMcpResponse {
+        content: result,
+        structured_content: Some(structured_content),
+    })
+}
+
+fn split_context_blocks(
+    blocks: &[ResponseContextBlock],
+) -> (Vec<&ResponseContextBlock>, Vec<&ResponseContextBlock>) {
+    let mut transient_blocks = Vec::new();
+    let mut memory_blocks = Vec::new();
+
+    for block in blocks {
+        if block.content.trim().is_empty() {
+            continue;
+        }
+        if block.normalized_memory_policy() == "save" {
+            memory_blocks.push(block);
+        } else {
+            transient_blocks.push(block);
+        }
+    }
+
+    (transient_blocks, memory_blocks)
+}
+
+fn format_context_block_section(title: &str, blocks: &[&ResponseContextBlock]) -> String {
+    let mut lines = Vec::with_capacity(blocks.len() + 1);
+    lines.push(format!("{}:", title));
+    for block in blocks {
+        let category = block
+            .normalized_memory_category()
+            .map(|category| format!(" category={}", category))
+            .unwrap_or_default();
+        lines.push(format!("- [{}{}] {}", &block.scope, category, block.content.trim()));
+    }
+    lines.join("\n")
+}
+
+fn build_structured_content(response: &McpResponse) -> Value {
+    let memory_actions: Vec<Value> = response
+        .context_blocks
+        .iter()
+        .filter(|block| block.normalized_memory_policy() == "save")
+        .map(|block| {
+            serde_json::json!({
+                "action": "记忆",
+                "category": block.normalized_memory_category().unwrap_or("context"),
+                "content": block.content.trim(),
+                "source": {
+                    "kind": &block.kind,
+                    "id": &block.source_id,
+                    "name": &block.source_name,
+                    "scope": &block.scope
+                }
+            })
+        })
+        .collect();
+
+    let transient_context: Vec<Value> = response
+        .context_blocks
+        .iter()
+        .filter(|block| block.normalized_memory_policy() != "save")
+        .map(|block| {
+            serde_json::json!({
+                "kind": &block.kind,
+                "scope": &block.scope,
+                "content": block.content.trim(),
+                "source_id": &block.source_id,
+                "source_name": &block.source_name
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "user_input": &response.user_input,
+        "selected_options": &response.selected_options,
+        "context_blocks": &response.context_blocks,
+        "memory_intent": &response.memory_intent,
+        "memory_actions": memory_actions,
+        "transient_context": transient_context,
+        "metadata": &response.metadata
+    })
 }
 
 #[cfg(test)]

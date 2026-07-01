@@ -1,4 +1,4 @@
-import type { CustomPrompt, McpRequest } from '../types/popup'
+import type { ContextScope, CustomPrompt, McpRequest, MemoryCategory, MemoryPolicy, ResponseContextBlock } from '../types/popup'
 
 // UI/UX 上下文策略状态信息（用于 UI 可视化展示）
 export interface ContextPolicyStatus {
@@ -31,6 +31,12 @@ const POLICY_LABELS: Record<string, string> = {
   auto: '自动',
   force: '强制追加',
   forbid: '禁止追加',
+}
+
+const CONTEXT_SCOPE_LABELS: Record<ContextScope, string> = {
+  turn: '本轮上下文',
+  memory: '长期记忆',
+  rule: '项目规则',
 }
 
 /**
@@ -110,10 +116,7 @@ export function shouldShowPolicyIndicator(request?: McpRequest | null): boolean 
   return !!(request.uiux_intent || request.uiux_context_policy || request.uiux_reason)
 }
 
-// 复用条件性 prompt 的上下文拼接逻辑，保持与弹窗输入一致
-export function buildConditionalContext(prompts: CustomPrompt[], request?: McpRequest | null): string {
-  const conditionalTexts: string[] = []
-
+function shouldAppendConditionalContext(request?: McpRequest | null): boolean {
   // 检查是否有显式 UI/UX 上下文信号
   const hasExplicitSignal = !!(request?.uiux_intent || request?.uiux_context_policy || request?.uiux_reason)
 
@@ -125,18 +128,80 @@ export function buildConditionalContext(prompts: CustomPrompt[], request?: McpRe
     const intent = request?.uiux_intent ?? 'none'
     const policy = request?.uiux_context_policy ?? 'auto'
     if (policy === 'forbid' || (policy === 'auto' && intent === 'none')) {
-      return ''
+      return false
     }
   }
+
+  return true
+}
+
+export function normalizeContextScope(scope?: string | null): ContextScope {
+  if (scope === 'memory' || scope === 'rule')
+    return scope
+  return 'turn'
+}
+
+export function getContextScopeLabel(scope?: string | null): string {
+  return CONTEXT_SCOPE_LABELS[normalizeContextScope(scope)]
+}
+
+export function getMemoryPolicy(scope?: string | null): MemoryPolicy {
+  return normalizeContextScope(scope) === 'turn' ? 'never' : 'save'
+}
+
+export function getMemoryCategory(scope?: string | null): MemoryCategory | null {
+  const normalizedScope = normalizeContextScope(scope)
+  if (normalizedScope === 'memory')
+    return 'preference'
+  if (normalizedScope === 'rule')
+    return 'rule'
+  return null
+}
+
+export function sanitizeConditionalTemplate(template: string): string {
+  return template
+    .trim()
+    .replace(/^[✔✅☑️☑\s]+/u, '')
+    .replace(/^[❌✗✘🚫\s]+/u, '')
+    .replace(/^请记住[，,:：\s]*/u, '')
+    .trim()
+}
+
+// 生成结构化上下文块，避免把条件性 prompt 伪装成用户原始输入
+export function buildConditionalContextBlocks(prompts: CustomPrompt[], request?: McpRequest | null): ResponseContextBlock[] {
+  if (!shouldAppendConditionalContext(request))
+    return []
+
+  const blocks: ResponseContextBlock[] = []
 
   prompts.forEach((prompt) => {
     const isEnabled = prompt.current_state ?? false
     const template = isEnabled ? prompt.template_true : prompt.template_false
 
     if (template && template.trim()) {
-      conditionalTexts.push(template.trim())
+      const content = sanitizeConditionalTemplate(template)
+      if (!content)
+        return
+
+      const scope = normalizeContextScope(prompt.context_scope)
+      blocks.push({
+        kind: 'conditional_prompt',
+        scope,
+        memory_policy: getMemoryPolicy(scope),
+        memory_category: getMemoryCategory(scope),
+        content,
+        source_id: prompt.id,
+        source_name: prompt.name || prompt.condition_text || null,
+      })
     }
   })
 
-  return conditionalTexts.join('\n')
+  return blocks
+}
+
+// 复用条件性 prompt 的上下文拼接逻辑，保持与本地增强等文本链路兼容
+export function buildConditionalContext(prompts: CustomPrompt[], request?: McpRequest | null): string {
+  return buildConditionalContextBlocks(prompts, request)
+    .map(block => `[${getContextScopeLabel(block.scope)}] ${block.content}`)
+    .join('\n')
 }
