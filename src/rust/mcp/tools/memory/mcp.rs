@@ -80,12 +80,12 @@ impl MemoryTool {
                     request.content.len()
                 );
 
-                // 添加记忆（带去重检测）
-                match manager.add_memory(&request.content, category) {
-                    Ok(Some(id)) => {
+                // 添加记忆（方案 B：带同类 upsert 语义）
+                match manager.upsert_memory(&request.content, category) {
+                    Ok(super::AddOutcome::Added(id)) => {
                         log_important!(
                             info,
-                            "[ji] 记忆添加成功: id={}, category={:?}",
+                            "[ji] 记忆新增成功: id={}, category={:?}",
                             id,
                             category
                         );
@@ -98,12 +98,40 @@ impl MemoryTool {
                             non_git_hint
                         )
                     }
-                    Ok(None) => {
-                        // 被去重静默拒绝
-                        log_debug!("[ji] 记忆被去重拒绝: 内容与现有记忆相似");
+                    Ok(super::AddOutcome::Updated {
+                        id,
+                        similarity,
+                        old_content,
+                    }) => {
+                        log_important!(
+                            info,
+                            "[ji] 记忆同类更新: id={}, similarity={:.1}%, category={:?}",
+                            id,
+                            similarity * 100.0,
+                            category
+                        );
                         format!(
-                            "⚠️ 记忆已存在相似内容，未重复添加\n📝 内容: {}\n📂 分类: {}{}{}",
+                            "🔄 已更新同类记忆（相似度 {:.1}%），ID: {}\n📝 新内容: {}\n📝 原内容: {}\n📂 分类: {}{}{}",
+                            similarity * 100.0,
+                            id,
                             request.content,
+                            old_content,
+                            category.display_name(),
+                            index_hint,
+                            non_git_hint
+                        )
+                    }
+                    Ok(super::AddOutcome::Duplicate {
+                        similarity,
+                        matched_content,
+                    }) => {
+                        // 被去重静默拒绝
+                        log_debug!("[ji] 记忆被去重拒绝: 相似度 {:.1}%", similarity * 100.0);
+                        format!(
+                            "⚠️ 记忆已存在相似内容（相似度 {:.1}%），未重复添加\n📝 内容: {}\n📝 已有: {}\n📂 分类: {}{}{}",
+                            similarity * 100.0,
+                            request.content,
+                            matched_content.unwrap_or_default(),
                             category.display_name(),
                             index_hint,
                             non_git_hint

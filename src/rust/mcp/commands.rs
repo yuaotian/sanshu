@@ -374,6 +374,8 @@ pub async fn save_memory_config(
         similarity_threshold: config.similarity_threshold.clamp(0.5, 0.95),
         dedup_on_startup: config.dedup_on_startup,
         enable_dedup: config.enable_dedup,
+        // upsert_threshold 不经此 DTO 暴露，保留当前值（默认 0.55）
+        upsert_threshold: manager.config().upsert_threshold,
     };
 
     manager

@@ -96,6 +96,14 @@ pub struct MemoryConfig {
     /// 是否启用去重检测，默认 true
     #[serde(default = "default_enable_dedup")]
     pub enable_dedup: bool,
+    /// 同类 upsert 阈值（0.0 ~ 1.0），默认 0.55
+    ///
+    /// 新增记忆与**同一分类**已有记忆相似度落在 [upsert_threshold, similarity_threshold)
+    /// 区间时，视为「同一条规则的新表述」，就地更新旧条目而非新增。
+    /// 取值低于去重阈值（0.70），用于捕捉「已改写但未达去重线」的同类记忆，
+    /// 从源头抑制近义改写的堆积（方案 B）。设为 >= similarity_threshold 可关闭 upsert。
+    #[serde(default = "default_upsert_threshold")]
+    pub upsert_threshold: f64,
 }
 
 fn default_similarity_threshold() -> f64 {
@@ -110,12 +118,17 @@ fn default_enable_dedup() -> bool {
     true
 }
 
+fn default_upsert_threshold() -> f64 {
+    0.55
+}
+
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             similarity_threshold: default_similarity_threshold(),
             dedup_on_startup: default_dedup_on_startup(),
             enable_dedup: default_enable_dedup(),
+            upsert_threshold: default_upsert_threshold(),
         }
     }
 }

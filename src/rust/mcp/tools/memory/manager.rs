@@ -34,6 +34,24 @@ struct NormalizeResult {
     is_non_git: bool,
 }
 
+/// `add_memory` 的结果（方案 B：区分新增 / 同类更新 / 重复）
+#[derive(Debug, Clone)]
+pub enum AddOutcome {
+    /// 新增了一条记忆，返回新条目 id
+    Added(String),
+    /// 就地更新了同类已有记忆（近义改写），返回被更新条目 id、相似度、旧内容
+    Updated {
+        id: String,
+        similarity: f64,
+        old_content: String,
+    },
+    /// 与已有记忆重复（≥ 去重阈值），静默拒绝
+    Duplicate {
+        similarity: f64,
+        matched_content: Option<String>,
+    },
+}
+
 impl MemoryManager {
     /// 存储文件名
     const STORE_FILE: &'static str = "memories.json";
@@ -191,6 +209,97 @@ impl MemoryManager {
             .iter()
             .filter(|e| e.category == category)
             .collect()
+    }
+
+    /// 添加记忆（方案 B：带同类 upsert 语义）
+    ///
+    /// 决策顺序：
+    /// 1. 与**任意**记忆相似度 ≥ `similarity_threshold` → 判为重复，静默拒绝（沿用原去重）。
+    /// 2. 否则，在**同一分类**内查找相似度 ≥ `upsert_threshold` 的最相似条目 →
+    ///    就地更新其内容（近义改写合并），保留原 id 与 created_at，刷新 updated_at。
+    /// 3. 否则 → 新增。
+    ///
+    /// 相比 [`add_memory`]，本方法从源头抑制「同一条规则的不同表述」堆积。
+    pub fn upsert_memory(
+        &mut self,
+        content: &str,
+        category: MemoryCategory,
+    ) -> Result<AddOutcome> {
+        let content = content.trim();
+        if content.is_empty() {
+            return Err(anyhow::anyhow!("记忆内容不能为空"));
+        }
+
+        // 1) 全局去重检查（≥ 去重阈值视为重复，静默拒绝）
+        if self.store.config.enable_dedup {
+            let dedup = MemoryDeduplicator::new(self.store.config.similarity_threshold);
+            let dup_info = dedup.check_duplicate(content, &self.store.entries);
+            if dup_info.is_duplicate {
+                log_debug!(
+                    "记忆去重: 相似度 {:.1}%，静默拒绝",
+                    dup_info.similarity * 100.0
+                );
+                return Ok(AddOutcome::Duplicate {
+                    similarity: dup_info.similarity,
+                    matched_content: dup_info.matched_content,
+                });
+            }
+        }
+
+        // 2) 同类 upsert：在相同分类内寻找相似度落在
+        //    [upsert_threshold, similarity_threshold) 区间的最相似条目
+        let upsert_threshold = self.store.config.upsert_threshold;
+        if upsert_threshold < self.store.config.similarity_threshold {
+            let mut best: Option<(usize, f64)> = None;
+            for (idx, entry) in self.store.entries.iter().enumerate() {
+                if entry.category != category {
+                    continue;
+                }
+                let sim = TextSimilarity::calculate_enhanced(content, &entry.content);
+                if sim >= upsert_threshold {
+                    match best {
+                        Some((_, best_sim)) if sim <= best_sim => {}
+                        _ => best = Some((idx, sim)),
+                    }
+                }
+            }
+
+            if let Some((idx, sim)) = best {
+                let old_content = self.store.entries[idx].content.clone();
+                let id = self.store.entries[idx].id.clone();
+                let entry = &mut self.store.entries[idx];
+                entry.content = content.to_string();
+                entry.content_normalized = TextSimilarity::normalize(content);
+                entry.updated_at = Utc::now();
+                self.save_store()?;
+                log_debug!(
+                    "记忆同类更新(upsert): id={}, 相似度 {:.1}%",
+                    id,
+                    sim * 100.0
+                );
+                return Ok(AddOutcome::Updated {
+                    id,
+                    similarity: sim,
+                    old_content,
+                });
+            }
+        }
+
+        // 3) 新增
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let entry = MemoryEntry {
+            id: id.clone(),
+            content: content.to_string(),
+            content_normalized: TextSimilarity::normalize(content),
+            category,
+            created_at: now,
+            updated_at: now,
+        };
+        self.store.entries.push(entry);
+        self.save_store()?;
+        log_debug!("已新增记忆: {} ({:?})", id, category);
+        Ok(AddOutcome::Added(id))
     }
 
     /// 手动执行去重
@@ -462,4 +571,131 @@ pub struct MemoryStats {
     pub preferences: usize,
     pub patterns: usize,
     pub contexts: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// 在临时目录（非 Git，降级模式）创建管理器
+    fn make_manager() -> (TempDir, MemoryManager) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_string_lossy().to_string();
+        let manager = MemoryManager::new(&path).unwrap();
+        (dir, manager)
+    }
+
+    #[test]
+    fn test_upsert_added_then_duplicate() {
+        let (_dir, mut m) = make_manager();
+
+        // 首次新增
+        let r = m.upsert_memory("使用 KISS 原则", MemoryCategory::Rule).unwrap();
+        assert!(matches!(r, AddOutcome::Added(_)), "首次应新增: {:?}", r);
+
+        // 近乎相同（仅去空格）→ 应判为重复
+        let r = m.upsert_memory("使用KISS原则", MemoryCategory::Rule).unwrap();
+        assert!(
+            matches!(r, AddOutcome::Duplicate { .. }),
+            "高相似应判重复: {:?}",
+            r
+        );
+
+        // 只保留 1 条
+        assert_eq!(m.get_all_memories().len(), 1);
+    }
+
+    #[test]
+    fn test_upsert_updates_same_category_paraphrase() {
+        let (_dir, mut m) = make_manager();
+
+        // 为确定性地验证 upsert 路径：把去重阈值抬高到 0.90，upsert 阈值 0.55。
+        // 这样相似度 0.84 的近义改写落入 [0.55, 0.90) 的 upsert 区间，
+        // 应触发就地更新，而非被全局去重拦截。
+        m.update_config(MemoryConfig {
+            similarity_threshold: 0.90,
+            dedup_on_startup: true,
+            enable_dedup: true,
+            upsert_threshold: 0.55,
+        })
+        .unwrap();
+
+        let a = "用户偏好：复杂审计/修复任务完成后生成总结性 Markdown 文档；不要生成测试脚本；不要编译；不要运行；优先使用 sou 做代码语义搜索；关键确认使用 zhi。";
+        let r = m.upsert_memory(a, MemoryCategory::Preference).unwrap();
+        let first_id = match r {
+            AddOutcome::Added(id) => id,
+            other => panic!("首次应新增: {:?}", other),
+        };
+
+        // 同类、近义改写（相似度约 0.84，落入 upsert 区间）→ 应就地更新
+        let b = "用户偏好：复杂审计/修复任务需生成总结性 Markdown 文档；不要生成测试脚本；不要编译；不要运行；优先用 sou 做代码语义搜索并查看上下文；关键确认通过 zhi 展示。";
+        let r = m.upsert_memory(b, MemoryCategory::Preference).unwrap();
+        match r {
+            AddOutcome::Updated { id, .. } => {
+                assert_eq!(id, first_id, "应更新同一条目");
+            }
+            other => panic!("同类近义改写应更新而非新增: {:?}", other),
+        }
+
+        // 更新而非新增：仍只有 1 条，且内容已是新表述
+        let all = m.get_all_memories();
+        assert_eq!(all.len(), 1, "同类近义改写不应增加条目数");
+        assert_eq!(all[0].content, b, "内容应更新为最新表述");
+    }
+
+    #[test]
+    fn test_strong_paraphrase_deduped_by_scheme_a() {
+        // 方案 A + B 协同：默认阈值下，相似度 0.84 的强近义改写会先被
+        // 全局去重（≥0.70）拦截为 Duplicate。无论 Duplicate 还是 Updated，
+        // 目标都达成——近义改写不产生新条目，条目数保持为 1。
+        let (_dir, mut m) = make_manager();
+
+        let a = "用户偏好：复杂审计/修复任务完成后生成总结性 Markdown 文档；不要生成测试脚本；不要编译；不要运行；优先使用 sou 做代码语义搜索；关键确认使用 zhi。";
+        m.upsert_memory(a, MemoryCategory::Preference).unwrap();
+
+        let b = "用户偏好：复杂审计/修复任务需生成总结性 Markdown 文档；不要生成测试脚本；不要编译；不要运行；优先用 sou 做代码语义搜索并查看上下文；关键确认通过 zhi 展示。";
+        let r = m.upsert_memory(b, MemoryCategory::Preference).unwrap();
+        assert!(
+            matches!(r, AddOutcome::Duplicate { .. } | AddOutcome::Updated { .. }),
+            "近义改写不应新增: {:?}",
+            r
+        );
+        assert_eq!(m.get_all_memories().len(), 1, "近义改写不应增加条目数");
+    }
+
+    #[test]
+    fn test_upsert_different_category_adds() {
+        let (_dir, mut m) = make_manager();
+
+        // 内容相近但分类不同 → 不触发 upsert，应各自新增
+        let text = "不要生成测试脚本，不要编译，不要运行";
+        m.upsert_memory(text, MemoryCategory::Rule).unwrap();
+        let r = m
+            .upsert_memory(text, MemoryCategory::Context)
+            .unwrap();
+        // 注意：跨分类，但全局去重仍会先拦截高相似内容
+        // 这里内容完全相同 → 会被全局去重判为重复（符合预期，避免跨类重复）
+        assert!(
+            matches!(r, AddOutcome::Duplicate { .. }),
+            "完全相同内容应被全局去重拦截: {:?}",
+            r
+        );
+    }
+
+    #[test]
+    fn test_upsert_unrelated_adds_new() {
+        let (_dir, mut m) = make_manager();
+
+        m.upsert_memory("使用 KISS 原则", MemoryCategory::Rule).unwrap();
+        let r = m
+            .upsert_memory("配置数据库连接池大小为 20", MemoryCategory::Rule)
+            .unwrap();
+        assert!(
+            matches!(r, AddOutcome::Added(_)),
+            "不相关内容应新增: {:?}",
+            r
+        );
+        assert_eq!(m.get_all_memories().len(), 2);
+    }
 }

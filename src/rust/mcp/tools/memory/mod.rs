@@ -19,7 +19,7 @@ pub mod types;
 
 // 重新导出主要类型和功能
 pub use dedup::{DedupResult, DuplicateInfo, MemoryDeduplicator};
-pub use manager::MemoryManager;
+pub use manager::{AddOutcome, MemoryManager};
 pub use mcp::MemoryTool;
 pub use migration::{MemoryMigrator, MigrationResult};
 pub use similarity::TextSimilarity;
