@@ -433,6 +433,8 @@ pub async fn send_mcp_response(
     let args: Vec<String> = std::env::args().collect();
     let is_cli_mode = args.iter().any(|arg| arg == "--cli");
     let is_mcp_mode = args.len() >= 3 && args[1] == "--mcp-request";
+    // 图标弹窗模式：--icon-request 启动，响应同样通过 stdout 返回给 MCP 进程
+    let is_icon_mode = args.len() >= 3 && args[1] == "--icon-request";
 
     // CLI模式下识别取消信号，转换为结构化JSON
     let is_cancelled = if is_cli_mode {
@@ -463,15 +465,16 @@ pub async fn send_mcp_response(
     }
 
     log::debug!(
-        "[send_mcp_response] mode: mcp={}, cli={}, cancelled={}, response_len={}",
+        "[send_mcp_response] mode: mcp={}, cli={}, icon={}, cancelled={}, response_len={}",
         is_mcp_mode,
         is_cli_mode,
+        is_icon_mode,
         is_cancelled,
         response_str.len()
     );
 
-    if is_mcp_mode || is_cli_mode {
-        // MCP/CLI模式：直接输出到stdout（CLI要求结构化JSON）
+    if is_mcp_mode || is_cli_mode || is_icon_mode {
+        // MCP/CLI/图标弹窗模式：直接输出到stdout（CLI要求结构化JSON）
         println!("{}", response_str);
         std::io::Write::flush(&mut std::io::stdout())
             .map_err(|e| format!("刷新stdout失败: {}", e))?;

@@ -16,32 +16,13 @@ pub struct IconTool;
 impl IconTool {
     /// 获取 "tu" 工具定义（交互式图标选择）
     ///
-    /// 返回 MCP 协议规范的工具定义
+    /// schema 由 TuRequest 的 schemars 派生自动生成，避免手写 JSON 与类型定义漂移
     pub fn get_tool_definition() -> Tool {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "预设的搜索关键词（可选，用户可在界面中修改）"
-                },
-                "style": {
-                    "type": "string",
-                    "enum": ["line", "fill", "flat", "all"],
-                    "description": "预设的图标风格：line(线性)、fill(面性)、flat(扁平)、all(全部)"
-                },
-                "save_path": {
-                    "type": "string",
-                    "description": "建议的保存路径（相对于项目根目录，如 assets/icons）"
-                },
-                "project_root": {
-                    "type": "string",
-                    "description": "项目根目录路径（用于计算相对路径）"
-                }
-            }
-        });
+        let schema = schemars::schema_for!(TuRequest);
+        let schema_value =
+            serde_json::to_value(schema).expect("TuRequest schema 序列化不应失败");
 
-        if let serde_json::Value::Object(schema_map) = schema {
+        if let serde_json::Value::Object(schema_map) = schema_value {
             Tool {
                 name: Cow::Borrowed("tu"),
                 description: Some(Cow::Borrowed(
@@ -61,19 +42,25 @@ impl IconTool {
 
     /// 执行 "tu" 工具 - 打开交互式图标选择弹窗
     ///
-    /// 调用 GUI 进程，让用户在可视化界面中选择和保存图标
+    /// 调用 GUI 进程，让用户在可视化界面中选择和保存图标；
+    /// 按结构化响应的 status 字段区分 保存成功/用户取消/GUI错误
     pub async fn tu(request: TuRequest) -> Result<CallToolResult, McpError> {
-        match create_icon_popup(&request) {
-            Ok(response) => {
-                if response.cancelled {
-                    Ok(CallToolResult::success(vec![rmcp::model::Content::text(
-                        "用户取消了图标选择操作",
-                    )]))
-                } else if response.saved_count == 0 {
-                    Ok(CallToolResult::success(vec![rmcp::model::Content::text(
-                        "用户未选择任何图标",
-                    )]))
-                } else {
+        match create_icon_popup(&request).await {
+            Ok(response) => match response.status.as_str() {
+                "cancelled" => Ok(CallToolResult::success(vec![
+                    rmcp::model::Content::text("用户取消了图标选择操作"),
+                ])),
+                "error" => Err(McpError::internal_error(
+                    format!(
+                        "图标选择失败: {}",
+                        response.error.as_deref().unwrap_or("GUI 侧未知错误")
+                    ),
+                    None,
+                )),
+                _ if response.saved_count == 0 => Ok(CallToolResult::success(vec![
+                    rmcp::model::Content::text("用户未选择任何图标"),
+                ])),
+                _ => {
                     // 构建详细的成功消息
                     let message = format!(
                         "✅ 已成功保存 {} 个图标到 {}\n\n保存的图标：\n{}",
@@ -90,7 +77,7 @@ impl IconTool {
                         message,
                     )]))
                 }
-            }
+            },
             Err(e) => Err(McpError::internal_error(
                 format!("图标选择失败: {}", e),
                 None,

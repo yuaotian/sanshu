@@ -139,7 +139,9 @@ pub struct TuRequest {
     pub project_root: Option<String>,
 }
 
-/// 图标保存结果响应
+/// 图标保存结果响应（旧格式，兼容保留）
+///
+/// 前端全部迁移到 IconPopupResponse 后可删除；MCP 侧解析时作为回退格式使用
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IconSaveResponse {
     /// 保存的图标数量
@@ -150,6 +152,56 @@ pub struct IconSaveResponse {
     pub saved_names: Vec<String>,
     /// 用户是否取消
     pub cancelled: bool,
+}
+
+/// 图标弹窗结构化响应（新格式）
+///
+/// 通过显式 status 字段区分"已保存/用户取消/GUI错误"三种结果，
+/// 替代旧的"空 stdout = 取消"脆弱约定，使 GUI 崩溃与用户取消可区分
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IconPopupResponse {
+    /// 结果状态：saved(已保存) | cancelled(用户取消) | error(GUI 侧错误)
+    pub status: String,
+    /// 保存的图标数量
+    #[serde(default)]
+    pub saved_count: u32,
+    /// 保存路径
+    #[serde(default)]
+    pub save_path: String,
+    /// 保存的图标名称列表
+    #[serde(default)]
+    pub saved_names: Vec<String>,
+    /// 错误信息（status=error 时提供）
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl IconPopupResponse {
+    /// 构造"用户取消"响应
+    pub fn cancelled() -> Self {
+        Self {
+            status: "cancelled".to_string(),
+            saved_count: 0,
+            save_path: String::new(),
+            saved_names: Vec::new(),
+            error: None,
+        }
+    }
+
+    /// 从旧格式响应转换（前端升级期间的兼容过渡）
+    pub fn from_legacy(legacy: IconSaveResponse) -> Self {
+        Self {
+            status: if legacy.cancelled {
+                "cancelled".to_string()
+            } else {
+                "saved".to_string()
+            },
+            saved_count: legacy.saved_count,
+            save_path: legacy.save_path,
+            saved_names: legacy.saved_names,
+            error: None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

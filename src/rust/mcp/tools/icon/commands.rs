@@ -49,24 +49,31 @@ pub async fn get_icon_content(request: IconContentRequest) -> Result<IconContent
         .map_err(|e| format!("获取图标内容失败: {}", e))?;
 
     match request.format {
-        IconFormat::Svg | IconFormat::Both => {
+        IconFormat::Svg => Ok(IconContentResult {
+            id: request.id,
+            name: format!("icon_{}", request.id),
+            svg_content: Some(svg_content),
+            png_base64: None,
+            mime_type: "image/svg+xml".to_string(),
+        }),
+        IconFormat::Png | IconFormat::Both => {
+            // 使用 resvg 在内存中渲染 PNG 并做 base64 编码
+            let size = request.png_size.unwrap_or(64);
+            let png_base64 = convert_svg_to_png_base64(&svg_content, size)
+                .map_err(|e| format!("PNG 转换失败: {}", e))?;
+
+            let (svg_field, mime_type) = if request.format == IconFormat::Both {
+                (Some(svg_content), "image/svg+xml".to_string())
+            } else {
+                (None, "image/png".to_string())
+            };
+
             Ok(IconContentResult {
                 id: request.id,
                 name: format!("icon_{}", request.id),
-                svg_content: Some(svg_content),
-                png_base64: None, // PNG 转换暂未实现
-                mime_type: "image/svg+xml".to_string(),
-            })
-        }
-        IconFormat::Png => {
-            // PNG 格式需要服务端转换，暂返回 SVG
-            log_debug!("PNG 格式暂不支持，返回 SVG");
-            Ok(IconContentResult {
-                id: request.id,
-                name: format!("icon_{}", request.id),
-                svg_content: Some(svg_content),
-                png_base64: None,
-                mime_type: "image/svg+xml".to_string(),
+                svg_content: svg_field,
+                png_base64: Some(png_base64),
+                mime_type,
             })
         }
     }
@@ -176,8 +183,8 @@ async fn save_single_icon(
     Ok(saved_paths)
 }
 
-/// SVG 转 PNG（使用 resvg）
-fn convert_svg_to_png(svg_content: &str, output_path: &PathBuf, size: u32) -> Result<(), String> {
+/// 将 SVG 渲染为内存画布（保持比例居中，供文件保存与 base64 编码共用）
+fn render_svg_to_pixmap(svg_content: &str, size: u32) -> Result<tiny_skia::Pixmap, String> {
     // 解析 SVG
     let tree = usvg::Tree::from_str(svg_content, &usvg::Options::default())
         .map_err(|e| format!("SVG 解析失败: {}", e))?;
@@ -195,12 +202,31 @@ fn convert_svg_to_png(svg_content: &str, output_path: &PathBuf, size: u32) -> Re
     // 渲染 SVG 到画布
     resvg::render(&tree, transform, &mut pixmap.as_mut());
 
+    Ok(pixmap)
+}
+
+/// SVG 转 PNG 文件（使用 resvg）
+fn convert_svg_to_png(svg_content: &str, output_path: &PathBuf, size: u32) -> Result<(), String> {
+    let pixmap = render_svg_to_pixmap(svg_content, size)?;
+
     // 保存为 PNG
     pixmap
         .save_png(output_path)
         .map_err(|e| format!("PNG 保存失败: {}", e))?;
 
     Ok(())
+}
+
+/// SVG 转 PNG 并做 base64 编码（内存中完成，供 get_icon_content 预览使用）
+fn convert_svg_to_png_base64(svg_content: &str, size: u32) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let pixmap = render_svg_to_pixmap(svg_content, size)?;
+    let png_bytes = pixmap
+        .encode_png()
+        .map_err(|e| format!("PNG 编码失败: {}", e))?;
+
+    Ok(STANDARD.encode(png_bytes))
 }
 
 /// 清理文件名中的非法字符

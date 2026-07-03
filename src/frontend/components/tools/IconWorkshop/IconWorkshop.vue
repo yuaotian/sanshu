@@ -3,7 +3,6 @@
  * 图标工坊 - 主组件
  * 提供图标搜索、预览、复制和保存功能
  */
-import { invoke } from '@tauri-apps/api/core'
 import { useMessage } from 'naive-ui'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useIconSearch } from '../../../composables/useIconSearch'
@@ -13,19 +12,17 @@ import IconSaveModal from './IconSaveModal.vue'
 
 interface Props {
   active?: boolean
-  // 弹窗模式相关参数
-  mode?: 'normal' | 'popup'
+  // 弹窗模式初始参数（由 IconPopupMode 透传）
   initialQuery?: string
   initialStyle?: string
   initialSavePath?: string
   projectRoot?: string
-  // 外部保存模式（由父组件接管保存流程）
+  // 外部保存模式（弹窗模式下由 IconPopupMode 接管保存与生命周期）
   externalSave?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
   active: false,
-  mode: 'normal',
   initialQuery: '',
   initialStyle: 'all',
   initialSavePath: '',
@@ -83,8 +80,8 @@ const hasResults = computed(() => icons.value.length > 0)
 const isEmpty = computed(() => !loading.value && !!searchInput.value.trim() && !hasResults.value)
 const showEmptyState = computed(() => !loading.value && !searchInput.value && !hasResults.value)
 
-// 默认展开筛选面板（主组件）
-if (props.mode === 'normal')
+// 主界面工具页默认展开筛选面板（弹窗模式保持收起，留出结果空间）
+if (!props.externalSave)
   showFilters.value = true
 
 // 通知父组件选中图标变化
@@ -157,7 +154,7 @@ function openSaveModal() {
 
 // 保存选中的图标
 async function handleSave(request: IconSaveRequest) {
-  // 外部保存模式：由父组件负责保存与后续流程
+  // 外部保存模式：由 IconPopupMode 负责保存、响应构建与退出流程
   if (props.externalSave) {
     showSaveModal.value = false
     emit('save', request)
@@ -169,26 +166,6 @@ async function handleSave(request: IconSaveRequest) {
     message.success(`成功保存 ${result.successCount} 个图标`)
     showSaveModal.value = false
     clearSelection()
-
-    // 如果是弹窗模式，保存成功后退出应用
-    if (props.mode === 'popup') {
-      try {
-        // 构建响应数据
-        const response = {
-          saved_count: result.successCount,
-          save_path: result.savePath,
-          saved_names: result.items.filter((i: any) => i.success).map((i: any) => i.name),
-          cancelled: false,
-        }
-
-        // 发送响应并退出
-        await invoke('send_mcp_response', { response })
-        await invoke('exit_app')
-      }
-      catch (e) {
-        console.error('Failed to send response or exit:', e)
-      }
-    }
   }
 }
 
@@ -214,8 +191,8 @@ async function handleJumpPage(page: number) {
 onMounted(async () => {
   await loadConfig()
 
-  // 如果是弹窗模式，初始化参数并自动搜索
-  if (props.mode === 'popup') {
+  // 弹窗模式（外部保存）：初始化参数并自动搜索
+  if (props.externalSave) {
     if (props.initialQuery) {
       searchInput.value = props.initialQuery
       // 这里的 searchParams 是 reactive 对象，直接赋值即可

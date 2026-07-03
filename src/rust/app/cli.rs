@@ -42,10 +42,16 @@ pub fn handle_cli_args() -> Result<()> {
                 // CLI 模式：解析参数并启动 GUI 交互
                 crate::log_important!(info, "进入CLI交互模式（--cli）");
                 handle_cli_mode(&args[2..])?;
-            } else if args[1] == "--icon-search" {
-                // 图标搜索模式：解析参数并启动 GUI
-                crate::log_important!(info, "进入图标搜索模式（--icon-search）");
-                handle_icon_search(&args[2..])?;
+            } else if args[1] == "--icon-request" {
+                // 图标弹窗模式：从临时请求文件读取参数并启动 GUI（对齐 --mcp-request 协议）
+                if args.len() >= 3 {
+                    crate::log_important!(info, "进入图标弹窗模式: request_file={}", args[2]);
+                    handle_icon_request(&args[2])?;
+                } else {
+                    eprintln!("缺少必填参数: --icon-request <文件>");
+                    print_help();
+                    std::process::exit(2);
+                }
             } else {
                 eprintln!("无效的命令行参数");
                 print_help();
@@ -233,58 +239,40 @@ fn handle_mcp_request(request_file: &str) -> Result<()> {
     Ok(())
 }
 
-/// 处理图标搜索请求
+/// 处理图标弹窗请求
 ///
-/// 解析 CLI 参数并设置环境变量，启动 GUI 进入图标选择模式
-fn handle_icon_search(args: &[String]) -> Result<()> {
-    // 解析参数
-    let mut query = String::new();
-    let mut style = String::new();
-    let mut save_path = String::new();
-    let mut project_root = String::new();
+/// 从临时请求文件读取 TuRequest 参数（对齐 --mcp-request 的临时文件协议），
+/// 通过环境变量传递给前端（复用 get_cli_args 现有的 SANSHU_ICON_* 读取逻辑），
+/// 然后启动 GUI 进入图标选择模式
+fn handle_icon_request(request_file: &str) -> Result<()> {
+    // 读取并解析请求文件
+    let content = std::fs::read_to_string(request_file)
+        .map_err(|e| anyhow::anyhow!("读取图标请求文件失败: {} ({})", request_file, e))?;
+    let request: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("解析图标请求文件失败: {} ({})", request_file, e))?;
 
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--query" if i + 1 < args.len() => {
-                query = args[i + 1].clone();
-                i += 2;
-            }
-            "--style" if i + 1 < args.len() => {
-                style = args[i + 1].clone();
-                i += 2;
-            }
-            "--save-path" if i + 1 < args.len() => {
-                save_path = args[i + 1].clone();
-                i += 2;
-            }
-            "--project-root" if i + 1 < args.len() => {
-                project_root = args[i + 1].clone();
-                i += 2;
-            }
-            _ => {
-                // 如果第一个参数不是选项，假设它是搜索关键词
-                if i == 0 && !args[i].starts_with("--") {
-                    query = args[i].clone();
-                }
-                i += 1;
-            }
-        }
-    }
+    // 提取字符串字段的辅助闭包：null/缺失/空串均视为未提供
+    let get_str = |key: &str| -> Option<String> {
+        request
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    };
 
-    // 设置环境变量，供 Tauri 应用读取
+    // 设置环境变量，供 Tauri 前端通过 get_cli_args 读取
     std::env::set_var("SANSHU_ICON_MODE", "true");
-    if !query.is_empty() {
-        std::env::set_var("SANSHU_ICON_QUERY", &query);
+    if let Some(query) = get_str("query") {
+        std::env::set_var("SANSHU_ICON_QUERY", query);
     }
-    if !style.is_empty() {
-        std::env::set_var("SANSHU_ICON_STYLE", &style);
+    if let Some(style) = get_str("style") {
+        std::env::set_var("SANSHU_ICON_STYLE", style);
     }
-    if !save_path.is_empty() {
-        std::env::set_var("SANSHU_ICON_SAVE_PATH", &save_path);
+    if let Some(save_path) = get_str("save_path") {
+        std::env::set_var("SANSHU_ICON_SAVE_PATH", save_path);
     }
-    if !project_root.is_empty() {
-        std::env::set_var("SANSHU_ICON_PROJECT_ROOT", &project_root);
+    if let Some(project_root) = get_str("project_root") {
+        std::env::set_var("SANSHU_ICON_PROJECT_ROOT", project_root);
     }
 
     // 启动 GUI 进入图标选择模式
@@ -301,7 +289,7 @@ fn print_help() {
     println!("  等一下                              启动设置界面");
     println!("  等一下 --mcp-request <文件>          处理 MCP 请求");
     println!("  等一下 --cli [选项]                  命令行独立调用 zhi 交互");
-    println!("  等一下 --icon-search [选项]          打开图标选择界面");
+    println!("  等一下 --icon-request <文件>         处理图标弹窗请求（内部协议）");
     println!("  等一下 --help                       显示此帮助信息");
     println!("  等一下 --version                    显示版本信息");
     println!();
@@ -314,12 +302,6 @@ fn print_help() {
     println!("  --uiux-intent <值>                   none/beautify/page_refactor/uiux_search");
     println!("  --uiux-context-policy <值>           auto/force/forbid");
     println!("  --uiux-reason <内容>                  UI/UX 上下文追加原因");
-    println!();
-    println!("图标搜索选项:");
-    println!("  --query <关键词>      预设搜索关键词");
-    println!("  --style <风格>        图标风格: line/fill/flat/all");
-    println!("  --save-path <路径>    保存目录路径");
-    println!("  --project-root <路径> 项目根目录");
 }
 
 /// 显示版本信息

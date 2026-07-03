@@ -1,24 +1,37 @@
 // 图标工坊弹窗处理器
 // 负责调用 GUI 进程打开图标选择界面
+//
+// IPC 协议（与 zhi 弹窗 popup.rs 对齐）：
+// 1. 请求侧：TuRequest 序列化写入临时文件，通过 --icon-request <文件> 传给 GUI
+// 2. 响应侧：GUI 通过 stdout 返回结构化 IconPopupResponse（含 status 字段），
+//    显式区分 saved/cancelled/error，替代旧的"空 stdout = 取消"脆弱约定
+// 3. 超时保护：tokio 异步等待 + 可配置超时，避免 GUI 挂起导致 MCP 请求永久阻塞
 
 use anyhow::Result;
-use std::process::Command;
-use std::time::Instant;
+use std::fs;
+use std::time::{Duration, Instant};
 
-use crate::mcp::types::{IconSaveResponse, TuRequest};
-use crate::mcp::utils::safe_truncate_clean;
+// 复用公共 UI 启动器模块，消除与 popup.rs 的重复代码
+use super::ui_launcher::find_ui_command;
+use crate::mcp::types::{IconPopupResponse, IconSaveResponse, TuRequest};
+use crate::mcp::utils::{generate_request_id, safe_truncate_clean};
 use crate::{log_debug, log_important};
+
+/// 图标弹窗默认超时时间（用户挑选图标可能较慢，给足 10 分钟）
+const ICON_POPUP_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// 创建图标选择弹窗
 ///
-/// 调用 "等一下" GUI 进程，进入图标搜索模式
-/// 用户可以搜索、预览、选择并保存图标
-pub fn create_icon_popup(request: &TuRequest) -> Result<IconSaveResponse> {
+/// 调用 "等一下" GUI 进程，进入图标搜索模式；
+/// 请求通过临时文件传递，结果通过 stdout 的结构化 JSON 返回
+pub async fn create_icon_popup(request: &TuRequest) -> Result<IconPopupResponse> {
     let start = Instant::now();
+    let request_id = generate_request_id();
 
     log_important!(
         info,
-        "[icon_popup] 启动图标弹窗: query={:?}, style={:?}, save_path={:?}, project_root={:?}",
+        "[icon_popup] 启动图标弹窗: request_id={}, query={:?}, style={:?}, save_path={:?}, project_root={:?}",
+        request_id,
         request
             .query
             .as_deref()
@@ -37,79 +50,57 @@ pub fn create_icon_popup(request: &TuRequest) -> Result<IconSaveResponse> {
             .map(|s| safe_truncate_clean(s, 120))
     );
 
-    // 构建命令行参数
-    let mut cmd = Command::new(find_ui_command()?);
-    cmd.arg("--icon-search");
+    // 将请求写入临时文件（对齐 popup.rs 的 --mcp-request 协议）
+    let temp_file = std::env::temp_dir().join(format!("icon_request_{}.json", request_id));
+    let request_json = serde_json::json!({
+        "id": request_id,
+        "query": request.query,
+        "style": request.style,
+        "save_path": request.save_path,
+        "project_root": request.project_root,
+    });
+    fs::write(&temp_file, serde_json::to_string_pretty(&request_json)?)?;
 
-    // 添加可选参数
-    if let Some(query) = &request.query {
-        if !query.is_empty() {
-            cmd.arg("--query").arg(query);
-        }
-    }
-    if let Some(style) = &request.style {
-        if !style.is_empty() {
-            cmd.arg("--style").arg(style);
-        }
-    }
-    if let Some(path) = &request.save_path {
-        if !path.is_empty() {
-            cmd.arg("--save-path").arg(path);
-        }
-    }
-    if let Some(root) = &request.project_root {
-        if !root.is_empty() {
-            cmd.arg("--project-root").arg(root);
-        }
-    }
+    // 异步启动 GUI 进程并带超时等待，避免 GUI 挂起时 MCP 请求永久卡死
+    let command_path = find_ui_command()?;
+    let output_future = tokio::process::Command::new(&command_path)
+        .arg("--icon-request")
+        .arg(temp_file.to_string_lossy().to_string())
+        .output();
 
-    // 执行命令并等待结果
-    let output = cmd.output()?;
+    let output = match tokio::time::timeout(ICON_POPUP_TIMEOUT, output_future).await {
+        Ok(result) => {
+            // 无论成败先清理临时文件
+            let _ = fs::remove_file(&temp_file);
+            result?
+        }
+        Err(_) => {
+            let _ = fs::remove_file(&temp_file);
+            log_important!(
+                error,
+                "[icon_popup] GUI进程超时: request_id={}, timeout_secs={}",
+                request_id,
+                ICON_POPUP_TIMEOUT.as_secs()
+            );
+            anyhow::bail!(
+                "图标选择弹窗等待超时（{} 秒），已放弃本次请求",
+                ICON_POPUP_TIMEOUT.as_secs()
+            );
+        }
+    };
+
     let elapsed_ms = start.elapsed().as_millis();
     let exit_code = output.status.code();
     let stdout_len = output.stdout.len();
     let stderr_len = output.stderr.len();
 
-    if output.status.success() {
-        let response_str = String::from_utf8_lossy(&output.stdout);
-        let response_str = response_str.trim();
-
-        log_debug!(
-            "[icon_popup] GUI执行成功: exit_code={:?}, stdout_len={}, stderr_len={}, elapsed_ms={}",
-            exit_code,
-            stdout_len,
-            stderr_len,
-            elapsed_ms
-        );
-
-        if response_str.is_empty() {
-            // 用户取消了操作
-            return Ok(IconSaveResponse {
-                saved_count: 0,
-                save_path: String::new(),
-                saved_names: vec![],
-                cancelled: true,
-            });
-        }
-
-        // 解析 JSON 响应
-        let response: IconSaveResponse = serde_json::from_str(response_str).map_err(|e| {
-            log_important!(
-                error,
-                "[icon_popup] 解析响应失败: exit_code={:?}, stdout_preview={}, error={}",
-                exit_code,
-                safe_truncate_clean(response_str, 200),
-                e
-            );
-            anyhow::anyhow!("解析图标保存响应失败: {}", e)
-        })?;
-
-        Ok(response)
-    } else {
+    if !output.status.success() {
+        // 非零退出码 = GUI 崩溃/异常，与用户取消明确区分
         let error = String::from_utf8_lossy(&output.stderr);
         log_important!(
             error,
-            "[icon_popup] GUI执行失败: exit_code={:?}, stdout_len={}, stderr_len={}, stderr_preview={}, elapsed_ms={}",
+            "[icon_popup] GUI执行失败: request_id={}, exit_code={:?}, stdout_len={}, stderr_len={}, stderr_preview={}, elapsed_ms={}",
+            request_id,
             exit_code,
             stdout_len,
             stderr_len,
@@ -118,61 +109,48 @@ pub fn create_icon_popup(request: &TuRequest) -> Result<IconSaveResponse> {
         );
         anyhow::bail!("图标选择进程失败: {}", error);
     }
+
+    let response_str = String::from_utf8_lossy(&output.stdout);
+    let response_str = response_str.trim();
+
+    log_debug!(
+        "[icon_popup] GUI执行成功: request_id={}, exit_code={:?}, stdout_len={}, stderr_len={}, elapsed_ms={}",
+        request_id,
+        exit_code,
+        stdout_len,
+        stderr_len,
+        elapsed_ms
+    );
+
+    parse_icon_popup_response(response_str)
 }
 
-/// 查找 UI 命令路径
+/// 解析图标弹窗响应
 ///
-/// 复用 popup.rs 中的逻辑
-fn find_ui_command() -> Result<String> {
-    // 1. 优先尝试与当前 MCP 服务器同目录的等一下命令
-    if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(exe_dir) = current_exe.parent() {
-            let local_ui_path = exe_dir.join("等一下");
-            if local_ui_path.exists() && is_executable(&local_ui_path) {
-                return Ok(local_ui_path.to_string_lossy().to_string());
-            }
+/// 优先解析新的结构化格式（含 status 字段）；
+/// 兼容旧格式（cancelled 布尔字段）作为过渡；空输出视为用户直接关闭窗口
+fn parse_icon_popup_response(response_str: &str) -> Result<IconPopupResponse> {
+    // 空输出：用户直接关闭窗口（GUI 正常退出但未发送响应）
+    if response_str.is_empty() {
+        return Ok(IconPopupResponse::cancelled());
+    }
+
+    // 优先解析新的结构化格式
+    if let Ok(response) = serde_json::from_str::<IconPopupResponse>(response_str) {
+        if !response.status.is_empty() {
+            return Ok(response);
         }
     }
 
-    // 2. 尝试全局命令
-    if test_command_available("等一下") {
-        return Ok("等一下".to_string());
+    // 回退：兼容旧格式（前端升级期间的过渡）
+    if let Ok(legacy) = serde_json::from_str::<IconSaveResponse>(response_str) {
+        return Ok(IconPopupResponse::from_legacy(legacy));
     }
 
-    // 3. 返回错误
-    anyhow::bail!(
-        "找不到等一下 UI 命令。请确保：\n\
-         1. 已编译项目：cargo build --release\n\
-         2. 或已全局安装：./install.sh\n\
-         3. 或等一下命令在同目录下"
-    )
-}
-
-/// 测试命令是否可用
-fn test_command_available(command: &str) -> bool {
-    Command::new(command)
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-/// 检查文件是否可执行
-fn is_executable(path: &std::path::Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        path.metadata()
-            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-    }
-
-    #[cfg(windows)]
-    {
-        // Windows 上检查文件扩展名
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("exe"))
-            .unwrap_or(false)
-    }
+    log_important!(
+        error,
+        "[icon_popup] 解析响应失败: stdout_preview={}",
+        safe_truncate_clean(response_str, 200)
+    );
+    anyhow::bail!("解析图标保存响应失败：输出不是有效的结构化 JSON")
 }
