@@ -145,13 +145,16 @@ async function startSave(request: IconSaveRequest, isEditorSave = false) {
         items.push(result.items[0])
       }
       else {
+        const failureMessage = `${iconForSave.name} 保存失败`
         items.push({
           id: iconForSave.id,
           name: iconForSave.name,
           success: false,
           savedPaths: [],
-          error: '保存失败',
+          error: failureMessage,
         })
+        if (!saveError.value)
+          saveError.value = failureMessage
       }
 
       saveProgress.value = Math.round(((index + 1) / total) * 100)
@@ -175,13 +178,27 @@ async function startSave(request: IconSaveRequest, isEditorSave = false) {
     savePath: request.savePath,
   }
 
-  // 结构化响应：status 字段与 MCP 侧 IconPopupResponse 对齐
-  pendingResponse.value = {
-    status: 'saved',
-    saved_count: successCount,
-    save_path: request.savePath,
-    saved_names: items.filter(item => item.success).map(item => item.name),
-  }
+  const savedNames = items.filter(item => item.success).map(item => item.name)
+  const failedItems = items.filter(item => !item.success)
+  const failureReason = saveError.value
+    || failedItems.map(item => `${item.name}: ${item.error || '保存失败'}`).join('; ')
+
+  // 结构化响应：保存失败必须返回 error，避免 MCP 误判为“未选择图标”
+  pendingResponse.value = failureReason
+    ? {
+        status: 'error',
+        saved_count: successCount,
+        save_path: request.savePath,
+        saved_names: savedNames,
+        error: failureReason,
+      }
+    : {
+        status: 'saved',
+        saved_count: successCount,
+        save_path: request.savePath,
+        saved_names: savedNames,
+        error: null,
+      }
 
   needsConfirm.value = true
 }

@@ -50,19 +50,21 @@ pub async fn create_icon_popup(request: &TuRequest) -> Result<IconPopupResponse>
             .map(|s| safe_truncate_clean(s, 120))
     );
 
+    // 先确认 UI 命令可用，再写入临时文件，避免命令查找失败时残留请求文件
+    let command_path = find_ui_command()?;
+
     // 将请求写入临时文件（对齐 popup.rs 的 --mcp-request 协议）
     let temp_file = std::env::temp_dir().join(format!("icon_request_{}.json", request_id));
     let request_json = serde_json::json!({
-        "id": request_id,
-        "query": request.query,
-        "style": request.style,
-        "save_path": request.save_path,
-        "project_root": request.project_root,
+        "id": request_id.as_str(),
+        "query": request.query.as_deref(),
+        "style": request.style.as_deref(),
+        "save_path": request.save_path.as_deref(),
+        "project_root": request.project_root.as_deref(),
     });
     fs::write(&temp_file, serde_json::to_string_pretty(&request_json)?)?;
 
     // 异步启动 GUI 进程并带超时等待，避免 GUI 挂起时 MCP 请求永久卡死
-    let command_path = find_ui_command()?;
     let output_future = tokio::process::Command::new(&command_path)
         .arg("--icon-request")
         .arg(temp_file.to_string_lossy().to_string())

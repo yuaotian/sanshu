@@ -50,17 +50,24 @@ impl IconTool {
                 "cancelled" => Ok(CallToolResult::success(vec![
                     rmcp::model::Content::text("用户取消了图标选择操作"),
                 ])),
-                "error" => Err(McpError::internal_error(
-                    format!(
+                "error" => {
+                    let mut message = format!(
                         "图标选择失败: {}",
                         response.error.as_deref().unwrap_or("GUI 侧未知错误")
-                    ),
-                    None,
-                )),
-                _ if response.saved_count == 0 => Ok(CallToolResult::success(vec![
+                    );
+                    if response.saved_count > 0 {
+                        message.push_str(&format!(
+                            "（已保存 {} 个图标: {}）",
+                            response.saved_count,
+                            response.saved_names.join(", ")
+                        ));
+                    }
+                    Err(McpError::internal_error(message, None))
+                }
+                "saved" if response.saved_count == 0 => Ok(CallToolResult::success(vec![
                     rmcp::model::Content::text("用户未选择任何图标"),
                 ])),
-                _ => {
+                "saved" => {
                     // 构建详细的成功消息
                     let message = format!(
                         "✅ 已成功保存 {} 个图标到 {}\n\n保存的图标：\n{}",
@@ -77,6 +84,10 @@ impl IconTool {
                         message,
                     )]))
                 }
+                other => Err(McpError::internal_error(
+                    format!("图标选择失败: 未知响应状态 {}", other),
+                    None,
+                )),
             },
             Err(e) => Err(McpError::internal_error(
                 format!("图标选择失败: {}", e),
