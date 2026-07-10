@@ -196,12 +196,12 @@ pub async fn detect_fast_context_api_key(
                 }
                 save_config(&state, &app)
                     .await
-                    .map_err(|e| format!("保存 Windsurf API Key 失败: {}", e))?;
+                    .map_err(|e| format!("保存 Devin / Windsurf API Key 失败: {}", e))?;
                 saved = true;
             }
 
             log::info!(
-                "[fast-context] Windsurf API Key 检测成功: source={}, masked={}, saved={}",
+                "[fast-context] Devin / Windsurf API Key 检测成功: source={}, masked={}, saved={}",
                 source,
                 masked,
                 saved
@@ -215,14 +215,14 @@ pub async fn detect_fast_context_api_key(
                 masked_api_key: Some(masked),
                 saved,
                 message: if saved {
-                    format!("已从{}获取并保存 Windsurf API Key", source_label)
+                    format!("已从{}获取并保存 Devin / Windsurf API Key", source_label)
                 } else {
-                    format!("已从{}获取 Windsurf API Key", source_label)
+                    format!("已从{}获取 Devin / Windsurf API Key", source_label)
                 },
             })
         }
         Err(err) => {
-            log::warn!("[fast-context] Windsurf API Key 检测失败: {}", err);
+            log::warn!("[fast-context] Devin / Windsurf API Key 检测失败: {}", err);
             Ok(FastContextApiKeyDetectionResponse {
                 found: false,
                 source: None,
@@ -230,7 +230,7 @@ pub async fn detect_fast_context_api_key(
                 api_key: None,
                 masked_api_key: None,
                 saved: false,
-                message: format!("未获取到 Windsurf API Key，请手动填写: {}", err),
+                message: format!("未获取到 Devin / Windsurf API Key，请手动填写: {}", err),
             })
         }
     }
@@ -1250,7 +1250,7 @@ pub async fn get_acemcp_config(state: State<'_, AppState>) -> Result<AcemcpConfi
         fast_context_script_path: config.mcp_config.fast_context_script_path.clone(),
         fast_context_api_key: config.mcp_config.fast_context_api_key.clone(),
         fast_context_tree_depth: config.mcp_config.fast_context_tree_depth.unwrap_or(3),
-        fast_context_max_turns: config.mcp_config.fast_context_max_turns.unwrap_or(3),
+        fast_context_max_turns: config.mcp_config.fast_context_max_turns.unwrap_or(4),
         fast_context_max_results: config.mcp_config.fast_context_max_results.unwrap_or(10),
         fast_context_max_commands: config.mcp_config.fast_context_max_commands.unwrap_or(8),
         fast_context_timeout_ms: config.mcp_config.fast_context_timeout_ms.unwrap_or(30000),

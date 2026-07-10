@@ -198,7 +198,7 @@ impl SouRuntimeConfig {
                     }
                 }),
                 tree_depth: clamp_u8(mcp.fast_context_tree_depth.unwrap_or(3), 1, 6),
-                max_turns: clamp_u8(mcp.fast_context_max_turns.unwrap_or(3), 1, 5),
+                max_turns: clamp_u8(mcp.fast_context_max_turns.unwrap_or(4), 1, 5),
                 max_results: clamp_u8(mcp.fast_context_max_results.unwrap_or(10), 1, 30),
                 max_commands: clamp_u8(mcp.fast_context_max_commands.unwrap_or(8), 1, 20),
                 timeout_ms: mcp
@@ -829,7 +829,7 @@ mod tests {
             "fast-context 已达到最大轮次但未获得 answer"
         ));
         assert!(
-            !should_retry_fast_context_search("RATE_LIMITED: Windsurf 当前限流，请稍后重试"),
+            !should_retry_fast_context_search("RATE_LIMITED: Fast Context 当前限流，请稍后重试"),
             "限流类错误不应触发独立兜底重试，避免扩大远端压力"
         );
     }

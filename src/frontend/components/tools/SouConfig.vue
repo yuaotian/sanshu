@@ -52,7 +52,7 @@ const config = ref({
   // fast-context 配置
   fast_context_api_key: '',
   fast_context_tree_depth: 3,
-  fast_context_max_turns: 3,
+  fast_context_max_turns: 4,
   fast_context_max_results: 10,
   fast_context_max_commands: 8,
   fast_context_timeout_ms: 30000,
@@ -486,14 +486,14 @@ async function loadAcemcpConfig() {
       // fast-context 配置
       fast_context_api_key: res.fast_context_api_key || '',
       fast_context_tree_depth: res.fast_context_tree_depth || 3,
-      fast_context_max_turns: res.fast_context_max_turns || 3,
+      fast_context_max_turns: res.fast_context_max_turns || 4,
       fast_context_max_results: res.fast_context_max_results || 10,
       fast_context_max_commands: res.fast_context_max_commands || 8,
       fast_context_timeout_ms: res.fast_context_timeout_ms || 30000,
       fast_context_exclude_paths: res.fast_context_exclude_paths || ['node_modules', '.git', 'dist', 'build', 'target'],
     }
     if (!config.value.fast_context_api_key) {
-      // 中文说明：配置页首次加载时主动尝试读取并保存 Windsurf API Key，失败时保留手动填写入口。
+      // 中文说明：配置页首次加载时依次尝试 Devin 与 Windsurf 登录库，失败时保留手动填写入口。
       await detectFastContextApiKey(false)
     }
     lastSavedConnection.value = {
@@ -544,12 +544,12 @@ async function detectFastContextApiKey(showFeedback = true) {
     else {
       fastContextKeyStatusType.value = 'warning'
       if (showFeedback) {
-        message.warning(result.message || '未获取到 Windsurf API Key，请手动填写')
+        message.warning(result.message || '未获取到 Devin / Windsurf API Key，请手动填写')
       }
     }
   }
   catch (err) {
-    const msg = `获取 Windsurf API Key 失败: ${err}`
+    const msg = `获取 Devin / Windsurf API Key 失败: ${err}`
     fastContextKeyStatus.value = msg
     fastContextKeyStatusType.value = 'error'
     if (showFeedback) {
@@ -1109,9 +1109,9 @@ defineExpose({ saveConfig })
               </n-space>
             </ConfigSection>
 
-            <ConfigSection title="Fast Context" description="Rust 原生 fast-context，无需 Node bridge；仅配置 Windsurf 搜索参数">
+            <ConfigSection title="Fast Context" description="Rust 原生 fast-context；支持从 Devin 与 Windsurf 本地登录库自动获取凭据">
               <n-space vertical size="medium">
-                <n-form-item label="Windsurf API Key">
+                <n-form-item label="Devin / Windsurf API Key">
                   <n-space vertical size="small" class="w-full">
                     <n-input-group>
                       <n-button

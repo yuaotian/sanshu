@@ -146,7 +146,7 @@ pub struct McpConfig {
     // Fast Context 配置
     pub fast_context_command: Option<String>, // 兼容旧配置：Rust 原生 fast-context 已不再使用
     pub fast_context_script_path: Option<String>, // 兼容旧配置：Rust 原生 fast-context 已不再使用
-    pub fast_context_api_key: Option<String>, // Windsurf API Key，留空时走环境变量/自动发现
+    pub fast_context_api_key: Option<String>, // Devin / Windsurf API Key，留空时走环境变量/自动发现
     pub fast_context_tree_depth: Option<u8>,  // 目录树深度 1-6
     pub fast_context_max_turns: Option<u8>,   // 搜索轮数 1-5
     pub fast_context_max_results: Option<u8>, // 返回文件数 1-30
@@ -373,7 +373,8 @@ pub fn default_mcp_config() -> McpConfig {
         fast_context_script_path: None,
         fast_context_api_key: None,
         fast_context_tree_depth: Some(3),
-        fast_context_max_turns: Some(3),
+        // 中文说明：与官方 Fast Context 最多四轮检索的公开行为保持一致。
+        fast_context_max_turns: Some(4),
         fast_context_max_results: Some(10),
         fast_context_max_commands: Some(8),
         fast_context_timeout_ms: Some(30000),

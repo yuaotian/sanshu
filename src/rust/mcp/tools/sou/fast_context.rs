@@ -5,6 +5,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use futures_util::future::join_all;
 use globset::GlobBuilder;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use regex::Regex;
 use reqwest::Client;
 use rusqlite::{Connection, OpenFlags};
@@ -31,6 +32,12 @@ const WS_APP: &str = "windsurf";
 const DEFAULT_WS_APP_VER: &str = "1.48.2";
 const DEFAULT_WS_LS_VER: &str = "1.9544.35";
 const DEFAULT_WS_MODEL: &str = "MODEL_SWE_1_6_FAST";
+const FAST_CONTEXT_IGNORE_FILES: [&str; 4] = [
+    ".gitignore",
+    ".codeiumignore",
+    ".windsurfignore",
+    ".devinignore",
+];
 const MAX_TREE_BYTES: usize = 250 * 1024;
 const RESULT_MAX_LINES: usize = 50;
 const LINE_MAX_CHARS: usize = 250;
@@ -185,6 +192,7 @@ pub struct ApiKeyDetection {
 pub enum ApiKeySource {
     Config,
     Env,
+    DevinDb,
     WindsurfDb,
 }
 
@@ -193,6 +201,7 @@ impl ApiKeySource {
         match self {
             Self::Config => "config",
             Self::Env => "env",
+            Self::DevinDb => "devin_db",
             Self::WindsurfDb => "windsurf_db",
         }
     }
@@ -201,6 +210,7 @@ impl ApiKeySource {
         match self {
             Self::Config => "已保存配置",
             Self::Env => "WINDSURF_API_KEY 环境变量",
+            Self::DevinDb => "Devin 本地登录库",
             Self::WindsurfDb => "Windsurf 本地登录库",
         }
     }
@@ -305,9 +315,9 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
     log::info!("[fast-context] 项目路径已解析: {}", project_root.display());
 
     let detected_key = detect_api_key(opts.api_key.as_deref())
-        .context("未找到 Windsurf API Key，请在设置中填写或登录 Windsurf 后重试")?;
+        .context("未找到 Devin / Windsurf API Key，请在设置中填写或登录客户端后重试")?;
     log::info!(
-        "[fast-context] Windsurf API Key 已解析: source={}, label={}, masked={}, length={}",
+        "[fast-context] Devin / Windsurf API Key 已解析: source={}, label={}, masked={}, length={}",
         detected_key.source.as_str(),
         detected_key.source.label(),
         mask_api_key(&detected_key.api_key),
@@ -320,17 +330,24 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
         .build()
         .context("创建 fast-context HTTP 客户端失败")?;
 
-    log::info!("[fast-context] 开始获取 Windsurf JWT");
+    log::info!("[fast-context] 开始获取 Devin / Windsurf JWT");
     let jwt = fetch_jwt(&client, &api_key).await?;
-    log::info!("[fast-context] Windsurf JWT 获取成功: length={}", jwt.len());
-    log::info!("[fast-context] 开始检查 Windsurf 限流状态");
+    log::info!("[fast-context] Devin / Windsurf JWT 获取成功: length={}", jwt.len());
+    log::info!("[fast-context] 开始检查 Fast Context 限流状态");
     if !check_rate_limit(&client, &api_key, &jwt).await? {
-        log::warn!("[fast-context] Windsurf 限流检查未通过");
-        return Err(anyhow!("RATE_LIMITED: Windsurf 当前限流，请稍后重试"));
+        log::warn!("[fast-context] Fast Context 限流检查未通过");
+        return Err(anyhow!("RATE_LIMITED: Fast Context 当前限流，请稍后重试"));
     }
-    log::info!("[fast-context] Windsurf 限流检查通过");
+    log::info!("[fast-context] Fast Context 限流检查通过");
 
-    let repo_map = get_repo_map(&project_root, opts.tree_depth, &opts.exclude_paths);
+    // 中文说明：一次解析项目 ignore 文件，并在 repo map 与全部本地检索命令中复用。
+    let ignore_matcher = build_fast_context_ignore(&project_root);
+    let repo_map = get_repo_map(
+        &project_root,
+        opts.tree_depth,
+        &opts.exclude_paths,
+        &ignore_matcher,
+    );
     log::info!(
         "[fast-context] repo map 已生成: depth={}, size_bytes={}, fell_back={}",
         repo_map.depth,
@@ -338,11 +355,12 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
         repo_map.fell_back
     );
     // #2 Repo Map 智能化：附加 README / manifest 摘要，提升 LLM 首轮命中率
-    let project_summary = build_project_summary(&project_root);
+    let project_summary = build_project_summary(&project_root, &ignore_matcher);
     // 并发版 ToolExecutor：Arc<Mutex<状态>> 让多条 restricted_exec 命令可并行，并统一应用默认排除目录。
     let executor = Arc::new(ToolExecutor::new(
         project_root.clone(),
         opts.exclude_paths.clone(),
+        ignore_matcher,
     ));
     let tool_defs = build_tool_definitions(opts.max_commands);
     let system_prompt = build_system_prompt(opts.max_turns, opts.max_commands, opts.max_results);
@@ -441,7 +459,7 @@ pub async fn search(opts: SearchOptions) -> Result<SearchResult> {
                     .get("answer")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                let files = parse_answer(answer_xml, &project_root)?;
+                let files = parse_answer(answer_xml, &project_root, &executor.ignore_matcher)?;
                 log::info!(
                     "[fast-context] answer 解析完成: files={}, elapsed_ms={}",
                     files.len(),
@@ -584,12 +602,8 @@ pub fn detect_api_key(configured: Option<&str>) -> Result<ApiKeyDetection> {
             });
         }
     }
-    extract_windsurf_api_key()?
-        .map(|api_key| ApiKeyDetection {
-            api_key,
-            source: ApiKeySource::WindsurfDb,
-        })
-        .ok_or_else(|| anyhow!("Windsurf 本地登录库中没有 apiKey"))
+    extract_local_api_key()?
+        .ok_or_else(|| anyhow!("Devin / Windsurf 本地登录库中没有 apiKey"))
 }
 
 pub fn mask_api_key(api_key: &str) -> String {
@@ -610,29 +624,52 @@ pub fn mask_api_key(api_key: &str) -> String {
     format!("{prefix}...{suffix}")
 }
 
-fn extract_windsurf_api_key() -> Result<Option<String>> {
-    let db_path = windsurf_state_db_path()?;
-    if !db_path.exists() {
-        log::warn!(
-            "[fast-context] Windsurf 登录数据库不存在: {}",
+fn extract_local_api_key() -> Result<Option<ApiKeyDetection>> {
+    // 中文说明：优先读取 Devin 的新数据目录，并保留 Windsurf 旧目录作为迁移回退。
+    for (source, db_path) in local_state_db_candidates()? {
+        if !db_path.exists() {
+            log::debug!(
+                "[fast-context] 本地登录数据库不存在: source={}, path={}",
+                source.as_str(),
+                db_path.display()
+            );
+            continue;
+        }
+        log::debug!(
+            "[fast-context] 尝试读取本地登录数据库: source={}, path={}",
+            source.as_str(),
             db_path.display()
         );
-        return Ok(None);
+        match extract_api_key_from_state_db(&db_path) {
+            Ok(Some(api_key)) => return Ok(Some(ApiKeyDetection { api_key, source })),
+            Ok(None) => log::warn!(
+                "[fast-context] 本地登录数据库没有可用 apiKey: source={}, path={}",
+                source.as_str(),
+                db_path.display()
+            ),
+            Err(err) => log::warn!(
+                "[fast-context] 读取本地登录数据库失败，继续尝试兼容目录: source={}, path={}, error={}",
+                source.as_str(),
+                db_path.display(),
+                err
+            ),
+        }
     }
-    log::debug!(
-        "[fast-context] 尝试读取 Windsurf 登录数据库: {}",
-        db_path.display()
-    );
+    Ok(None)
+}
 
+fn extract_api_key_from_state_db(db_path: &Path) -> Result<Option<String>> {
     let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .with_context(|| format!("打开 Windsurf 登录数据库失败: {}", db_path.display()))?;
-    let value: String = conn
-        .query_row(
-            "SELECT value FROM ItemTable WHERE key = 'windsurfAuthStatus'",
-            [],
-            |row| row.get(0),
-        )
-        .context("读取 windsurfAuthStatus 记录失败")?;
+        .with_context(|| format!("打开本地登录数据库失败: {}", db_path.display()))?;
+    let value: String = match conn.query_row(
+        "SELECT value FROM ItemTable WHERE key = 'windsurfAuthStatus'",
+        [],
+        |row| row.get(0),
+    ) {
+        Ok(value) => value,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(err) => return Err(err).context("读取 windsurfAuthStatus 记录失败"),
+    };
     let json: Value = serde_json::from_str(&value).context("解析 windsurfAuthStatus JSON 失败")?;
     Ok(json
         .get("apiKey")
@@ -642,24 +679,34 @@ fn extract_windsurf_api_key() -> Result<Option<String>> {
         .map(ToOwned::to_owned))
 }
 
-fn windsurf_state_db_path() -> Result<PathBuf> {
+fn local_state_db_candidates() -> Result<Vec<(ApiKeySource, PathBuf)>> {
     if cfg!(target_os = "macos") {
         let home = dirs::home_dir().ok_or_else(|| anyhow!("无法定位用户主目录"))?;
-        return Ok(home
-            .join("Library")
-            .join("Application Support")
-            .join("Windsurf")
-            .join("User")
-            .join("globalStorage")
-            .join("state.vscdb"));
+        let app_support = home.join("Library").join("Application Support");
+        return Ok(vec![
+            (
+                ApiKeySource::DevinDb,
+                state_db_path(&app_support, "Devin"),
+            ),
+            (
+                ApiKeySource::WindsurfDb,
+                state_db_path(&app_support, "Windsurf"),
+            ),
+        ]);
     }
     if cfg!(target_os = "windows") {
         let appdata = env::var("APPDATA").context("无法读取 APPDATA 环境变量")?;
-        return Ok(PathBuf::from(appdata)
-            .join("Windsurf")
-            .join("User")
-            .join("globalStorage")
-            .join("state.vscdb"));
+        let appdata = PathBuf::from(appdata);
+        return Ok(vec![
+            (
+                ApiKeySource::DevinDb,
+                state_db_path(&appdata, "devin"),
+            ),
+            (
+                ApiKeySource::WindsurfDb,
+                state_db_path(&appdata, "Windsurf"),
+            ),
+        ]);
     }
 
     let config_root = env::var("XDG_CONFIG_HOME")
@@ -670,11 +717,24 @@ fn windsurf_state_db_path() -> Result<PathBuf> {
                 .ok_or(env::VarError::NotPresent)
         })
         .context("无法定位 Linux 配置目录")?;
-    Ok(config_root
-        .join("Windsurf")
+    Ok(vec![
+        (
+            ApiKeySource::DevinDb,
+            state_db_path(&config_root, "devin"),
+        ),
+        (
+            ApiKeySource::WindsurfDb,
+            state_db_path(&config_root, "Windsurf"),
+        ),
+    ])
+}
+
+fn state_db_path(config_root: &Path, product_dir: &str) -> PathBuf {
+    config_root
+        .join(product_dir)
         .join("User")
         .join("globalStorage")
-        .join("state.vscdb"))
+        .join("state.vscdb")
 }
 
 async fn fetch_jwt(client: &Client, api_key: &str) -> Result<String> {
@@ -717,7 +777,7 @@ async fn fetch_jwt(client: &Client, api_key: &str) -> Result<String> {
         30_000,
     )
     .await
-    .map_err(|e| anyhow!("获取 Windsurf JWT 失败: {}", e))?;
+    .map_err(|e| anyhow!("获取 Devin / Windsurf JWT 失败: {}", e))?;
 
     let jwt = extract_jwt_from_response(&response)
         .ok_or_else(|| anyhow!("无法从 GetUserJwt 响应中提取 JWT"))?;
@@ -1139,7 +1199,11 @@ fn find_json_object_end(raw: &str) -> Option<usize> {
     None
 }
 
-fn parse_answer(xml_text: &str, project_root: &Path) -> Result<Vec<FastContextFile>> {
+fn parse_answer(
+    xml_text: &str,
+    project_root: &Path,
+    ignore_matcher: &Gitignore,
+) -> Result<Vec<FastContextFile>> {
     let file_re =
         Regex::new(r#"(?s)<file\s+path=["']([^"']+)["']>(.*?)</file>"#).expect("valid regex");
     let range_re = Regex::new(r"<range>(\d+)-(\d+)</range>").expect("valid regex");
@@ -1154,6 +1218,9 @@ fn parse_answer(xml_text: &str, project_root: &Path) -> Result<Vec<FastContextFi
         let Some((rel_path, full_path)) = resolve_answer_path(vpath, &root) else {
             continue;
         };
+        if is_ignored_path(ignore_matcher, &full_path) {
+            continue;
+        }
 
         let ranges = range_re
             .captures_iter(body)
@@ -1199,9 +1266,55 @@ fn resolve_answer_path(vpath: &str, root: &Path) -> Option<(String, PathBuf)> {
     Some((rel, absolute))
 }
 
-fn get_repo_map(project_root: &Path, target_depth: u8, exclude_paths: &[String]) -> RepoMap {
+fn build_fast_context_ignore(root: &Path) -> Gitignore {
+    let mut builder = GitignoreBuilder::new(root);
+    for file_name in FAST_CONTEXT_IGNORE_FILES {
+        let path = root.join(file_name);
+        if !path.is_file() {
+            continue;
+        }
+        if let Some(err) = builder.add(&path) {
+            log::warn!(
+                "[fast-context] ignore 文件部分规则解析失败: path={}, error={}",
+                path.display(),
+                err
+            );
+        }
+    }
+    builder.build().unwrap_or_else(|err| {
+        log::warn!("[fast-context] ignore matcher 构建失败: {}", err);
+        Gitignore::empty()
+    })
+}
+
+fn fast_context_ignore_files(root: &Path) -> Vec<PathBuf> {
+    FAST_CONTEXT_IGNORE_FILES
+        .iter()
+        .map(|file_name| root.join(file_name))
+        .filter(|path| path.is_file())
+        .collect()
+}
+
+fn is_ignored_path(ignore_matcher: &Gitignore, path: &Path) -> bool {
+    ignore_matcher
+        .matched_path_or_any_parents(path, path.is_dir())
+        .is_ignore()
+}
+
+fn get_repo_map(
+    project_root: &Path,
+    target_depth: u8,
+    exclude_paths: &[String],
+    ignore_matcher: &Gitignore,
+) -> RepoMap {
     for depth in (1..=target_depth.max(1)).rev() {
-        let tree = build_tree(project_root, "/codebase", depth, exclude_paths);
+        let tree = build_tree(
+            project_root,
+            "/codebase",
+            depth,
+            exclude_paths,
+            ignore_matcher,
+        );
         let size_bytes = tree.len();
         if size_bytes <= MAX_TREE_BYTES {
             return RepoMap {
@@ -1213,7 +1326,7 @@ fn get_repo_map(project_root: &Path, target_depth: u8, exclude_paths: &[String])
         }
     }
 
-    let tree = list_root(project_root, exclude_paths);
+    let tree = list_root(project_root, exclude_paths, ignore_matcher);
     RepoMap {
         size_bytes: tree.len(),
         tree,
@@ -1222,9 +1335,23 @@ fn get_repo_map(project_root: &Path, target_depth: u8, exclude_paths: &[String])
     }
 }
 
-fn build_tree(root: &Path, label: &str, max_depth: u8, exclude_paths: &[String]) -> String {
+fn build_tree(
+    root: &Path,
+    label: &str,
+    max_depth: u8,
+    exclude_paths: &[String],
+    ignore_matcher: &Gitignore,
+) -> String {
     let mut lines = vec![label.to_string()];
-    append_tree(root, "", 1, max_depth, exclude_paths, &mut lines);
+    append_tree(
+        root,
+        "",
+        1,
+        max_depth,
+        exclude_paths,
+        ignore_matcher,
+        &mut lines,
+    );
     lines.join("\n")
 }
 
@@ -1234,20 +1361,21 @@ fn append_tree(
     depth: u8,
     max_depth: u8,
     exclude_paths: &[String],
+    ignore_matcher: &Gitignore,
     lines: &mut Vec<String>,
 ) {
     if depth > max_depth {
         return;
     }
 
-    let entries = sorted_entries(dir, exclude_paths);
+    let entries = sorted_entries(dir, exclude_paths, ignore_matcher);
     let len = entries.len();
     for (idx, entry) in entries.into_iter().enumerate() {
         let name = entry.file_name().to_string_lossy().to_string();
         let last = idx + 1 == len;
         // #2 给目录追加 "(N entries)" 后缀，避免 LLM 盲探巨型目录
         let display_name = if entry.path().is_dir() {
-            let count = entry_count(&entry.path(), exclude_paths);
+            let count = entry_count(&entry.path(), exclude_paths, ignore_matcher);
             if count > 0 {
                 format!("{name}/ ({count} entries)")
             } else {
@@ -1270,6 +1398,7 @@ fn append_tree(
                 depth + 1,
                 max_depth,
                 exclude_paths,
+                ignore_matcher,
                 lines,
             );
         }
@@ -1277,7 +1406,7 @@ fn append_tree(
 }
 
 /// 浅层统计目录下条目数（不递归），用于 tree 显示规模线索
-fn entry_count(dir: &Path, exclude_paths: &[String]) -> usize {
+fn entry_count(dir: &Path, exclude_paths: &[String], ignore_matcher: &Gitignore) -> usize {
     fs::read_dir(dir)
         .map(|read_dir| {
             read_dir
@@ -1285,6 +1414,7 @@ fn entry_count(dir: &Path, exclude_paths: &[String]) -> usize {
                 .filter(|entry| {
                     let name = entry.file_name().to_string_lossy().to_string();
                     !matches_exclude(&name, exclude_paths)
+                        && !is_ignored_path(ignore_matcher, &entry.path())
                 })
                 .count()
         })
@@ -1293,12 +1423,15 @@ fn entry_count(dir: &Path, exclude_paths: &[String]) -> usize {
 
 /// #2 构建项目简介：README 首段 + manifest 顶层信息
 /// 目的：让 LLM 第一轮就知道项目用什么技术栈、入口在哪，省一轮 ls/tree 探查
-fn build_project_summary(root: &Path) -> String {
+fn build_project_summary(root: &Path, ignore_matcher: &Gitignore) -> String {
     let mut sections = Vec::new();
 
     // README 首 30 行（截断）
     for candidate in ["README.md", "README.MD", "Readme.md", "readme.md", "README"] {
         let path = root.join(candidate);
+        if is_ignored_path(ignore_matcher, &path) {
+            continue;
+        }
         if let Ok(content) = fs::read_to_string(&path) {
             let head = content.lines().take(30).collect::<Vec<_>>().join("\n");
             if !head.trim().is_empty() {
@@ -1311,32 +1444,41 @@ fn build_project_summary(root: &Path) -> String {
     }
 
     // Cargo.toml workspace / package 顶层
-    if let Ok(content) = fs::read_to_string(root.join("Cargo.toml")) {
-        let head = content.lines().take(40).collect::<Vec<_>>().join("\n");
-        if !head.trim().is_empty() {
-            sections.push(format!(
-                "### Cargo.toml (first 40 lines)\n```toml\n{head}\n```"
-            ));
+    let cargo_toml = root.join("Cargo.toml");
+    if !is_ignored_path(ignore_matcher, &cargo_toml) {
+        if let Ok(content) = fs::read_to_string(&cargo_toml) {
+            let head = content.lines().take(40).collect::<Vec<_>>().join("\n");
+            if !head.trim().is_empty() {
+                sections.push(format!(
+                    "### Cargo.toml (first 40 lines)\n```toml\n{head}\n```"
+                ));
+            }
         }
     }
 
     // package.json 顶层
-    if let Ok(content) = fs::read_to_string(root.join("package.json")) {
-        let head = content.lines().take(40).collect::<Vec<_>>().join("\n");
-        if !head.trim().is_empty() {
-            sections.push(format!(
-                "### package.json (first 40 lines)\n```json\n{head}\n```"
-            ));
+    let package_json = root.join("package.json");
+    if !is_ignored_path(ignore_matcher, &package_json) {
+        if let Ok(content) = fs::read_to_string(&package_json) {
+            let head = content.lines().take(40).collect::<Vec<_>>().join("\n");
+            if !head.trim().is_empty() {
+                sections.push(format!(
+                    "### package.json (first 40 lines)\n```json\n{head}\n```"
+                ));
+            }
         }
     }
 
     // pyproject.toml
-    if let Ok(content) = fs::read_to_string(root.join("pyproject.toml")) {
-        let head = content.lines().take(30).collect::<Vec<_>>().join("\n");
-        if !head.trim().is_empty() {
-            sections.push(format!(
-                "### pyproject.toml (first 30 lines)\n```toml\n{head}\n```"
-            ));
+    let pyproject_toml = root.join("pyproject.toml");
+    if !is_ignored_path(ignore_matcher, &pyproject_toml) {
+        if let Ok(content) = fs::read_to_string(&pyproject_toml) {
+            let head = content.lines().take(30).collect::<Vec<_>>().join("\n");
+            if !head.trim().is_empty() {
+                sections.push(format!(
+                    "### pyproject.toml (first 30 lines)\n```toml\n{head}\n```"
+                ));
+            }
         }
     }
 
@@ -1350,15 +1492,19 @@ fn build_project_summary(root: &Path) -> String {
     }
 }
 
-fn list_root(root: &Path, exclude_paths: &[String]) -> String {
+fn list_root(root: &Path, exclude_paths: &[String], ignore_matcher: &Gitignore) -> String {
     let mut lines = vec!["/codebase".to_string()];
-    for entry in sorted_entries(root, exclude_paths) {
+    for entry in sorted_entries(root, exclude_paths, ignore_matcher) {
         lines.push(format!("|-- {}", entry.file_name().to_string_lossy()));
     }
     lines.join("\n")
 }
 
-fn sorted_entries(dir: &Path, exclude_paths: &[String]) -> Vec<fs::DirEntry> {
+fn sorted_entries(
+    dir: &Path,
+    exclude_paths: &[String],
+    ignore_matcher: &Gitignore,
+) -> Vec<fs::DirEntry> {
     let mut entries = match fs::read_dir(dir) {
         Ok(read_dir) => read_dir.filter_map(|entry| entry.ok()).collect::<Vec<_>>(),
         Err(_) => return Vec::new(),
@@ -1366,6 +1512,7 @@ fn sorted_entries(dir: &Path, exclude_paths: &[String]) -> Vec<fs::DirEntry> {
     entries.retain(|entry| {
         let name = entry.file_name().to_string_lossy().to_string();
         !matches_exclude(&name, exclude_paths)
+            && !is_ignored_path(ignore_matcher, &entry.path())
     });
     entries.sort_by_key(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase());
     entries
@@ -1879,6 +2026,8 @@ struct ToolExecutor {
     root: PathBuf,
     root_slash: String,
     exclude_paths: Vec<String>,
+    ignore_matcher: Gitignore,
+    ignore_files: Vec<PathBuf>,
     state: Mutex<ToolExecutorState>,
 }
 
@@ -1924,12 +2073,15 @@ enum PreparedCommand {
 }
 
 impl ToolExecutor {
-    fn new(root: PathBuf, exclude_paths: Vec<String>) -> Self {
+    fn new(root: PathBuf, exclude_paths: Vec<String>, ignore_matcher: Gitignore) -> Self {
         let root_slash = normalize_path(&root);
+        let ignore_files = fast_context_ignore_files(&root);
         Self {
             root,
             root_slash,
             exclude_paths,
+            ignore_matcher,
+            ignore_files,
             state: Mutex::new(ToolExecutorState::default()),
         }
     }
@@ -2300,7 +2452,7 @@ impl ToolExecutor {
     }
 
     fn path_candidates(&self, dir: &Path) -> Vec<String> {
-        let mut entries = sorted_entries(dir, &self.exclude_paths)
+        let mut entries = sorted_entries(dir, &self.exclude_paths, &self.ignore_matcher)
             .into_iter()
             .take(8)
             .map(|entry| {
@@ -2339,6 +2491,9 @@ impl ToolExecutor {
             log::warn!("[fast-context] rg 路径无法映射: {}", path);
             return format!("Error: path does not exist: {path}");
         };
+        if is_ignored_path(&self.ignore_matcher, &real_path) {
+            return format!("Error: path is ignored: {path}");
+        }
         let (real_path, path_warning) = if real_path.exists() {
             (real_path, None)
         } else if let Some(fallback) = self.path_fallback(path) {
@@ -2370,9 +2525,14 @@ impl ToolExecutor {
         for glob in &exclude {
             command.arg("--glob").arg(format!("!{glob}"));
         }
+        // 中文说明：rg 原生加载四类 ignore 文件，行为与 Rust 回退搜索保持一致。
+        for ignore_file in &self.ignore_files {
+            command.arg("--ignore-file").arg(ignore_file);
+        }
         command
             .arg(pattern)
             .arg(&real_path)
+            .current_dir(&self.root)
             .env("RIPGREP_CONFIG_PATH", "")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -2445,6 +2605,7 @@ impl ToolExecutor {
             &regex,
             include,
             exclude,
+            &self.ignore_matcher,
             &mut matches,
         );
         if matches.is_empty() {
@@ -2474,6 +2635,10 @@ impl ToolExecutor {
         if !path.is_file() {
             log::warn!("[fast-context] readfile 文件不存在: {}", path.display());
             return self.path_missing_message("readfile", file, "Error: file not found");
+        }
+        if is_ignored_path(&self.ignore_matcher, &path) {
+            log::warn!("[fast-context] readfile 已拒绝 ignore 文件: {}", path.display());
+            return format!("Error: file is ignored: {file}");
         }
         let key = normalize_path(&path);
         // #3 读文件缓存：同一 path 全量内容仅读盘一次，多次 readfile（不同 range）零额外 IO
@@ -2532,12 +2697,16 @@ impl ToolExecutor {
             log::warn!("[fast-context] tree 目录不存在: {}", real_path.display());
             return self.path_missing_message("tree", path, "Error: dir not found");
         }
+        if is_ignored_path(&self.ignore_matcher, &real_path) {
+            return format!("Error: path is ignored: {path}");
+        }
         let label = self.virtual_label(path);
         let result = truncate_output(&self.remap(&build_tree(
             &real_path,
             &label,
             levels.unwrap_or(3).clamp(1, 6),
             &self.exclude_paths,
+            &self.ignore_matcher,
         )));
         log::info!(
             "[fast-context] tree 完成: path={}, output_len={}",
@@ -2556,6 +2725,9 @@ impl ToolExecutor {
             log::warn!("[fast-context] ls 不是目录: {}", real_path.display());
             return self.path_missing_message("ls", path, "Error: not a directory");
         }
+        if is_ignored_path(&self.ignore_matcher, &real_path) {
+            return format!("Error: path is ignored: {path}");
+        }
         let mut entries = match fs::read_dir(&real_path) {
             Ok(entries) => entries.filter_map(|entry| entry.ok()).collect::<Vec<_>>(),
             Err(err) => {
@@ -2567,6 +2739,11 @@ impl ToolExecutor {
                 return format!("Error: {err}");
             }
         };
+        entries.retain(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            !matches_exclude(&name, &self.exclude_paths)
+                && !is_ignored_path(&self.ignore_matcher, &entry.path())
+        });
         entries.sort_by_key(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase());
         if !all {
             entries.retain(|entry| !entry.file_name().to_string_lossy().starts_with('.'));
@@ -2634,6 +2811,9 @@ impl ToolExecutor {
             log::warn!("[fast-context] glob 路径不存在: {}", root.display());
             return format!("Error: path does not exist: {path}");
         };
+        if is_ignored_path(&self.ignore_matcher, &root) {
+            return format!("Error: path is ignored: {path}");
+        }
         let matcher = match GlobBuilder::new(pattern).literal_separator(true).build() {
             Ok(glob) => glob.compile_matcher(),
             Err(err) => {
@@ -2648,6 +2828,7 @@ impl ToolExecutor {
             &matcher,
             type_filter,
             &self.exclude_paths,
+            &self.ignore_matcher,
             &mut matches,
         );
         matches.sort();
@@ -2784,6 +2965,7 @@ fn collect_glob_matches(
     matcher: &globset::GlobMatcher,
     type_filter: &str,
     exclude: &[String],
+    ignore_matcher: &Gitignore,
     matches: &mut Vec<PathBuf>,
 ) {
     if matches.len() >= 100 {
@@ -2803,7 +2985,10 @@ fn collect_glob_matches(
         let rel = path.strip_prefix(base).unwrap_or(&path);
         let name = entry.file_name().to_string_lossy().to_string();
         let rel_slash = normalize_path(rel);
-        if matches_exclude(&name, exclude) || matches_exclude(&rel_slash, exclude) {
+        if matches_exclude(&name, exclude)
+            || matches_exclude(&rel_slash, exclude)
+            || is_ignored_path(ignore_matcher, &path)
+        {
             continue;
         }
         let matched = matcher.is_match(rel) || matcher.is_match(&name);
@@ -2811,7 +2996,15 @@ fn collect_glob_matches(
             matches.push(path.clone());
         }
         if metadata.is_dir() && !name.starts_with('.') {
-            collect_glob_matches(base, &path, matcher, type_filter, exclude, matches);
+            collect_glob_matches(
+                base,
+                &path,
+                matcher,
+                type_filter,
+                exclude,
+                ignore_matcher,
+                matches,
+            );
         }
     }
 }
@@ -2822,6 +3015,7 @@ fn collect_rg_matches(
     regex: &Regex,
     include: &[String],
     exclude: &[String],
+    ignore_matcher: &Gitignore,
     matches: &mut Vec<String>,
 ) {
     if matches.len() >= RESULT_MAX_LINES {
@@ -2829,7 +3023,7 @@ fn collect_rg_matches(
     }
 
     if path.is_file() {
-        if !path_matches_filters(root, path, include, exclude) {
+        if !path_matches_filters(root, path, include, exclude, ignore_matcher) {
             return;
         }
         let Ok(content) = fs::read_to_string(path) else {
@@ -2855,18 +3049,43 @@ fn collect_rg_matches(
         }
         let entry_path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with(".git") || exclude.iter().any(|pattern| glob_match(pattern, &name)) {
+        if name.starts_with(".git")
+            || exclude.iter().any(|pattern| glob_match(pattern, &name))
+            || is_ignored_path(ignore_matcher, &entry_path)
+        {
             continue;
         }
         if entry_path.is_dir() {
-            collect_rg_matches(root, &entry_path, regex, include, exclude, matches);
+            collect_rg_matches(
+                root,
+                &entry_path,
+                regex,
+                include,
+                exclude,
+                ignore_matcher,
+                matches,
+            );
         } else {
-            collect_rg_matches(root, &entry_path, regex, include, exclude, matches);
+            collect_rg_matches(
+                root,
+                &entry_path,
+                regex,
+                include,
+                exclude,
+                ignore_matcher,
+                matches,
+            );
         }
     }
 }
 
-fn path_matches_filters(root: &Path, path: &Path, include: &[String], exclude: &[String]) -> bool {
+fn path_matches_filters(
+    root: &Path,
+    path: &Path,
+    include: &[String],
+    exclude: &[String],
+    ignore_matcher: &Gitignore,
+) -> bool {
     let rel = path.strip_prefix(root).unwrap_or(path);
     let rel_slash = normalize_path(rel);
     let file_name = path
@@ -2874,7 +3093,8 @@ fn path_matches_filters(root: &Path, path: &Path, include: &[String], exclude: &
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    if exclude
+    if is_ignored_path(ignore_matcher, path)
+        || exclude
         .iter()
         .any(|pattern| glob_match(pattern, &rel_slash) || glob_match(pattern, &file_name))
     {
@@ -3081,7 +3301,8 @@ mod tests {
 </ANSWER>
 "#;
 
-        let files = parse_answer(xml, temp.path()).expect("ANSWER XML 应可解析");
+        let files = parse_answer(xml, temp.path(), &Gitignore::empty())
+            .expect("ANSWER XML 应可解析");
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path.as_deref(), Some("src/lib.rs"));
         assert_eq!(files[0].ranges, vec![[1, 10]]);
@@ -3141,7 +3362,11 @@ mod tests {
         let lib = temp_root.join("lib.rs");
         fs::write(&lib, "fn alpha() {}\nfn beta() {}\n").expect("写入测试文件应成功");
 
-        let executor = Arc::new(ToolExecutor::new(temp_root.clone(), vec![]));
+        let executor = Arc::new(ToolExecutor::new(
+            temp_root.clone(),
+            vec![],
+            Gitignore::empty(),
+        ));
 
         // 同一个 readfile 命令调用一次（建立缓存与指纹）
         let args1 = json!({"command1": {"type": "readfile", "file": "/codebase/lib.rs"}});
@@ -3185,7 +3410,11 @@ mod tests {
             .unwrap_or_else(|_| temp.path().to_path_buf());
         fs::write(temp_root.join("lib.rs"), "fn alpha() {}\n").expect("测试文件应写入成功");
 
-        let executor = Arc::new(ToolExecutor::new(temp_root, vec![]));
+        let executor = Arc::new(ToolExecutor::new(
+            temp_root,
+            vec![],
+            Gitignore::empty(),
+        ));
         let args = json!({
             "command1": {"readfile": "/codebase/lib.rs"}
         });
@@ -3205,7 +3434,11 @@ mod tests {
             .path()
             .canonicalize()
             .unwrap_or_else(|_| temp.path().to_path_buf());
-        let executor = Arc::new(ToolExecutor::new(temp_root, vec![]));
+        let executor = Arc::new(ToolExecutor::new(
+            temp_root,
+            vec![],
+            Gitignore::empty(),
+        ));
         let args = json!({
             "command1": {"type": "rg", "pattern": "", "path": "/codebase"}
         });
@@ -3233,7 +3466,11 @@ mod tests {
         fs::create_dir_all(&src).expect("src 目录应创建成功");
         fs::write(src.join("payment.rs"), "fn payment_status() {}\n").expect("测试文件应写入成功");
 
-        let executor = Arc::new(ToolExecutor::new(temp_root, vec![]));
+        let executor = Arc::new(ToolExecutor::new(
+            temp_root,
+            vec![],
+            Gitignore::empty(),
+        ));
         let args = json!({
             "command1": {"type": "rg", "pattern": "payment_status", "path": "/codebase/src/missing-module"}
         });
@@ -3256,7 +3493,11 @@ mod tests {
         fs::write(temp_root.join("payment.rs"), "fn payment_status() {}\n")
             .expect("测试文件应写入成功");
 
-        let executor = Arc::new(ToolExecutor::new(temp_root, vec![]));
+        let executor = Arc::new(ToolExecutor::new(
+            temp_root,
+            vec![],
+            Gitignore::empty(),
+        ));
         let args = json!({
             "command1": {"type": "readfile", "file": "/codebase/missing/payment.rs"}
         });
