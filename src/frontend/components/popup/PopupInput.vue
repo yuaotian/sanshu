@@ -10,6 +10,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } fr
 import { useKeyboard } from '../../composables/useKeyboard'
 import { useMcpToolsReactive } from '../../composables/useMcpTools'
 import { buildConditionalContext, buildConditionalContextBlocks, getContextScopeLabel, normalizeContextScope } from '../../utils/conditionalContext'
+import PlanPanel from './PlanPanel.vue'
 
 interface Props {
   request: McpRequest | null
@@ -70,6 +71,7 @@ const activeConditionalPrompts = computed(() =>
 
 // MCP 工具状态管理
 const { mcpTools, loadMcpTools } = useMcpToolsReactive()
+const planEnabled = computed(() => mcpTools.value.some(tool => tool.id === 'plan' && tool.enabled))
 
 // 检查关联的 MCP 工具是否启用
 function isMcpToolEnabled(toolId?: string): boolean {
@@ -179,7 +181,6 @@ const statusText = computed(() => {
 })
 
 // 上下文追加区域 UI 状态
-const COLLAPSE_THRESHOLD = 6 // 条件性 prompt ≥ 此值时默认折叠
 const isContextCollapsed = useStorage('popup-context-collapsed', false) // 折叠/展开状态
 const showContextDescription = useStorage('popup-context-show-desc', true) // 是否显示描述
 
@@ -193,14 +194,6 @@ const contextScopeOptions: { label: string, value: ContextScope }[] = [
 const enabledConditionalCount = computed(() =>
   conditionalPrompts.value.filter(p => p.current_state && isMcpToolEnabled(p.linked_mcp_tool)).length,
 )
-
-// 根据条件性 prompt 数量自动判断初始折叠状态
-// 只在首次加载时检查，用户手动操作后以 useStorage 为准
-function autoCollapseIfNeeded() {
-  if (conditionalPrompts.value.length >= COLLAPSE_THRESHOLD && !isContextCollapsed.value) {
-    // 不自动覆盖用户选择 — useStorage 已有值则跳过
-  }
-}
 
 // 根据条件性 prompt 的标题/功能描述匹配预设图标
 function getConditionalIcon(prompt: CustomPrompt): string {
@@ -226,6 +219,8 @@ function getConditionalIcon(prompt: CustomPrompt): string {
     return 'i-carbon-search-locate'
   if (/记忆|memory|ji/.test(text))
     return 'i-carbon-data-base'
+  if (/计划|plan|步骤/.test(text))
+    return 'i-carbon-list-checked'
   return 'i-carbon-settings-adjust'
 }
 
@@ -917,6 +912,11 @@ defineExpose({
             </div>
           </div>
         </div>
+
+        <PlanPanel
+          v-if="planEnabled && request?.project_root_path"
+          :workspace="request.project_root_path"
+        />
 
         <!-- 上下文追加区域 -->
         <div v-if="customPromptEnabled && conditionalPrompts.length > 0" class="space-y-2" data-guide="context-append">

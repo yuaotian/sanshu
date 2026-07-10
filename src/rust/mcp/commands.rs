@@ -50,6 +50,24 @@ pub async fn get_mcp_tools_config(
         has_config: false, // 三术工具没有配置选项
     });
 
+    // 开发计划跟踪工具 - 纯本地能力，默认启用且可关闭
+    tools.push(MCPToolConfig {
+        id: mcp::TOOL_PLAN.to_string(),
+        name: "开发计划跟踪".to_string(),
+        description: "按工作区创建、更新、查询和清空开发执行计划".to_string(),
+        enabled: config
+            .mcp_config
+            .tools
+            .get(mcp::TOOL_PLAN)
+            .copied()
+            .unwrap_or(true),
+        can_disable: true,
+        icon: "i-carbon-list-checked text-lg text-teal-600 dark:text-teal-400".to_string(),
+        icon_bg: "bg-teal-100 dark:bg-teal-900".to_string(),
+        dark_icon_bg: "dark:bg-teal-800".to_string(),
+        has_config: false,
+    });
+
     // 记忆管理工具 - 始终存在，有配置选项
     tools.push(MCPToolConfig {
         id: mcp::TOOL_JI.to_string(),

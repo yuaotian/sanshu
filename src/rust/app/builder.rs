@@ -14,6 +14,7 @@ pub fn build_tauri_app() -> Builder<tauri::Wry> {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
+        .manage(crate::mcp::tools::plan::PlanWatchState::default())
         .manage(AudioController {
             should_stop: Arc::new(AtomicBool::new(false)),
         })
@@ -68,6 +69,9 @@ pub fn build_tauri_app() -> Builder<tauri::Wry> {
             build_mcp_send_response,
             build_mcp_continue_response,
             create_test_popup,
+            crate::mcp::tools::plan::commands::get_plan_snapshot,
+            crate::mcp::tools::plan::commands::start_plan_watch,
+            crate::mcp::tools::plan::commands::stop_plan_watch,
             // acemcp命令（迁移至 tools::acemcp::commands）
             crate::mcp::tools::acemcp::commands::get_acemcp_config,
             crate::mcp::tools::acemcp::commands::save_acemcp_config,

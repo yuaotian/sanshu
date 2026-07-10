@@ -21,6 +21,9 @@ pub const TOOL_ENHANCE: &str = "enhance";
 /// Tavily AI 搜索工具标识符
 pub const TOOL_TAVILY: &str = "tavily";
 
+/// 开发计划跟踪工具标识符
+pub const TOOL_PLAN: &str = "plan";
+
 /// 默认启用的工具列表
 pub const DEFAULT_ENABLED_TOOLS: &[&str] = &[
     TOOL_ZHI,
@@ -30,6 +33,7 @@ pub const DEFAULT_ENABLED_TOOLS: &[&str] = &[
     TOOL_UIUX,
     TOOL_ENHANCE,
     TOOL_TAVILY,
+    TOOL_PLAN,
 ];
 
 /// 继续回复默认启用状态
@@ -87,6 +91,7 @@ impl Default for McpConfig {
                 McpToolConfig::new(TOOL_UIUX, true, true),     // UI/UX 工具可禁用，默认启用
                 McpToolConfig::new(TOOL_ENHANCE, false, true), // 提示词增强工具可禁用，默认关闭（依赖 acemcp 配置）
                 McpToolConfig::new(TOOL_TAVILY, true, true), // Tavily AI 搜索工具可禁用，默认启用（免费额度）
+                McpToolConfig::new(TOOL_PLAN, true, true),   // 开发计划跟踪为纯本地能力，默认启用
             ],
             continue_reply_enabled: DEFAULT_CONTINUE_REPLY_ENABLED,
             auto_continue_threshold: DEFAULT_AUTO_CONTINUE_THRESHOLD,

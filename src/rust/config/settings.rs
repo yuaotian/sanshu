@@ -504,6 +504,7 @@ pub fn default_mcp_tools() -> HashMap<String, bool> {
     tools.insert(mcp::TOOL_UIUX.to_string(), true); // UI/UX 工具默认启用（内置技能）
     tools.insert(mcp::TOOL_ENHANCE.to_string(), false); // 提示词增强工具默认关闭（依赖 acemcp 配置）
     tools.insert(mcp::TOOL_TAVILY.to_string(), true); // Tavily AI 搜索工具默认启用（免费额度，需配置 API Key）
+    tools.insert(mcp::TOOL_PLAN.to_string(), true); // 开发计划跟踪为纯本地能力，默认启用
     tools
 }
 
@@ -910,6 +911,26 @@ pub fn default_custom_prompts() -> Vec<CustomPrompt> {
             current_state: false,
             context_scope: "turn".to_string(),
             linked_mcp_tool: None,
+        },
+        // 中文说明：计划工具默认可用，但只有用户主动开启本项时才要求 AI 维护计划。
+        CustomPrompt {
+            id: "default_18".to_string(),
+            name: "是否启用计划跟踪".to_string(),
+            content: "".to_string(),
+            description: Some("控制 AI 是否通过 plan 工具维护当前工作区执行计划".to_string()),
+            sort_order: 18,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            r#type: "conditional".to_string(),
+            condition_text: Some("是否启用计划跟踪".to_string()),
+            template_true: Some(
+                "请使用 plan 工具跟踪当前工作区的开发计划：开始开发前用 set 提交完整计划；开始某一步时用 update 标记 in_progress；完成后用 update 标记 completed；结束前用 get 核对计划状态。"
+                    .to_string(),
+            ),
+            template_false: Some("".to_string()),
+            current_state: false,
+            context_scope: "turn".to_string(),
+            linked_mcp_tool: Some("plan".to_string()),
         },
     ]
 }

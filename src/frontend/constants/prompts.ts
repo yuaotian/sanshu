@@ -130,6 +130,30 @@ export const MCP_TOOLS_CONFIG: ToolPromptConfig[] = [
     },
   },
 
+  // plan - 工作区开发计划跟踪
+  {
+    id: 'plan',
+    name: '开发计划跟踪',
+    description: '按工作区维护当前开发执行计划与步骤状态',
+    prompt: {
+      base: '',
+      whenToUse: [
+        '用户启用计划跟踪上下文后，在开发开始前提交计划并持续更新状态',
+      ],
+      howToUse: [
+        '`set` 完整替换计划；`update` 只更新单项状态；`get` 查询；`clear` 清空',
+        '状态按 `pending -> in_progress -> completed` 单向推进，同一时间最多一个进行中步骤',
+      ],
+    },
+    ui: {
+      enabled: true,
+      canDisable: true,
+      icon: 'i-carbon-list-checked text-lg text-teal-600 dark:text-teal-400',
+      iconBg: 'bg-teal-100',
+      darkIconBg: 'dark:bg-teal-900',
+    },
+  },
+
   // ji (记) - 记忆管理
   {
     id: 'memory',
