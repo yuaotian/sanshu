@@ -193,25 +193,44 @@ fn merge_default_shortcuts(config: &mut AppConfig) {
     }
 }
 
-/// 合并默认自定义提示词配置，确保新的默认提示词被添加到现有配置中
-/// 保留用户对已有提示词的修改（如 current_state、template_true 等）
+/// 返回需要迁移的旧版内置快捷模板名称。
+/// 中文说明：同时匹配固定 ID 和旧名称，避免覆盖用户自行修改过的模板名称。
+fn legacy_default_prompt_name(id: &str) -> Option<&'static str> {
+    match id {
+        "default_1" => Some("✅Done"),
+        "default_2" => Some("🧹Clear"),
+        "default_3" => Some("✨New Issue"),
+        "default_4" => Some("🧠Remember"),
+        "default_5" => Some("📝Summary And Restart"),
+        "default_6" => Some("🔍Review And Plan"),
+        _ => None,
+    }
+}
+
+/// 合并默认自定义提示词配置，确保新模板和内置名称迁移对现有配置生效。
+/// 保留用户对已有提示词的修改（如名称、current_state、template_true 等）。
 fn merge_default_custom_prompts(config: &mut AppConfig) {
     let default_prompts = default_custom_prompts();
 
     // 遍历所有默认提示词
     for default_prompt in default_prompts {
-        // 检查用户配置中是否已存在该提示词（按 ID 匹配）
-        let exists = config
+        // 中文说明：仅更新仍使用旧英文默认名的内置模板，其余用户配置保持原样。
+        if let Some(existing_prompt) = config
             .custom_prompt_config
             .prompts
-            .iter()
-            .any(|p| p.id == default_prompt.id);
-
-        if !exists {
+            .iter_mut()
+            .find(|prompt| prompt.id == default_prompt.id)
+        {
+            if legacy_default_prompt_name(&existing_prompt.id)
+                == Some(existing_prompt.name.as_str())
+            {
+                existing_prompt.name = default_prompt.name;
+                existing_prompt.updated_at = chrono::Utc::now().to_rfc3339();
+            }
+        } else {
             // 用户配置中不存在，添加新的默认提示词
             config.custom_prompt_config.prompts.push(default_prompt);
         }
-        // 如果存在，保留用户的修改，不覆盖
     }
 
     // 按 sort_order 重新排序，确保显示顺序正确

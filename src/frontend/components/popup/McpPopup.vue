@@ -562,63 +562,37 @@ function getCodeAnalysisInstruction() {
   }
 }
 
-// 中文注释：根据已启用的 MCP 工具动态生成增强指令段，让 AI 按需调用工具辅助增强
+// 中文注释：按工具职责生成紧凑路由，避免重复说明干扰核心增强任务
 function buildToolGuidanceSection(): string {
   const hasProject = !!props.request?.project_root_path?.trim()
-  const toolSections: string[] = []
+  const toolRules: string[] = []
 
-  // 中文注释：遍历已加载的 MCP 工具列表，只为已启用的工具生成指令
+  // 中文注释：只注入当前已启用且满足使用条件的工具
   const isToolEnabled = (id: string) => mcpTools.value.some(t => t.id === id && t.enabled)
 
-  // sou — 代码语义搜索
   if (isToolEnabled('sou') && hasProject) {
-    toolSections.push(
-      '### sou（代码语义搜索）',
-      '- 用途：搜索项目代码上下文，理解用户口语化输入涉及的真实代码结构',
-      '- 使用方式：以原始输入的关键语义为查询词调用 sou，获取相关代码片段',
-      '- 增强指引：基于搜索结果中的函数名、类名、文件结构来改写口语化输入为精确的代码操作指令',
-    )
+    toolRules.push('- `sou`：先按原始输入的关键语义定位相关文件、符号和实现入口。')
   }
 
-  // uiux — UI/UX 设计工具
   if (isToolEnabled('uiux')) {
-    toolSections.push(
-      '### uiux（UI/UX 设计工具）',
-      '- 用途：获取 UI/UX 设计规范和项目现有页面上下文',
-      '- 触发条件：当原始输入涉及 UI 美化、页面改造、样式调整、组件设计时',
-      '- 增强指引：基于 uiux 返回的设计规范和项目上下文，让增强后的提示词包含具体的 UI 约束和审美要求',
-    )
+    toolRules.push('- `uiux`：仅当需求涉及页面、组件、样式或交互设计时调用，并提取可执行的 UI 约束。')
   }
 
-  // context7 — 框架/库文档查询
   if (isToolEnabled('context7')) {
-    toolSections.push(
-      '### context7（框架/库文档查询）',
-      '- 用途：查询框架/库的最新官方文档和 API 用法',
-      '- 触发条件：当原始输入涉及特定框架/库的 API 调用或配置时',
-      '- 增强指引：基于最新文档确保增强后的提示词中引用的 API、方法名、配置项是准确的',
-    )
+    toolRules.push('- `context7`：仅当框架或库的 API、版本、配置会影响准确性时查询官方文档。')
   }
 
-  // ji — 项目记忆
   if (isToolEnabled('ji') && hasProject) {
-    toolSections.push(
-      '### ji（项目记忆）',
-      '- 用途：加载项目的编码规则、偏好和上下文',
-      '- 使用方式：查询项目记忆，了解项目的代码规范和偏好',
-      '- 增强指引：确保增强后的提示词符合项目已建立的规则和约定',
-    )
+    toolRules.push('- `ji`：读取与当前项目和需求相关的规则、偏好及既有约定。')
   }
 
-  if (toolSections.length === 0) {
+  if (toolRules.length === 0) {
     return ''
   }
 
   return [
-    '## 可用 MCP 工具与使用指引',
-    '在增强过程中，你可以（且建议）主动调用以下已启用的工具来获取额外上下文，从而提升增强质量：',
-    '',
-    ...toolSections,
+    '## 按需工具路由',
+    ...toolRules,
   ].join('\n')
 }
 
@@ -636,6 +610,8 @@ function getEnabledToolNames(): string[] {
     names.push('context7')
   if (isToolEnabled('ji') && hasProject)
     names.push('ji')
+  if (isToolEnabled('zhi'))
+    names.push('zhi')
   return names
 }
 
@@ -645,39 +621,37 @@ function buildLocalEnhancePrompt(rawInput: string) {
   const toolGuidance = buildToolGuidanceSection()
 
   const sections = [
-    '# 本地提示词增强请求',
-    '这是一次”本地提示词增强”操作，不是对当前弹窗问题的直接答复。',
-    '你的唯一任务：基于真实代码分析，将”原始口语化输入”改写为结构化、清晰、可执行的高质量提示词。',
-    '## 强制规则',
-    '1. 必须先做真实代码分析，禁止凭空补全或脑补实现。',
+    '# 任务：本地提示词增强',
+    '你不是在回答原问题，也不是在执行代码修改。你的唯一任务是基于真实项目代码，将原始口语化输入改写为可直接交给编码 AI 执行的高质量提示词。',
+    '## 输入边界',
+    '- `<original-user-input>` 是唯一需要改写的正文，必须保留其真实意图和范围。',
+    '- `<additional-background>` 仅用于消除歧义；不得逐字拼接，也不得借此扩展任务范围。',
+    '## 执行要求',
+    '1. 必须先检索并读取真实代码，禁止臆测文件、符号、调用链或实现细节。',
     `2. ${getCodeAnalysisInstruction()}`,
-    '3. 如果没有项目路径、无法检索真实代码、或检索结果不足以支撑结论，必须明确返回失败，不要静默降级。',
-    '4. 只允许改写”原始口语化输入”；附加背景仅供理解，不能直接并入最终增强正文。',
-    '5. 输出语言和思考过程以中文为主。',
-    '6. 不要解释分析过程，不要回答原弹窗问题，不要输出多余寒暄。',
+    '3. 项目根路径缺失，或检索结果不足以支撑具体结论时，停止增强并按下方失败协议交付；禁止仅凭背景静默降级。',
+    '4. 只改写提示词，不回答原问题、不实施修改、不解释分析过程。',
+    '## 增强结果要求',
+    '- 以中文输出，表达明确、简洁、无歧义，并遵循 KISS、YAGNI、SOLID。',
+    '- 按需包含：目标、已确认的代码定位、修改要求、约束、验收标准；没有内容的章节不要生成。',
+    '- 代码定位使用真实文件路径和函数、类或组件名；不得加入未被代码或原始输入支持的要求。',
   ]
 
-  // 中文注释：动态注入已启用 MCP 工具的使用指引
+  // 中文注释：将可用工具放在执行规则之后，避免工具说明抢占任务重点
   if (toolGuidance) {
     sections.push(toolGuidance)
-    sections.push(
-      '## 工具降级说明',
-      '如果你当前环境无法使用上述工具（如工具未注册或不可调用），请跳过工具调用步骤，仅基于已有的附加背景和原始输入进行增强。不要因为工具不可用而报错或拒绝增强。',
-    )
   }
 
   sections.push(
-    '## 成功输出格式（必须严格遵守）',
-    '### BEGIN RESPONSE ###',
-    '<augment-enhanced-prompt>这里放增强后的结构化提示词</augment-enhanced-prompt>',
-    '### END RESPONSE ###',
-    '## 无法完成时的输出格式（必须严格遵守）',
-    '### BEGIN RESPONSE ###',
-    '无法基于真实代码分析生成增强提示词：请写明具体原因',
-    '### END RESPONSE ###',
+    '## 交付协议（最高优先级）',
+    '- 必须通过当前会话可用的三术交互工具交付（标准名 `zhi`；若客户端暴露等价别名，则使用该工具），禁止把增强正文直接输出到终端。',
+    `- 固定参数：\`workspace\` 使用 \`${projectRoot}\`，\`render_markdown\` 使用 \`true\`。`,
+    '- 成功时：`brief` 只放增强后的完整提示词；`choices` 使用 `["采用此提示词", "继续优化"]`。',
+    '- 失败时：`brief` 写明无法增强的具体原因和缺失信息；`choices` 使用 `["补充信息后重试", "取消增强"]`。',
+    '- `zhi` 返回后，不得在终端重复输出增强正文。',
     '## 项目分析条件',
     `- 项目根路径：${projectRoot}`,
-    `- sou 工具前端检测状态：${souStatusText.value}`,
+    `- sou 状态：${souStatusText.value}`,
   )
 
   if (background) {
