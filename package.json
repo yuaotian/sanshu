@@ -18,6 +18,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint . --fix",
+    "test:unit": "vitest run",
     "tauri": "cargo tauri",
     "tauri:dev": "cargo tauri dev",
     "tauri:build": "cargo tauri build",
@@ -51,10 +52,13 @@
     "@unocss/preset-typography": "^66.2.1",
     "@unocss/preset-web-fonts": "^66.2.1",
     "@vitejs/plugin-vue": "^5.2.4",
+    "@vue/test-utils": "2.4.11",
     "eslint": "^9.29.0",
     "eslint-plugin-format": "^1.0.1",
+    "happy-dom": "20.10.6",
     "naive-ui": "^2.41.1",
     "unocss": "^66.2.1",
-    "vite": "^6.3.5"
+    "vite": "^6.3.5",
+    "vitest": "4.1.10"
   }
 }

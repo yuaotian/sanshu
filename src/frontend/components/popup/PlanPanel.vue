@@ -20,9 +20,13 @@ const completedAnimationId = ref('')
 
 let mounted = false
 let loadSequence = 0
+let lifecycleGeneration = 0
+let watchGeneration = 0
 let unlistenPlanUpdate: UnlistenFn | null = null
 let animationTimer: ReturnType<typeof setTimeout> | null = null
 let previousStatuses = new Map<string, PlanStatus>()
+let listenerSetupPromise: Promise<boolean> | null = null
+let watchSetupQueue: Promise<void> = Promise.resolve()
 
 const items = computed(() => snapshot.value?.items ?? [])
 const completed = computed(() => snapshot.value?.summary.completed ?? 0)
@@ -75,7 +79,7 @@ function applySnapshot(nextSnapshot: PlanSnapshot) {
   }
 }
 
-async function loadPlan(showLoading = false) {
+async function loadPlan(showLoading = false, workspace = props.workspace) {
   const sequence = ++loadSequence
   if (showLoading)
     loading.value = true
@@ -83,7 +87,7 @@ async function loadPlan(showLoading = false) {
 
   try {
     const nextSnapshot = await invoke<PlanSnapshot>('get_plan_snapshot', {
-      workspace: props.workspace,
+      workspace,
     })
     if (sequence === loadSequence)
       applySnapshot(nextSnapshot)
@@ -98,62 +102,131 @@ async function loadPlan(showLoading = false) {
   }
 }
 
-async function startWorkspaceWatch() {
+function isCurrentWatch(generation: number): boolean {
+  return mounted && generation === watchGeneration
+}
+
+function isCurrentLifecycle(generation: number): boolean {
+  return mounted && generation === lifecycleGeneration
+}
+
+async function stopWorkspaceWatch() {
+  try {
+    await invoke('stop_plan_watch')
+  }
+  catch (error) {
+    console.warn('停止计划文件监听失败：', error)
+  }
+}
+
+async function startWorkspaceWatch(generation: number, workspace: string) {
+  if (!isCurrentWatch(generation))
+    return
+
   watchError.value = ''
   previousStatuses.clear()
   snapshot.value = null
   loading.value = true
 
+  let started = false
   try {
-    await invoke('start_plan_watch', { workspace: props.workspace })
+    await invoke('start_plan_watch', { workspace })
+    started = true
   }
   catch (error) {
-    watchError.value = String(error)
+    if (isCurrentWatch(generation))
+      watchError.value = String(error)
+  }
+
+  if (!isCurrentWatch(generation)) {
+    if (started)
+      await stopWorkspaceWatch()
+    return
   }
 
   // 中文说明：监听建立后再读取，覆盖监听启动前发生更新的竞态窗口。
-  await loadPlan(true)
+  loadPlan(true, workspace)
+}
+
+function queueWorkspaceWatch(generation: number, workspace: string): Promise<void> {
+  // 中文说明：串行建立 watcher，过期任务完成后先清理，再启动最新工作区。
+  watchSetupQueue = watchSetupQueue.then(() => startWorkspaceWatch(generation, workspace))
+  return watchSetupQueue
 }
 
 async function retry() {
-  await ensurePlanListener()
-  await startWorkspaceWatch()
+  await restartWorkspaceWatch()
 }
 
-async function ensurePlanListener() {
+async function ensurePlanListener(): Promise<boolean> {
   if (unlistenPlanUpdate)
-    return
+    return mounted
+  if (listenerSetupPromise)
+    return listenerSetupPromise
+
+  const generation = lifecycleGeneration
+  const setupPromise = (async () => {
+    try {
+      const unlisten = await listen('plan-updated', () => {
+        if (mounted)
+          loadPlan()
+      })
+      if (!isCurrentLifecycle(generation)) {
+        unlisten()
+        return false
+      }
+      unlistenPlanUpdate = unlisten
+      eventError.value = ''
+      return true
+    }
+    catch (error) {
+      if (!isCurrentLifecycle(generation))
+        return false
+      eventError.value = String(error)
+      return true
+    }
+  })()
+  listenerSetupPromise = setupPromise
   try {
-    unlistenPlanUpdate = await listen('plan-updated', () => {
-      loadPlan()
-    })
-    eventError.value = ''
+    return await setupPromise
   }
-  catch (error) {
-    eventError.value = String(error)
+  finally {
+    if (listenerSetupPromise === setupPromise)
+      listenerSetupPromise = null
+  }
+}
+
+async function restartWorkspaceWatch() {
+  const generation = ++watchGeneration
+  const workspace = props.workspace
+  loadSequence += 1
+
+  if (await ensurePlanListener()) {
+    if (isCurrentWatch(generation))
+      await queueWorkspaceWatch(generation, workspace)
   }
 }
 
 onMounted(async () => {
   mounted = true
-  await ensurePlanListener()
-  await startWorkspaceWatch()
+  await restartWorkspaceWatch()
 })
 
 watch(() => props.workspace, async (workspace, previousWorkspace) => {
   if (mounted && workspace !== previousWorkspace)
-    await startWorkspaceWatch()
+    await restartWorkspaceWatch()
 })
 
 onUnmounted(() => {
   mounted = false
+  lifecycleGeneration += 1
+  watchGeneration += 1
   loadSequence += 1
   if (animationTimer)
     clearTimeout(animationTimer)
   unlistenPlanUpdate?.()
-  invoke('stop_plan_watch').catch((error) => {
-    console.warn('停止计划文件监听失败：', error)
-  })
+  unlistenPlanUpdate = null
+  stopWorkspaceWatch()
 })
 </script>
 
