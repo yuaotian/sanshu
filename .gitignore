@@ -97,3 +97,5 @@ test/
 .claude
 
 issue/*
+
+*.env
