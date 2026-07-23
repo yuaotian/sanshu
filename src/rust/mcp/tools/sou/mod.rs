@@ -213,6 +213,31 @@ impl SouRuntimeConfig {
     }
 }
 
+/// 当前 sou 后端策略是否包含 fast-context（default/both 直达，或 auto 顺序中包含）。
+/// 供 uiux 等上层工具判断"用户是否开启了 fast-context 检索链路"。
+pub fn fast_context_in_strategy() -> bool {
+    let Ok(config) = SouRuntimeConfig::load() else {
+        return false;
+    };
+    match config.default_backend.as_str() {
+        BACKEND_FAST_CONTEXT | BACKEND_BOTH => true,
+        BACKEND_AUTO => config
+            .auto_order
+            .iter()
+            .any(|backend| backend == BACKEND_FAST_CONTEXT),
+        _ => false,
+    }
+}
+
+/// 是否能在本地检测到 fast-context API Key（配置 → 环境变量 → Devin/Windsurf 登录库）。
+/// 此函数不发起远端请求；Key 的实际有效性由后续检索结果确认。
+pub fn fast_context_key_detected() -> bool {
+    let Ok(config) = SouRuntimeConfig::load() else {
+        return false;
+    };
+    fast_context::detect_api_key(config.fast_context.api_key.as_deref()).is_ok()
+}
+
 fn resolve_strategy(request_backend: Option<&str>, config: &SouRuntimeConfig) -> String {
     let requested = request_backend
         .and_then(normalize_backend)

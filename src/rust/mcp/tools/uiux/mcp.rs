@@ -1,5 +1,6 @@
 // UI/UX MCP 工具定义与调用入口
-// 新协议目标：单一 uiux 工具，内部统一编排 sou 检索与本地 markdown 降级。
+// 新协议目标：单一 uiux 工具，知识检索优先走 fast-context 定向检索物化知识库，
+// 不可用时降级本地 markdown 检索；项目上下文仍通过 sou 检索用户项目。
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -9,24 +10,29 @@ use rmcp::model::{CallToolResult, Content, ErrorData as McpError, Tool};
 use serde::Serialize;
 
 use crate::config::load_standalone_config;
-use crate::mcp::tools::sou::SouRequest;
+use crate::mcp::tools::sou::{fast_context_in_strategy, fast_context_key_detected, SouRequest};
 use crate::mcp::tools::SouTool;
 use crate::{log_debug, log_important};
 
+use super::knowledge_base;
 use super::localize;
 use super::markdown_search;
 use super::response::{UiuxError, UiuxResponse};
-use super::types::{UiuxAction, UiuxLang, UiuxOutputFormat, UiuxRequest};
+use super::types::{UiuxAction, UiuxKnowledgeBackend, UiuxLang, UiuxOutputFormat, UiuxRequest};
 
 const DEFAULT_MAX_RESULTS: u32 = 3;
-const UIUX_MARKDOWN_FILENAME: &str = "ui-ux-pro-max-skill.md";
-const UIUX_MARKDOWN_PATH: &str = "src/rust/assets/resources/ui-ux-pro-max-skill.md";
+// fast-context 定向知识检索的收敛参数：知识库目录只有单个 markdown 文件，
+// 压缩树深/轮数/命令数以降低延迟与远端配额消耗
+const KB_FAST_CONTEXT_TREE_DEPTH: u8 = 2;
+const KB_FAST_CONTEXT_MAX_TURNS: u8 = 2;
+const KB_FAST_CONTEXT_MAX_COMMANDS: u8 = 6;
 
 #[derive(Clone, Copy)]
 struct UiuxDefaults {
     lang: UiuxLang,
     output_format: UiuxOutputFormat,
     max_results_cap: u32,
+    knowledge_backend: UiuxKnowledgeBackend,
 }
 
 impl UiuxDefaults {
@@ -45,11 +51,17 @@ impl UiuxDefaults {
             .and_then(|c| c.uiux_max_results_cap)
             .unwrap_or(10)
             .max(1);
+        // 知识检索后端：默认 auto（fast-context 可用则优先）
+        let knowledge_backend = mcp_config
+            .and_then(|c| c.uiux_knowledge_backend.as_deref())
+            .and_then(parse_knowledge_backend)
+            .unwrap_or(UiuxKnowledgeBackend::Auto);
 
         Self {
             lang,
             output_format,
             max_results_cap,
+            knowledge_backend,
         }
     }
 }
@@ -109,6 +121,7 @@ impl UiuxTool {
                 "context_query": { "type": "string", "description": "项目上下文检索查询（可选，不传则自动生成）" },
                 "append_project_context": { "type": "boolean", "description": "是否追加项目上下文，默认 true" },
                 "max_results": { "type": "number", "description": "最大返回结果数（可选）" },
+                "knowledge_backend": { "type": "string", "enum": ["auto", "fast_context", "local"], "description": "知识检索后端（可选）：按请求覆盖全局默认值；local 可作为 A/B 基线" },
                 "output_format": { "type": "string", "enum": ["json", "text"], "description": "输出格式（兼容字段，当前统一返回 JSON）" },
                 "lang": { "type": "string", "enum": ["zh", "en"], "description": "输出语言（zh/en）" }
             },
@@ -160,6 +173,7 @@ async fn handle_request(
     let lang = resolve_lang(req.lang, defaults);
     let _output_format = resolve_output_format(req.output_format, defaults);
     let action = req.action.unwrap_or(UiuxAction::Beautify);
+    let knowledge_backend = req.knowledge_backend.unwrap_or(defaults.knowledge_backend);
     let max_results = req
         .max_results
         .unwrap_or(DEFAULT_MAX_RESULTS)
@@ -181,8 +195,8 @@ async fn handle_request(
     let mut degraded = false;
 
     let knowledge_result = collect_knowledge_hits(
+        knowledge_backend,
         sou_enabled,
-        req.project_root_path.as_deref(),
         &knowledge_query,
         max_results as usize,
     )
@@ -272,6 +286,16 @@ fn parse_output_format(value: &str) -> Option<UiuxOutputFormat> {
     }
 }
 
+fn parse_knowledge_backend(value: &str) -> Option<UiuxKnowledgeBackend> {
+    // 与 sou 后端命名保持一致的宽松归一化（兼容连字符写法）
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "auto" => Some(UiuxKnowledgeBackend::Auto),
+        "fast_context" | "fastcontext" | "fast" => Some(UiuxKnowledgeBackend::FastContext),
+        "local" | "local_markdown" => Some(UiuxKnowledgeBackend::Local),
+        _ => None,
+    }
+}
+
 fn resolve_lang(request: Option<UiuxLang>, defaults: UiuxDefaults) -> UiuxLang {
     request.unwrap_or(defaults.lang)
 }
@@ -315,86 +339,81 @@ impl SearchOutcome {
     }
 }
 
+/// 知识检索主链路：
+/// 1) fast-context 可用时，把内嵌知识库物化到本地目录后做定向检索（LLM 精确语义匹配）
+/// 2) 不可用或失败时，降级到本地 bigram 打分检索
+///
+/// 说明：旧实现会先在"用户项目"里用 sou 查找 ui-ux-pro-max-skill.md，但该文件
+/// 只内嵌于三术自身，目标项目必然不存在，等于每次浪费一次完整 sou 调用后仍然
+/// 降级，因此该死路径已移除。
 async fn collect_knowledge_hits(
+    knowledge_backend: UiuxKnowledgeBackend,
     sou_enabled: bool,
-    project_root_path: Option<&str>,
     query: &str,
     max_results: usize,
 ) -> SearchOutcome {
-    if !sou_enabled {
-        return SearchOutcome {
-            source: "local_markdown".to_string(),
-            hits: markdown_search::search_markdown(query, max_results)
-                .into_iter()
-                .map(|hit| UiuxSnippet {
-                    source: hit.source,
-                    location: Some(hit.location),
-                    excerpt: hit.excerpt,
-                })
-                .collect(),
-            degraded: true,
-            message: Some("sou 未启用，已直接使用本地 markdown 检索".to_string()),
+    // auto 尊重 sou 工具开关与后端策略；fast_context 为用户显式强制，只要求
+    // API Key 可检测；local 直接走本地检索（便于 A/B 效果对比）
+    let use_fast_context = should_use_fast_context(
+        knowledge_backend,
+        sou_enabled,
+        fast_context_in_strategy(),
+        fast_context_key_detected(),
+    );
+
+    if !use_fast_context {
+        let reason = match knowledge_backend {
+            UiuxKnowledgeBackend::Local => {
+                return local_markdown_outcome(
+                    query,
+                    max_results,
+                    false,
+                    "请求或配置指定 knowledge_backend=local，使用本地 markdown A/B 基线"
+                        .to_string(),
+                );
+            }
+            UiuxKnowledgeBackend::FastContext => {
+                "本地未检测到 fast-context API Key，已使用本地 markdown 检索"
+            }
+            UiuxKnowledgeBackend::Auto => {
+                "fast-context 未启用或本地未检测到 API Key，已使用本地 markdown 检索"
+            }
         };
+        return local_markdown_outcome(query, max_results, true, reason.to_string());
     }
 
-    if let Some(project_root_path) = project_root_path {
-        match search_sou_sections(project_root_path, query).await {
-            Ok(sections) => {
-                let hits: Vec<UiuxSnippet> = sections
-                    .into_iter()
-                    .filter(|section| section.location.contains(UIUX_MARKDOWN_FILENAME))
-                    .take(max_results)
-                    .map(|section| UiuxSnippet {
-                        source: "sou".to_string(),
-                        location: Some(section.location),
-                        excerpt: section.excerpt,
-                    })
-                    .collect();
-
-                if !hits.is_empty() {
-                    return SearchOutcome {
-                        source: "sou".to_string(),
-                        hits,
-                        degraded: false,
-                        message: Some(format!("sou 已命中 {}", UIUX_MARKDOWN_PATH)),
-                    };
-                }
-
-                return SearchOutcome {
-                    source: "local_markdown".to_string(),
-                    hits: markdown_search::search_markdown(query, max_results)
-                        .into_iter()
-                        .map(|hit| UiuxSnippet {
-                            source: hit.source,
-                            location: Some(hit.location),
-                            excerpt: hit.excerpt,
-                        })
-                        .collect(),
-                    degraded: true,
-                    message: Some(format!(
-                        "sou 未命中 {}，已降级到本地 markdown 检索",
-                        markdown_search::source_path()
-                    )),
-                };
-            }
-            Err(err) => {
-                return SearchOutcome {
-                    source: "local_markdown".to_string(),
-                    hits: markdown_search::search_markdown(query, max_results)
-                        .into_iter()
-                        .map(|hit| UiuxSnippet {
-                            source: hit.source,
-                            location: Some(hit.location),
-                            excerpt: hit.excerpt,
-                        })
-                        .collect(),
-                    degraded: true,
-                    message: Some(format!("sou 知识检索失败，已降级到本地 markdown：{}", err)),
-                };
-            }
-        }
+    match search_knowledge_via_fast_context(query, max_results).await {
+        Ok(hits) if !hits.is_empty() => SearchOutcome {
+            source: "fast_context_kb".to_string(),
+            hits,
+            degraded: false,
+            message: Some("fast-context 已在物化知识库目录完成定向检索".to_string()),
+        },
+        Ok(_) => local_markdown_outcome(
+            query,
+            max_results,
+            true,
+            "fast-context 知识检索无命中，已降级到本地 markdown 检索".to_string(),
+        ),
+        Err(err) => local_markdown_outcome(
+            query,
+            max_results,
+            true,
+            format!(
+                "fast-context 知识检索失败，已降级到本地 markdown 检索：{}",
+                err
+            ),
+        ),
     }
+}
 
+/// 本地 markdown 检索兜底结果（统一收敛三处重复的映射逻辑）
+fn local_markdown_outcome(
+    query: &str,
+    max_results: usize,
+    degraded: bool,
+    message: String,
+) -> SearchOutcome {
     SearchOutcome {
         source: "local_markdown".to_string(),
         hits: markdown_search::search_markdown(query, max_results)
@@ -405,9 +424,69 @@ async fn collect_knowledge_hits(
                 excerpt: hit.excerpt,
             })
             .collect(),
-        degraded: true,
-        message: Some("未提供 project_root_path，已直接使用本地 markdown 检索".to_string()),
+        degraded,
+        message: Some(message),
     }
+}
+
+/// 纯函数隔离后端选择规则，避免单测依赖本机配置或真实远端服务。
+fn should_use_fast_context(
+    backend: UiuxKnowledgeBackend,
+    sou_enabled: bool,
+    fast_context_in_strategy: bool,
+    fast_context_key_detected: bool,
+) -> bool {
+    match backend {
+        UiuxKnowledgeBackend::Local => false,
+        UiuxKnowledgeBackend::FastContext => fast_context_key_detected,
+        UiuxKnowledgeBackend::Auto => {
+            sou_enabled && fast_context_in_strategy && fast_context_key_detected
+        }
+    }
+}
+
+/// 物化知识库并用 fast-context 后端做定向检索
+async fn search_knowledge_via_fast_context(
+    query: &str,
+    max_results: usize,
+) -> Result<Vec<UiuxSnippet>, String> {
+    let kb_dir =
+        knowledge_base::ensure_materialized().map_err(|e| format!("知识库物化失败: {}", e))?;
+
+    let result = SouTool::search_context(SouRequest {
+        project_root_path: kb_dir,
+        query: query.to_string(),
+        backend: Some("fast_context".to_string()),
+        tree_depth: Some(KB_FAST_CONTEXT_TREE_DEPTH),
+        max_turns: Some(KB_FAST_CONTEXT_MAX_TURNS),
+        max_results: Some(max_results.clamp(1, 8) as u8),
+        max_commands: Some(KB_FAST_CONTEXT_MAX_COMMANDS),
+        timeout_ms: None,
+        exclude_paths: None,
+    })
+    .await
+    .map_err(|e| format!("sou 调用失败: {}", e))?;
+
+    let text = extract_call_result_text(&result);
+    if result.is_error.unwrap_or(false) || is_sou_error_text(&text) {
+        return Err(text);
+    }
+
+    // 只保留知识库文件本身的命中，防止意外扫到目录内其他文件
+    Ok(parse_sou_sections(&text)
+        .into_iter()
+        .filter(|section| {
+            section
+                .location
+                .contains(knowledge_base::UIUX_MARKDOWN_FILENAME)
+        })
+        .take(max_results)
+        .map(|section| UiuxSnippet {
+            source: "fast_context_kb".to_string(),
+            location: Some(section.location),
+            excerpt: section.excerpt,
+        })
+        .collect())
 }
 
 fn sou_enabled() -> bool {
@@ -594,11 +673,10 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
 }
 
 fn build_knowledge_query(query: &str, action: UiuxAction) -> String {
-    let mut parts = vec![
-        UIUX_MARKDOWN_FILENAME.to_string(),
-        "UI/UX Pro Max".to_string(),
-        query.to_string(),
-    ];
+    // 只保留"需求原文 + 动作主题词"。旧实现还会拼入 "ui-ux-pro-max-skill.md"、
+    // "UI/UX Pro Max" 等定位噪声词，导致本地打分偏向命中文档页脚/品牌字样
+    // 而非语义相关小节，已移除。
+    let mut parts = vec![query.to_string()];
     match action {
         UiuxAction::Beautify => parts.extend(
             [
@@ -802,7 +880,7 @@ fn render_snippets(snippets: &[UiuxSnippet]) -> String {
 
 fn is_project_context_candidate(location: &str) -> bool {
     let normalized = location.to_lowercase().replace('\\', "/");
-    if normalized.contains(UIUX_MARKDOWN_FILENAME)
+    if normalized.contains(knowledge_base::UIUX_MARKDOWN_FILENAME)
         || normalized.ends_with(".md")
         || normalized.contains("/rules/")
         || normalized.ends_with("readme.md")
@@ -820,4 +898,87 @@ fn is_project_context_candidate(location: &str) -> bool {
         || normalized.ends_with(".scss")
         || normalized.ends_with(".html")
         || normalized.ends_with(".rs")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_backend_parser_accepts_documented_values() {
+        assert_eq!(
+            parse_knowledge_backend("auto"),
+            Some(UiuxKnowledgeBackend::Auto)
+        );
+        assert_eq!(
+            parse_knowledge_backend("fast-context"),
+            Some(UiuxKnowledgeBackend::FastContext)
+        );
+        assert_eq!(
+            parse_knowledge_backend("local"),
+            Some(UiuxKnowledgeBackend::Local)
+        );
+    }
+
+    #[test]
+    fn local_backend_never_uses_fast_context() {
+        assert!(!should_use_fast_context(
+            UiuxKnowledgeBackend::Local,
+            true,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn forced_fast_context_only_requires_detected_key() {
+        assert!(should_use_fast_context(
+            UiuxKnowledgeBackend::FastContext,
+            false,
+            false,
+            true
+        ));
+        assert!(!should_use_fast_context(
+            UiuxKnowledgeBackend::FastContext,
+            true,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn auto_backend_requires_complete_fast_context_route() {
+        assert!(should_use_fast_context(
+            UiuxKnowledgeBackend::Auto,
+            true,
+            true,
+            true
+        ));
+        assert!(!should_use_fast_context(
+            UiuxKnowledgeBackend::Auto,
+            false,
+            true,
+            true
+        ));
+        assert!(!should_use_fast_context(
+            UiuxKnowledgeBackend::Auto,
+            true,
+            false,
+            true
+        ));
+        assert!(!should_use_fast_context(
+            UiuxKnowledgeBackend::Auto,
+            true,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn explicit_local_outcome_is_not_degraded() {
+        let outcome = local_markdown_outcome("仪表盘 配色", 1, false, "本地 A/B 基线".to_string());
+        assert_eq!(outcome.source, "local_markdown");
+        assert!(!outcome.degraded);
+        assert!(!outcome.hits.is_empty());
+    }
 }

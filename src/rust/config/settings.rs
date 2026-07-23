@@ -165,6 +165,8 @@ pub struct McpConfig {
     pub uiux_max_results_cap: Option<u32>,
     /// 是否启用 UI 提示词美化（默认 true）
     pub uiux_beautify_enabled: Option<bool>,
+    /// 知识检索后端："auto"（fast-context 可用则优先，默认）| "fast_context"（强制）| "local"（仅本地，便于 A/B 对比）
+    pub uiux_knowledge_backend: Option<String>,
 
     // 图标工坊配置
     /// 默认保存路径（相对于项目根目录，如 "assets/icons"）
@@ -392,6 +394,7 @@ pub fn default_mcp_config() -> McpConfig {
         uiux_output_format: Some("json".to_string()),
         uiux_max_results_cap: Some(10),
         uiux_beautify_enabled: Some(true),
+        uiux_knowledge_backend: Some("auto".to_string()),
         // 图标工坊配置默认值
         icon_default_save_path: None,    // 使用默认 "assets/icons"
         icon_default_format: None,       // 默认 SVG

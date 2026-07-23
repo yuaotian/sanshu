@@ -24,12 +24,13 @@ fn parse_uiux_json(text: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn uiux_beautify_uses_local_markdown_fallback_without_project_root() {
+async fn uiux_beautify_supports_explicit_local_ab_baseline() {
     let result = UiuxTool::call_tool(
         "uiux",
         json!({
             "query": "glassmorphism 毛玻璃 金融仪表盘",
             "action": "beautify",
+            "knowledge_backend": "local",
             "output_format": "json"
         }),
     )
@@ -44,7 +45,7 @@ async fn uiux_beautify_uses_local_markdown_fallback_without_project_root() {
         v["data"]["retrieval"]["knowledge_source"].as_str(),
         Some("local_markdown")
     );
-    assert_eq!(v["data"]["retrieval"]["degraded"].as_bool(), Some(true));
+    assert_eq!(v["data"]["retrieval"]["degraded"].as_bool(), Some(false));
     assert!(v["data"]["prompt"]
         .as_str()
         .unwrap_or_default()
@@ -62,6 +63,7 @@ async fn uiux_describe_returns_single_tool_contract() {
         json!({
             "query": "beauty spa wellness service elegant",
             "action": "describe",
+            "knowledge_backend": "local",
             "output_format": "json"
         }),
     )
@@ -75,7 +77,7 @@ async fn uiux_describe_returns_single_tool_contract() {
     assert!(v["data"]["prompt"]
         .as_str()
         .unwrap_or_default()
-        .contains("目标 UI 风格"));
+        .contains("UI 描述提示词"));
 }
 
 #[tokio::test]
@@ -85,6 +87,7 @@ async fn uiux_design_system_keeps_project_context_disabled_without_project_root(
         json!({
             "query": "后台管理面板 设计系统",
             "action": "design_system",
+            "knowledge_backend": "local",
             "output_format": "json"
         }),
     )
@@ -99,4 +102,23 @@ async fn uiux_design_system_keeps_project_context_disabled_without_project_root(
         Some(false)
     );
     assert!(v["text"].as_str().unwrap_or_default().contains("提示词"));
+}
+
+#[test]
+fn uiux_schema_exposes_request_level_knowledge_backend() {
+    let definitions = UiuxTool::get_tool_definitions();
+    let schema = definitions
+        .first()
+        .expect("uiux 工具定义应存在")
+        .input_schema
+        .as_ref();
+    let property = schema
+        .get("properties")
+        .and_then(|properties| properties.get("knowledge_backend"))
+        .expect("schema 应暴露 knowledge_backend");
+
+    assert_eq!(
+        property.get("enum").and_then(|value| value.as_array()),
+        Some(&vec![json!("auto"), json!("fast_context"), json!("local")])
+    );
 }
