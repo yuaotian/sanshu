@@ -54,6 +54,16 @@ pub enum UiuxKnowledgeBackend {
     Local,
 }
 
+impl UiuxKnowledgeBackend {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::FastContext => "fast_context",
+            Self::Local => "local",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UiuxRequest {
     pub query: String,

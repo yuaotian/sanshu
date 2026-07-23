@@ -37,6 +37,7 @@ pub fn search_markdown(query: &str, max_results: usize) -> Vec<MarkdownHit> {
     let tokens = collect_query_tokens(query);
     let mut ranked: Vec<(f64, MarkdownHit)> = chunk_markdown(UIUX_MARKDOWN)
         .into_iter()
+        .filter(is_searchable_chunk)
         .filter_map(|chunk| {
             let score = score_chunk(query, &tokens, &chunk);
             if score <= 0.0 {
@@ -58,6 +59,13 @@ pub fn search_markdown(query: &str, max_results: usize) -> Vec<MarkdownHit> {
 
     ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
     ranked.into_iter().map(|(_, hit)| hit).take(limit).collect()
+}
+
+fn is_searchable_chunk(chunk: &MarkdownChunk) -> bool {
+    !matches!(
+        chunk.heading.as_str(),
+        "使用说明" | "当前推荐调用方式" | "可用技术栈"
+    )
 }
 
 /// 按标题结构分块：一节一块保持语义完整（表格/列表不再被盲切拦腰截断）；
@@ -292,5 +300,33 @@ mod tests {
         assert_eq!(chunks[1].start_line, 3);
         assert_eq!(chunks[1].end_line, 5);
         assert_eq!(chunks[2].heading, "小节二");
+    }
+
+    #[test]
+    fn representative_queries_keep_relevant_knowledge_in_top_three() {
+        let cases = [
+            ("金融仪表盘 收入 现金流 审计", "Data-Dense Dashboard"),
+            ("表单 错误位置 内联验证 提交反馈", "表单"),
+            ("趋势 时间序列 折线图", "折线图"),
+            ("移动端 触摸目标 44x44", "触摸目标"),
+            ("glassmorphism 毛玻璃 模态框", "Glassmorphism"),
+            ("字体配对 仪表盘 数据 精确", "Dashboard Data"),
+        ];
+
+        for (query, expected) in cases {
+            let hits = search_markdown(query, 3);
+            assert!(
+                hits.iter().any(|hit| hit.excerpt.contains(expected)),
+                "查询 {query:?} 的 top-3 应包含 {expected:?}，实际为: {hits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn usage_metadata_is_excluded_from_knowledge_hits() {
+        let hits = search_markdown("glassmorphism 金融仪表盘 页面美化", 8);
+        assert!(hits.iter().all(|hit| {
+            !hit.excerpt.contains("当前推荐调用方式") && !hit.excerpt.contains("### 可用技术栈")
+        }));
     }
 }

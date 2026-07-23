@@ -46,6 +46,21 @@ async fn uiux_beautify_supports_explicit_local_ab_baseline() {
         Some("local_markdown")
     );
     assert_eq!(v["data"]["retrieval"]["degraded"].as_bool(), Some(false));
+    assert_eq!(
+        v["data"]["retrieval"]["requested_knowledge_backend"].as_str(),
+        Some("local")
+    );
+    assert_eq!(
+        v["data"]["retrieval"]["knowledge_hit_count"].as_u64(),
+        v["data"]["uiux_hits"]
+            .as_array()
+            .map(|hits| hits.len() as u64)
+    );
+    assert!(v["data"]["retrieval"]["knowledge_duration_ms"].is_u64());
+    assert_eq!(
+        v["data"]["retrieval"]["project_context_appended"].as_bool(),
+        Some(false)
+    );
     assert!(v["data"]["prompt"]
         .as_str()
         .unwrap_or_default()

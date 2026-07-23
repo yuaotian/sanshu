@@ -127,6 +127,8 @@ pub struct SaveAcemcpConfigArgs {
         alias = "sou_include_failed_backend_errors"
     )]
     pub sou_include_failed_backend_errors: Option<bool>,
+    #[serde(alias = "uiuxKnowledgeBackend", alias = "uiux_knowledge_backend")]
+    pub uiux_knowledge_backend: Option<String>,
     #[serde(alias = "fastContextCommand", alias = "fast_context_command")]
     pub fast_context_command: Option<String>,
     #[serde(alias = "fastContextScriptPath", alias = "fast_context_script_path")]
@@ -306,6 +308,13 @@ pub async fn save_acemcp_config(
         }
         if let Some(v) = args.sou_include_failed_backend_errors {
             config.mcp_config.sou_include_failed_backend_errors = Some(v);
+        }
+        if let Some(v) = args.uiux_knowledge_backend.as_deref() {
+            let normalized = v.trim().to_ascii_lowercase().replace('-', "_");
+            if !matches!(normalized.as_str(), "auto" | "fast_context" | "local") {
+                return Err(format!("未知的 UIUX 知识检索后端: {}", v));
+            }
+            config.mcp_config.uiux_knowledge_backend = Some(normalized);
         }
         if let Some(v) = args.fast_context_command.clone() {
             config.mcp_config.fast_context_command = Some(v);
@@ -1090,6 +1099,7 @@ pub struct AcemcpConfigResponse {
     pub sou_auto_order: Vec<String>,
     pub sou_include_backend_headers: bool,
     pub sou_include_failed_backend_errors: bool,
+    pub uiux_knowledge_backend: String,
     pub fast_context_command: String,
     pub fast_context_script_path: Option<String>,
     pub fast_context_api_key: Option<String>,
@@ -1242,6 +1252,11 @@ pub async fn get_acemcp_config(state: State<'_, AppState>) -> Result<AcemcpConfi
             .mcp_config
             .sou_include_failed_backend_errors
             .unwrap_or(true),
+        uiux_knowledge_backend: config
+            .mcp_config
+            .uiux_knowledge_backend
+            .clone()
+            .unwrap_or_else(|| "auto".to_string()),
         fast_context_command: config
             .mcp_config
             .fast_context_command

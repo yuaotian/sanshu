@@ -1,5 +1,6 @@
 param(
-    [switch]$SkipCheck
+    [switch]$SkipCheck,
+    [switch]$SkipFrontend
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,6 +21,7 @@ function Assert-NativeSuccess {
 try {
     $rustFiles = @(
         'src/rust/config/settings.rs'
+        'src/rust/mcp/tools/acemcp/commands.rs'
         'src/rust/mcp/tools/sou/mod.rs'
         'src/rust/mcp/tools/uiux/knowledge_base.rs'
         'src/rust/mcp/tools/uiux/markdown_search.rs'
@@ -34,12 +36,23 @@ try {
     cargo test --lib uiux::
     Assert-NativeSuccess 'UIUX 模块单元测试' $LASTEXITCODE
 
+    cargo test --lib mcp::tools::sou::tests
+    Assert-NativeSuccess 'sou 结构化片段单元测试' $LASTEXITCODE
+
     cargo test --test uiux_mcp
     Assert-NativeSuccess 'UIUX MCP 集成测试' $LASTEXITCODE
 
     if (-not $SkipCheck) {
         cargo check --lib
         Assert-NativeSuccess 'Rust library 编译检查' $LASTEXITCODE
+    }
+
+    if (-not $SkipFrontend) {
+        pnpm exec eslint src/frontend/components/tools/SouConfig.vue
+        Assert-NativeSuccess 'SouConfig ESLint 检查' $LASTEXITCODE
+
+        pnpm build
+        Assert-NativeSuccess '前端生产构建' $LASTEXITCODE
     }
 }
 finally {

@@ -5,12 +5,15 @@
 use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 use rmcp::model::{CallToolResult, Content, ErrorData as McpError, Tool};
 use serde::Serialize;
 
 use crate::config::load_standalone_config;
-use crate::mcp::tools::sou::{fast_context_in_strategy, fast_context_key_detected, SouRequest};
+use crate::mcp::tools::sou::{
+    fast_context_in_strategy, fast_context_key_detected, SouRequest, SouSection,
+};
 use crate::mcp::tools::SouTool;
 use crate::{log_debug, log_important};
 
@@ -83,10 +86,16 @@ struct UiuxQueries {
 
 #[derive(Debug, Clone, Serialize)]
 struct UiuxRetrieval {
+    requested_knowledge_backend: String,
     knowledge_source: String,
     project_context_source: String,
     project_context_enabled: bool,
+    project_context_appended: bool,
     degraded: bool,
+    knowledge_duration_ms: u128,
+    project_context_duration_ms: u128,
+    knowledge_hit_count: usize,
+    project_context_hit_count: usize,
     queries: UiuxQueries,
     messages: Vec<String>,
 }
@@ -99,12 +108,6 @@ struct UiuxData {
     uiux_hits: Vec<UiuxSnippet>,
     project_context: Vec<UiuxSnippet>,
     retrieval: UiuxRetrieval,
-}
-
-#[derive(Debug, Clone)]
-struct SouSection {
-    location: String,
-    excerpt: String,
 }
 
 pub struct UiuxTool;
@@ -190,48 +193,59 @@ async fn handle_request(
         None
     };
 
+    let knowledge_future = async {
+        let started = Instant::now();
+        let result = collect_knowledge_hits(
+            knowledge_backend,
+            sou_enabled,
+            &knowledge_query,
+            max_results as usize,
+        )
+        .await;
+        (result, started.elapsed().as_millis())
+    };
+    let project_future = async {
+        let started = Instant::now();
+        let result = if sou_enabled {
+            if let (Some(project_root_path), Some(project_query)) = (
+                req.project_root_path.as_deref(),
+                project_context_query.as_ref(),
+            ) {
+                collect_project_context_hits(
+                    project_root_path,
+                    project_query,
+                    req.current_file_path.as_deref(),
+                    max_results as usize,
+                )
+                .await
+            } else {
+                SearchOutcome::skipped("项目上下文未启用或缺少 project_root_path", false)
+            }
+        } else if project_context_enabled {
+            SearchOutcome::skipped("sou 未启用，已跳过项目上下文追加", true)
+        } else {
+            SearchOutcome::skipped("项目上下文未启用或缺少 project_root_path", false)
+        };
+        (result, started.elapsed().as_millis())
+    };
+    let ((knowledge_result, knowledge_duration_ms), (project_result, project_context_duration_ms)) =
+        tokio::join!(knowledge_future, project_future);
+
     let mut errors = Vec::new();
     let mut retrieval_messages = Vec::new();
-    let mut degraded = false;
-
-    let knowledge_result = collect_knowledge_hits(
-        knowledge_backend,
-        sou_enabled,
-        &knowledge_query,
-        max_results as usize,
-    )
-    .await;
     let knowledge_source = knowledge_result.source.clone();
     if let Some(message) = knowledge_result.message.as_ref() {
         retrieval_messages.push(message.clone());
     }
-    if knowledge_result.degraded {
-        degraded = true;
-    }
-
-    let project_result = if sou_enabled {
-        if let (Some(project_root_path), Some(project_query)) = (
-            req.project_root_path.as_deref(),
-            project_context_query.as_ref(),
-        ) {
-            collect_project_context_hits(
-                project_root_path,
-                project_query,
-                req.current_file_path.as_deref(),
-                max_results as usize,
-            )
-            .await
-        } else {
-            SearchOutcome::skipped("项目上下文未启用或缺少 project_root_path")
-        }
-    } else {
-        SearchOutcome::skipped("sou 未启用，已跳过项目上下文追加")
-    };
     let project_context_source = project_result.source.clone();
     if let Some(message) = project_result.message.as_ref() {
         retrieval_messages.push(message.clone());
     }
 
+    let degraded = knowledge_result.degraded || project_result.degraded;
+    let project_context_appended = !project_result.hits.is_empty();
+    let knowledge_hit_count = knowledge_result.hits.len();
+    let project_context_hit_count = project_result.hits.len();
     let uiux_hits = knowledge_result.hits;
     if uiux_hits.is_empty() {
         errors.push(UiuxError::new(
@@ -242,10 +256,16 @@ async fn handle_request(
 
     let prompt = build_prompt(action, &req.query, &uiux_hits, &project_result.hits);
     let retrieval = UiuxRetrieval {
+        requested_knowledge_backend: knowledge_backend.as_str().to_string(),
         knowledge_source,
         project_context_source,
         project_context_enabled,
+        project_context_appended,
         degraded,
+        knowledge_duration_ms,
+        project_context_duration_ms,
+        knowledge_hit_count,
+        project_context_hit_count,
         queries: UiuxQueries {
             knowledge_query,
             project_context_query,
@@ -262,7 +282,7 @@ async fn handle_request(
     };
 
     let text = if errors.is_empty() {
-        localize::success_summary(lang, action, project_context_enabled, degraded)
+        localize::success_summary(lang, action, project_context_appended, degraded)
     } else {
         localize::error_text(lang, "UI/UX 检索未返回知识片段，请检查查询词")
     };
@@ -329,11 +349,11 @@ struct SearchOutcome {
 }
 
 impl SearchOutcome {
-    fn skipped(message: &str) -> Self {
+    fn skipped(message: &str, degraded: bool) -> Self {
         Self {
             source: "skipped".to_string(),
             hits: Vec::new(),
-            degraded: false,
+            degraded,
             message: Some(message.to_string()),
         }
     }
@@ -453,7 +473,7 @@ async fn search_knowledge_via_fast_context(
     let kb_dir =
         knowledge_base::ensure_materialized().map_err(|e| format!("知识库物化失败: {}", e))?;
 
-    let result = SouTool::search_context(SouRequest {
+    let sections = SouTool::search_sections(SouRequest {
         project_root_path: kb_dir,
         query: query.to_string(),
         backend: Some("fast_context".to_string()),
@@ -467,13 +487,8 @@ async fn search_knowledge_via_fast_context(
     .await
     .map_err(|e| format!("sou 调用失败: {}", e))?;
 
-    let text = extract_call_result_text(&result);
-    if result.is_error.unwrap_or(false) || is_sou_error_text(&text) {
-        return Err(text);
-    }
-
     // 只保留知识库文件本身的命中，防止意外扫到目录内其他文件
-    Ok(parse_sou_sections(&text)
+    Ok(sections
         .into_iter()
         .filter(|section| {
             section
@@ -484,7 +499,7 @@ async fn search_knowledge_via_fast_context(
         .map(|section| UiuxSnippet {
             source: "fast_context_kb".to_string(),
             location: Some(section.location),
-            excerpt: section.excerpt,
+            excerpt: compact_sou_excerpt(&section.excerpt),
         })
         .collect())
 }
@@ -502,7 +517,19 @@ async fn collect_project_context_hits(
     current_file_path: Option<&str>,
     max_results: usize,
 ) -> SearchOutcome {
-    match search_sou_sections(project_root_path, query).await {
+    project_context_outcome(
+        search_sou_sections(project_root_path, query).await,
+        current_file_path,
+        max_results,
+    )
+}
+
+fn project_context_outcome(
+    result: Result<Vec<SouSection>, String>,
+    current_file_path: Option<&str>,
+    max_results: usize,
+) -> SearchOutcome {
+    match result {
         Ok(mut sections) => {
             sections.retain(|section| is_project_context_candidate(&section.location));
             if let Some(current_file_path) = current_file_path {
@@ -516,15 +543,19 @@ async fn collect_project_context_hits(
                 }
             }
 
-            let hits = sections
+            let hits: Vec<UiuxSnippet> = sections
                 .into_iter()
                 .take(max_results)
                 .map(|section| UiuxSnippet {
-                    source: "sou".to_string(),
+                    source: format!("sou:{}", section.backend),
                     location: Some(section.location),
-                    excerpt: section.excerpt,
+                    excerpt: compact_sou_excerpt(&section.excerpt),
                 })
                 .collect();
+
+            if hits.is_empty() {
+                return SearchOutcome::skipped("sou 未命中可追加的项目页面上下文", true);
+            }
 
             SearchOutcome {
                 source: "sou".to_string(),
@@ -536,7 +567,7 @@ async fn collect_project_context_hits(
         Err(err) => SearchOutcome {
             source: "skipped".to_string(),
             hits: Vec::new(),
-            degraded: false,
+            degraded: true,
             message: Some(format!("项目上下文追加失败，已跳过：{}", err)),
         },
     }
@@ -546,7 +577,7 @@ async fn search_sou_sections(
     project_root_path: &str,
     query: &str,
 ) -> Result<Vec<SouSection>, String> {
-    let result = SouTool::search_context(SouRequest {
+    SouTool::search_sections(SouRequest {
         project_root_path: project_root_path.to_string(),
         query: query.to_string(),
         backend: None,
@@ -558,104 +589,18 @@ async fn search_sou_sections(
         exclude_paths: None,
     })
     .await
-    .map_err(|e| format!("sou 调用失败: {}", e))?;
-
-    let text = extract_call_result_text(&result);
-    if result.is_error.unwrap_or(false) || is_sou_error_text(&text) {
-        return Err(text);
-    }
-
-    let sections = parse_sou_sections(&text);
-    if sections.is_empty() {
-        Err("sou 未返回可解析的代码片段".to_string())
-    } else {
-        Ok(sections)
-    }
+    .map_err(|e| format!("sou 调用失败: {}", e))
 }
 
-fn extract_call_result_text(result: &CallToolResult) -> String {
-    let value = serde_json::to_value(&result.content).unwrap_or_default();
-    value
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|first| {
-            first
-                .get("text")
-                .and_then(|v| v.as_str())
-                .or_else(|| first.get("data").and_then(|v| v.as_str()))
-        })
-        .unwrap_or_default()
-        .to_string()
-}
-
-fn is_sou_error_text(text: &str) -> bool {
-    let normalized = text.trim();
-    normalized.starts_with("Acemcp搜索失败:")
-        || normalized.starts_with("搜索失败:")
-        || normalized.starts_with("索引更新失败:")
-        || normalized.starts_with("代码搜索失败:")
-        || normalized.starts_with("FastContext搜索失败:")
-        || normalized.starts_with("sou搜索失败:")
-}
-
-fn parse_sou_sections(text: &str) -> Vec<SouSection> {
-    let mut sections = Vec::new();
-    let mut current_path: Option<String> = None;
-    let mut current_lines: Vec<String> = Vec::new();
-
-    for line in text.lines() {
-        if let Some(path) = line.strip_prefix("Path: ") {
-            flush_sou_section(&mut sections, &mut current_path, &mut current_lines);
-            current_path = Some(normalize_sou_location(path));
-            continue;
-        }
-
-        if line.starts_with("The following code sections were retrieved:") {
-            continue;
-        }
-
-        if current_path.is_some() {
-            current_lines.push(line.trim_end().to_string());
-        }
-    }
-
-    flush_sou_section(&mut sections, &mut current_path, &mut current_lines);
-    sections
-}
-
-fn normalize_sou_location(path: &str) -> String {
-    let trimmed = path.trim();
-    trimmed
-        .rsplit_once(" (L")
-        .map(|(location, _)| location.trim().to_string())
-        .unwrap_or_else(|| trimmed.to_string())
-}
-
-fn flush_sou_section(
-    sections: &mut Vec<SouSection>,
-    current_path: &mut Option<String>,
-    current_lines: &mut Vec<String>,
-) {
-    let Some(path) = current_path.take() else {
-        current_lines.clear();
-        return;
-    };
-
-    let excerpt = current_lines
-        .iter()
-        .filter(|line| !line.trim().is_empty() && line.trim() != "...")
+fn compact_sou_excerpt(excerpt: &str) -> String {
+    let excerpt = excerpt
+        .lines()
+        .filter(|line| !line.trim().is_empty())
         .take(24)
-        .cloned()
+        .map(str::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    let excerpt = truncate_text(&excerpt, 900);
-    if !excerpt.trim().is_empty() {
-        sections.push(SouSection {
-            location: path,
-            excerpt,
-        });
-    }
-    current_lines.clear();
+    truncate_text(&excerpt, 900)
 }
 
 fn truncate_text(text: &str, max_chars: usize) -> String {
@@ -879,7 +824,9 @@ fn render_snippets(snippets: &[UiuxSnippet]) -> String {
 }
 
 fn is_project_context_candidate(location: &str) -> bool {
-    let normalized = location.to_lowercase().replace('\\', "/");
+    let normalized = sou_location_path(location)
+        .to_lowercase()
+        .replace('\\', "/");
     if normalized.contains(knowledge_base::UIUX_MARKDOWN_FILENAME)
         || normalized.ends_with(".md")
         || normalized.contains("/rules/")
@@ -898,6 +845,17 @@ fn is_project_context_candidate(location: &str) -> bool {
         || normalized.ends_with(".scss")
         || normalized.ends_with(".html")
         || normalized.ends_with(".rs")
+}
+
+fn sou_location_path(location: &str) -> &str {
+    let Some((path, suffix)) = location.rsplit_once(':') else {
+        return location;
+    };
+    if suffix.contains('-') && suffix.chars().all(|ch| ch.is_ascii_digit() || ch == '-') {
+        path
+    } else {
+        location
+    }
 }
 
 #[cfg(test)]
@@ -980,5 +938,45 @@ mod tests {
         assert_eq!(outcome.source, "local_markdown");
         assert!(!outcome.degraded);
         assert!(!outcome.hits.is_empty());
+    }
+
+    #[test]
+    fn project_context_failure_and_empty_candidates_are_degraded() {
+        let failed = project_context_outcome(Err("backend error".to_string()), None, 3);
+        assert!(failed.degraded);
+        assert_eq!(failed.source, "skipped");
+
+        let filtered = project_context_outcome(
+            Ok(vec![SouSection {
+                backend: "ace".to_string(),
+                location: "E:/demo/README.md:1-10".to_string(),
+                excerpt: "说明".to_string(),
+            }]),
+            None,
+            3,
+        );
+        assert!(filtered.degraded);
+        assert!(filtered.hits.is_empty());
+    }
+
+    #[test]
+    fn project_context_success_preserves_backend_and_location() {
+        let outcome = project_context_outcome(
+            Ok(vec![SouSection {
+                backend: "fast_context".to_string(),
+                location: "E:/demo/Panel.vue:12-24".to_string(),
+                excerpt: "const open = ref(false)".to_string(),
+            }]),
+            Some("Panel.vue"),
+            3,
+        );
+
+        assert!(!outcome.degraded);
+        assert_eq!(outcome.hits.len(), 1);
+        assert_eq!(outcome.hits[0].source, "sou:fast_context");
+        assert_eq!(
+            outcome.hits[0].location.as_deref(),
+            Some("E:/demo/Panel.vue:12-24")
+        );
     }
 }

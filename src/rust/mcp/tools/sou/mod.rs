@@ -37,6 +37,14 @@ pub struct SouRequest {
     pub exclude_paths: Option<Vec<String>>,
 }
 
+/// crate 内部统一代码片段，供 uiux 等组合工具消费，避免重复解析 MCP 文本。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SouSection {
+    pub backend: String,
+    pub location: String,
+    pub excerpt: String,
+}
+
 #[derive(Debug, Clone)]
 struct SouRuntimeConfig {
     default_backend: String,
@@ -173,6 +181,47 @@ impl SouTool {
             other => Ok(error_result(format!("sou搜索失败: 未知后端策略 {}", other))),
         }
     }
+
+    /// 内部结构化搜索入口；对外 MCP 文本协议继续由 search_context 保持兼容。
+    pub(crate) async fn search_sections(request: SouRequest) -> Result<Vec<SouSection>, String> {
+        let config =
+            SouRuntimeConfig::load().map_err(|error| format!("读取 sou 配置失败: {}", error))?;
+        let strategy = resolve_strategy(request.backend.as_deref(), &config);
+        let results = match strategy.as_str() {
+            BACKEND_ACE => vec![run_ace(&request).await?],
+            BACKEND_FAST_CONTEXT => vec![
+                run_fast_context(
+                    &request,
+                    &config.fast_context,
+                    config.include_backend_headers,
+                )
+                .await?,
+            ],
+            BACKEND_AUTO => vec![run_auto_result(&request, &config).await.map_err(|errors| {
+                format_backend_errors("sou搜索失败: 所有后端均不可用", &errors)
+            })?],
+            BACKEND_BOTH => {
+                let (results, errors) = run_both_results(&request, &config).await;
+                if results.is_empty() {
+                    return Err(format_backend_errors(
+                        "sou搜索失败: 所有后端均不可用",
+                        &errors,
+                    ));
+                }
+                results
+            }
+            other => return Err(format!("sou搜索失败: 未知后端策略 {}", other)),
+        };
+        let sections = results
+            .into_iter()
+            .flat_map(|result| parse_sou_sections(&result.text, &result.backend))
+            .collect::<Vec<_>>();
+        if sections.is_empty() {
+            Err("sou 未返回可解析的代码片段".to_string())
+        } else {
+            Ok(sections)
+        }
+    }
 }
 
 impl SouRuntimeConfig {
@@ -286,6 +335,19 @@ async fn run_auto(
     request: &SouRequest,
     config: &SouRuntimeConfig,
 ) -> Result<CallToolResult, McpError> {
+    match run_auto_result(request, config).await {
+        Ok(result) => Ok(success_result(result.text)),
+        Err(errors) => Ok(error_result(format_backend_errors(
+            "sou搜索失败: 所有后端均不可用",
+            &errors,
+        ))),
+    }
+}
+
+async fn run_auto_result(
+    request: &SouRequest,
+    config: &SouRuntimeConfig,
+) -> Result<BackendRunResult, Vec<BackendRunError>> {
     let mut errors = Vec::new();
     for backend in &config.auto_order {
         log_important!(info, "[sou] auto 尝试后端: {}", backend);
@@ -305,7 +367,7 @@ async fn run_auto(
         match result {
             Ok(ok) => {
                 log_important!(info, "[sou] auto 后端成功: {}", ok.backend);
-                return Ok(success_result(ok.text));
+                return Ok(ok);
             }
             Err(message) => errors.push(BackendRunError {
                 backend: backend.clone(),
@@ -314,16 +376,46 @@ async fn run_auto(
         }
     }
 
-    Ok(error_result(format_backend_errors(
-        "sou搜索失败: 所有后端均不可用",
-        &errors,
-    )))
+    Err(errors)
 }
 
 async fn run_both(
     request: &SouRequest,
     config: &SouRuntimeConfig,
 ) -> Result<CallToolResult, McpError> {
+    let (outputs, errors) = run_both_results(request, config).await;
+
+    if outputs.is_empty() {
+        return Ok(error_result(format_backend_errors(
+            "sou搜索失败: 所有后端均不可用",
+            &errors,
+        )));
+    }
+
+    let mut text = outputs
+        .into_iter()
+        .map(|result| {
+            if config.include_backend_headers {
+                format!("### sou backend: {}\n\n{}", result.backend, result.text)
+            } else {
+                result.text
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    if config.include_failed_backend_errors && !errors.is_empty() {
+        text.push_str("\n\n---\n后端诊断：\n");
+        text.push_str(&format_backend_errors("", &errors));
+    }
+
+    Ok(success_result(text))
+}
+
+async fn run_both_results(
+    request: &SouRequest,
+    config: &SouRuntimeConfig,
+) -> (Vec<BackendRunResult>, Vec<BackendRunError>) {
     let (ace, fast) = tokio::join!(
         run_ace(request),
         run_fast_context(
@@ -362,31 +454,7 @@ async fn run_both(
         }
     }
 
-    if outputs.is_empty() {
-        return Ok(error_result(format_backend_errors(
-            "sou搜索失败: 所有后端均不可用",
-            &errors,
-        )));
-    }
-
-    let mut text = outputs
-        .into_iter()
-        .map(|result| {
-            if config.include_backend_headers {
-                format!("### sou backend: {}\n\n{}", result.backend, result.text)
-            } else {
-                result.text
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    if config.include_failed_backend_errors && !errors.is_empty() {
-        text.push_str("\n\n---\n后端诊断：\n");
-        text.push_str(&format_backend_errors("", &errors));
-    }
-
-    Ok(success_result(text))
+    (outputs, errors)
 }
 
 fn result_to_call_tool(
@@ -724,6 +792,95 @@ fn call_result_text(result: &CallToolResult) -> String {
         .to_string()
 }
 
+fn parse_sou_sections(text: &str, default_backend: &str) -> Vec<SouSection> {
+    let mut sections = Vec::new();
+    let mut backend = default_backend.to_string();
+    let mut current_location: Option<String> = None;
+    let mut current_lines = Vec::new();
+
+    for line in text.lines() {
+        if let Some(value) = line.strip_prefix("### sou backend: ") {
+            flush_sou_section(
+                &mut sections,
+                &backend,
+                &mut current_location,
+                &mut current_lines,
+            );
+            backend = value.trim().to_string();
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("Path: ") {
+            flush_sou_section(
+                &mut sections,
+                &backend,
+                &mut current_location,
+                &mut current_lines,
+            );
+            current_location = Some(normalize_sou_location(path));
+            continue;
+        }
+        if let Some(range) = line.strip_prefix("Lines: L") {
+            if let Some(location) = current_location.as_mut() {
+                *location = format!("{}:{}", location, range.trim().replace("-L", "-"));
+            }
+            continue;
+        }
+        if line.starts_with("The following code sections were retrieved:") {
+            continue;
+        }
+        if current_location.is_some() {
+            current_lines.push(line.trim_end().to_string());
+        }
+    }
+
+    flush_sou_section(
+        &mut sections,
+        &backend,
+        &mut current_location,
+        &mut current_lines,
+    );
+    sections
+}
+
+fn normalize_sou_location(path: &str) -> String {
+    let trimmed = path.trim();
+    if let Some((location, range)) = trimmed.rsplit_once(" (L") {
+        return format!(
+            "{}:{}",
+            location.trim(),
+            range.trim_end_matches(')').replace("-L", "-")
+        );
+    }
+    trimmed.to_string()
+}
+
+fn flush_sou_section(
+    sections: &mut Vec<SouSection>,
+    backend: &str,
+    current_location: &mut Option<String>,
+    current_lines: &mut Vec<String>,
+) {
+    let Some(location) = current_location.take() else {
+        current_lines.clear();
+        return;
+    };
+    let excerpt = current_lines
+        .iter()
+        .filter(|line| !line.trim().is_empty() && line.trim() != "...")
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    current_lines.clear();
+    if excerpt.trim().is_empty() {
+        return;
+    }
+    sections.push(SouSection {
+        backend: backend.to_string(),
+        location,
+        excerpt,
+    });
+}
+
 fn is_ace_unavailable_text(text: &str) -> bool {
     let normalized = text.trim();
     normalized.is_empty()
@@ -857,5 +1014,28 @@ mod tests {
             !should_retry_fast_context_search("RATE_LIMITED: Fast Context 当前限流，请稍后重试"),
             "限流类错误不应触发独立兜底重试，避免扩大远端压力"
         );
+    }
+
+    #[test]
+    fn typed_sections_parse_fast_context_ranges_and_backend() {
+        let text = "### sou backend: fast_context\n\nThe following code sections were retrieved:\n\nPath: E:/demo/ui.rs\nLines: L12-L18\nL12:fn render() {}\n\nPath: E:/demo/ui.rs\nLines: L40-L44\nL40:fn audit() {}\n";
+        let sections = parse_sou_sections(text, "fast_context");
+
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].backend, "fast_context");
+        assert_eq!(sections[0].location, "E:/demo/ui.rs:12-18");
+        assert_eq!(sections[0].excerpt, "L12:fn render() {}");
+        assert_eq!(sections[1].location, "E:/demo/ui.rs:40-44");
+    }
+
+    #[test]
+    fn typed_sections_keep_ace_legacy_locations() {
+        let text = "The following code sections were retrieved:\n\nPath: E:/demo/panel.vue (L8-L16)\nconst state = ref(false)\n";
+        let sections = parse_sou_sections(text, "ace");
+
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].backend, "ace");
+        assert_eq!(sections[0].location, "E:/demo/panel.vue:8-16");
+        assert_eq!(sections[0].excerpt, "const state = ref(false)");
     }
 }
