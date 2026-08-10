@@ -14,6 +14,11 @@
   --color-surface-900: #202020;
   --color-surface-950: #101010;
   --color-on-surface: #333333;
+  --color-on-surface-secondary: #6b7280;
+  --color-on-surface-muted: #9ca3af;
+  --color-container: #f9fafb;
+  --color-container-secondary: #f3f4f6;
+  --color-container-tertiary: #e5e7eb;
 
   /* 字体变量 - 由字体管理器动态设置 */
   --font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;

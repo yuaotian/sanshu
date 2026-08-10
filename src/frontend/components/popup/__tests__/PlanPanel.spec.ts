@@ -83,6 +83,7 @@ function mountPanel(workspace = 'C:/workspace-a') {
     global: {
       stubs: {
         'n-button': true,
+        'n-switch': true,
         'n-tooltip': true,
       },
     },
@@ -214,12 +215,53 @@ describe('plan panel watcher 生命周期', () => {
     await flushPromises()
     await wrapper.setProps({ workspace: 'C:/workspace-b' })
     await flushPromises()
-    expect(wrapper.text()).toContain('(1/1)')
+    expect(wrapper.text()).toContain('1/1')
 
     snapshotA.resolve(pendingSnapshot('C:/workspace-a'))
     await flushPromises()
-    expect(wrapper.text()).toContain('(1/1)')
+    expect(wrapper.text()).toContain('1/1')
     expect(wrapper.text()).not.toContain('(0/2)')
+
+    wrapper.unmount()
+    await flushPromises()
+  })
+
+  it('折叠态保留可理解的状态文本并归零原生按钮外观', async () => {
+    tauri.invoke.mockImplementation((command: string, args?: { workspace?: string }) => {
+      if (command === 'get_plan_snapshot')
+        return Promise.resolve(completedSnapshot(args?.workspace ?? ''))
+      return Promise.resolve()
+    })
+
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('已完成')
+    expect(wrapper.text()).toContain('1/1')
+    expect(wrapper.find('button[aria-expanded]').classes()).toContain('plan-reset-button')
+    expect(wrapper.find('button[aria-label="执行计划设置"]').classes()).toContain('plan-reset-button')
+
+    wrapper.unmount()
+    await flushPromises()
+  })
+
+  it('展开后可通过回车保存工作区本地备注', async () => {
+    tauri.invoke.mockImplementation((command: string, args?: { workspace?: string }) => {
+      if (command === 'get_plan_snapshot')
+        return Promise.resolve(completedSnapshot(args?.workspace ?? ''))
+      return Promise.resolve()
+    })
+
+    const wrapper = mountPanel()
+    await flushPromises()
+    await wrapper.find('button[aria-expanded]').trigger('click')
+
+    const input = wrapper.find('input[aria-label="添加执行计划本地备注"]')
+    await input.setValue('保留当前验收结论')
+    await input.trigger('keydown.enter')
+
+    expect(wrapper.text()).toContain('保留当前验收结论')
+    expect(localStorage.getItem('popup-plan-panel-note:C%3A%2Fworkspace-a')).toBe('保留当前验收结论')
 
     wrapper.unmount()
     await flushPromises()

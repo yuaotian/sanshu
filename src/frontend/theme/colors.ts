@@ -69,6 +69,19 @@ export const semanticColors = {
   primary: primaryColors,
   // 功能色
   ...functionalColors,
+  // 语义文本与容器色：供 UnoCSS 类名直接复用主题变量。
+  on: {
+    surface: {
+      DEFAULT: 'var(--color-on-surface)',
+      secondary: 'var(--color-on-surface-secondary)',
+      muted: 'var(--color-on-surface-muted)',
+    },
+  },
+  container: {
+    DEFAULT: 'var(--color-container)',
+    secondary: 'var(--color-container-secondary)',
+    tertiary: 'var(--color-container-tertiary)',
+  },
 }
 
 // 主题颜色定义
@@ -95,6 +108,7 @@ export const themeColors = {
     // 容器色
     container: '#f9fafb',
     containerSecondary: '#f3f4f6',
+    containerTertiary: '#e5e7eb',
     // 边框色
     border: '#e5e7eb',
     divider: '#e5e7eb',
@@ -121,6 +135,7 @@ export const themeColors = {
     // 容器色
     container: '#18181c',
     containerSecondary: '#1f1f23',
+    containerTertiary: '#27272a',
     // 边框色
     border: '#374151',
     divider: '#374151',

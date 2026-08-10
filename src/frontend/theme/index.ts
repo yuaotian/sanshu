@@ -127,6 +127,8 @@ export function applyThemeVariables(themeName: string) {
   root.style.setProperty('--color-on-surface-secondary', colors.onSurfaceSecondary)
   root.style.setProperty('--color-on-surface-muted', colors.onSurfaceMuted)
   root.style.setProperty('--color-container', colors.container)
+  root.style.setProperty('--color-container-secondary', colors.containerSecondary)
+  root.style.setProperty('--color-container-tertiary', colors.containerTertiary)
   root.style.setProperty('--color-border', colors.border)
   root.style.setProperty('--color-divider', colors.divider)
 
