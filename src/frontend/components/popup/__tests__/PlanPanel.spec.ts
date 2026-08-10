@@ -245,6 +245,64 @@ describe('plan panel watcher 生命周期', () => {
     await flushPromises()
   })
 
+  it('设置弹层关联触发器并在点击正文后关闭', async () => {
+    tauri.invoke.mockImplementation((command: string, args?: { workspace?: string }) => {
+      if (command === 'get_plan_snapshot')
+        return Promise.resolve(pendingSnapshot(args?.workspace ?? ''))
+      return Promise.resolve()
+    })
+
+    const wrapper = mountPanel()
+    await flushPromises()
+    await wrapper.find('button[aria-expanded]').trigger('click')
+    const settingsTrigger = wrapper.find('button[aria-label="执行计划设置"]')
+    await settingsTrigger.trigger('click')
+
+    expect(settingsTrigger.attributes('aria-controls')).toBe('plan-panel-settings')
+    expect(wrapper.find('#plan-panel-settings').attributes('aria-labelledby')).toBe('plan-panel-settings-label')
+
+    await wrapper.find('.plan-item').trigger('pointerdown')
+    await wrapper.find('.plan-item').trigger('click')
+    expect(wrapper.find('#plan-panel-settings').exists()).toBe(false)
+
+    wrapper.unmount()
+    await flushPromises()
+  })
+
+  it('覆盖空计划、读取失败和实时中断状态', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+    await wrapper.find('button[aria-expanded]').trigger('click')
+    expect(wrapper.text()).toContain('当前工作区暂无执行计划')
+    wrapper.unmount()
+    await flushPromises()
+
+    tauri.invoke.mockImplementation((command: string) => {
+      if (command === 'get_plan_snapshot')
+        return Promise.reject(new Error('读取失败'))
+      return Promise.resolve()
+    })
+    const readErrorWrapper = mountPanel()
+    await flushPromises()
+    await readErrorWrapper.find('button[aria-expanded]').trigger('click')
+    expect(readErrorWrapper.text()).toContain('计划读取失败')
+    readErrorWrapper.unmount()
+    await flushPromises()
+
+    tauri.invoke.mockImplementation((command: string, args?: { workspace?: string }) => {
+      if (command === 'get_plan_snapshot')
+        return Promise.resolve(pendingSnapshot(args?.workspace ?? ''))
+      return Promise.resolve()
+    })
+    tauri.listen.mockRejectedValueOnce(new Error('监听失败'))
+    const realtimeErrorWrapper = mountPanel()
+    await flushPromises()
+    await realtimeErrorWrapper.find('button[aria-expanded]').trigger('click')
+    expect(realtimeErrorWrapper.text()).toContain('实时刷新暂不可用')
+    realtimeErrorWrapper.unmount()
+    await flushPromises()
+  })
+
   it('展开后可通过回车保存工作区本地备注', async () => {
     tauri.invoke.mockImplementation((command: string, args?: { workspace?: string }) => {
       if (command === 'get_plan_snapshot')
@@ -262,6 +320,40 @@ describe('plan panel watcher 生命周期', () => {
 
     expect(wrapper.text()).toContain('保留当前验收结论')
     expect(localStorage.getItem('popup-plan-panel-note:C%3A%2Fworkspace-a')).toBe('保留当前验收结论')
+
+    wrapper.unmount()
+    await flushPromises()
+  })
+
+  it('已有备注可一键载入、替换或取消编辑', async () => {
+    localStorage.setItem('popup-plan-panel-note:C%3A%2Fworkspace-a', '原始备注')
+    tauri.invoke.mockImplementation((command: string, args?: { workspace?: string }) => {
+      if (command === 'get_plan_snapshot')
+        return Promise.resolve(completedSnapshot(args?.workspace ?? ''))
+      return Promise.resolve()
+    })
+
+    const wrapper = mountPanel()
+    await flushPromises()
+    await wrapper.find('button[aria-expanded]').trigger('click')
+
+    const input = wrapper.find('input[aria-label="添加执行计划本地备注"]')
+    await wrapper.find('button[aria-label="编辑本地备注"]').trigger('click')
+    expect((input.element as HTMLInputElement).value).toBe('原始备注')
+
+    await input.setValue('替换后的备注')
+    await input.trigger('keydown.esc')
+    expect((input.element as HTMLInputElement).value).toBe('')
+    expect(localStorage.getItem('popup-plan-panel-note:C%3A%2Fworkspace-a')).toBe('原始备注')
+
+    await wrapper.find('button[aria-label="编辑本地备注"]').trigger('click')
+    await input.setValue('替换后的备注')
+    await input.trigger('keydown.enter')
+    expect(localStorage.getItem('popup-plan-panel-note:C%3A%2Fworkspace-a')).toBe('替换后的备注')
+    expect(wrapper.text()).toContain('替换后的备注')
+
+    await wrapper.find('button[aria-label="清除本地备注"]').trigger('click')
+    expect(localStorage.getItem('popup-plan-panel-note:C%3A%2Fworkspace-a')).toBeNull()
 
     wrapper.unmount()
     await flushPromises()

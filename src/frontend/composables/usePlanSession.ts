@@ -6,13 +6,28 @@ import { computed, onMounted, onUnmounted, ref, type Ref, watch } from 'vue'
 
 interface UsePlanSessionOptions {
   workspace: Ref<string>
+  adapter?: PlanSessionAdapter
+}
+
+export interface PlanSessionAdapter {
+  getSnapshot: (workspace: string) => Promise<PlanSnapshot>
+  startWatch: (workspace: string) => Promise<void>
+  stopWatch: () => Promise<void>
+  listen: (handler: () => void) => Promise<UnlistenFn>
+}
+
+const tauriPlanSessionAdapter: PlanSessionAdapter = {
+  getSnapshot: workspace => invoke<PlanSnapshot>('get_plan_snapshot', { workspace }),
+  startWatch: workspace => invoke('start_plan_watch', { workspace }),
+  stopWatch: () => invoke('stop_plan_watch'),
+  listen: handler => listen('plan-updated', handler),
 }
 
 /**
  * 只管理计划会话，不把 Tauri 监听和过期请求保护泄漏到展示模板。
  * 业务层仍使用原有三个命令和 plan-updated 事件。
  */
-export function usePlanSession({ workspace }: UsePlanSessionOptions) {
+export function usePlanSession({ workspace, adapter = tauriPlanSessionAdapter }: UsePlanSessionOptions) {
   const snapshot = ref<PlanSnapshot | null>(null)
   const loading = ref(true)
   const readError = ref('')
@@ -49,9 +64,7 @@ export function usePlanSession({ workspace }: UsePlanSessionOptions) {
     readError.value = ''
 
     try {
-      const nextSnapshot = await invoke<PlanSnapshot>('get_plan_snapshot', {
-        workspace: requestedWorkspace,
-      })
+      const nextSnapshot = await adapter.getSnapshot(requestedWorkspace)
       if (sequence === loadSequence)
         snapshot.value = nextSnapshot
     }
@@ -67,7 +80,7 @@ export function usePlanSession({ workspace }: UsePlanSessionOptions) {
 
   async function stopWorkspaceWatch(): Promise<void> {
     try {
-      await invoke('stop_plan_watch')
+      await adapter.stopWatch()
     }
     catch (error) {
       console.warn('停止计划文件监听失败：', error)
@@ -84,7 +97,7 @@ export function usePlanSession({ workspace }: UsePlanSessionOptions) {
 
     let started = false
     try {
-      await invoke('start_plan_watch', { workspace: currentWorkspace })
+      await adapter.startWatch(currentWorkspace)
       started = true
     }
     catch (error) {
@@ -117,7 +130,7 @@ export function usePlanSession({ workspace }: UsePlanSessionOptions) {
     const generation = lifecycleGeneration
     const setupPromise = (async () => {
       try {
-        const unlisten = await listen('plan-updated', () => {
+        const unlisten = await adapter.listen(() => {
           if (mounted)
             void loadPlan()
         })

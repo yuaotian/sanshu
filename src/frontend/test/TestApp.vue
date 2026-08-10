@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import ComponentsTest from './components/ComponentsTest.vue'
 import MainLayoutTest from './components/MainLayoutTest.vue'
 import McpPopupTest from './components/McpPopupTest.vue'
+import PlanPanelTest from './components/PlanPanelTest.vue'
 import ThemesTest from './components/ThemesTest.vue'
 
 const activeTab = ref('main-ui')
@@ -11,6 +12,7 @@ const useSimulatedWindow = ref(true)
 const tabs = [
   { key: 'main-ui', label: '主界面', component: MainLayoutTest },
   { key: 'mcp-popup', label: 'MCP 弹窗', component: McpPopupTest },
+  { key: 'plan-panel', label: '执行计划', component: PlanPanelTest },
   { key: 'components', label: '组件库', component: ComponentsTest },
   { key: 'themes', label: '主题测试', component: ThemesTest },
 ]

@@ -9,6 +9,7 @@ interface FloatingPosition {
 interface UsePlanPanelPreferencesOptions {
   workspace: Ref<string>
   panelRef: Ref<HTMLElement | null>
+  settingsAreaRef: Ref<HTMLElement | null>
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -18,10 +19,11 @@ function clamp(value: number, min: number, max: number): number {
 /**
  * 管理面板自身的工作区偏好和悬浮交互，避免 localStorage/Pointer Capture 与计划会话耦合。
  */
-export function usePlanPanelPreferences({ workspace, panelRef }: UsePlanPanelPreferencesOptions) {
+export function usePlanPanelPreferences({ workspace, panelRef, settingsAreaRef }: UsePlanPanelPreferencesOptions) {
   const isCollapsed = useStorage('popup-plan-panel-collapsed', true)
   const localNote = ref('')
   const noteDraft = ref('')
+  const isEditingNote = ref(false)
   const showAllItems = ref(false)
   const settingsOpen = ref(false)
   const isFloating = ref(false)
@@ -82,6 +84,7 @@ export function usePlanPanelPreferences({ workspace, panelRef }: UsePlanPanelPre
     preferencesReady = false
     localNote.value = readStoredValue(storageKey('note', currentWorkspace)) ?? ''
     noteDraft.value = ''
+    isEditingNote.value = false
     isFloating.value = readStoredValue(storageKey('floating', currentWorkspace)) === 'true'
     floatingPosition.value = parseFloatingPosition(readStoredValue(storageKey('position', currentWorkspace)))
     showAllItems.value = false
@@ -105,11 +108,25 @@ export function usePlanPanelPreferences({ workspace, panelRef }: UsePlanPanelPre
       return
     localNote.value = nextNote
     noteDraft.value = ''
+    isEditingNote.value = false
     writeStoredValue(storageKey('note'), nextNote)
+  }
+
+  function startNoteEditing(): void {
+    if (!localNote.value)
+      return
+    noteDraft.value = localNote.value
+    isEditingNote.value = true
+  }
+
+  function cancelNoteEditing(): void {
+    noteDraft.value = ''
+    isEditingNote.value = false
   }
 
   function clearLocalNote(): void {
     localNote.value = ''
+    cancelNoteEditing()
     removeStoredValue(storageKey('note'))
   }
 
@@ -211,7 +228,7 @@ export function usePlanPanelPreferences({ workspace, panelRef }: UsePlanPanelPre
       clampFloatingPosition(true)
   })
   useEventListener('resize', () => clampFloatingPosition(true))
-  onClickOutside(panelRef, () => {
+  onClickOutside(settingsAreaRef, () => {
     settingsOpen.value = false
   })
 
@@ -232,12 +249,15 @@ export function usePlanPanelPreferences({ workspace, panelRef }: UsePlanPanelPre
     isCollapsed,
     isDragging,
     isFloating,
+    isEditingNote,
     localNote,
     loadPanelPreferences,
     noteDraft,
     saveLocalNote,
     settingsOpen,
     showAllItems,
+    startNoteEditing,
+    cancelNoteEditing,
     startDragging,
     stopDragging,
   }

@@ -15,6 +15,7 @@ import {
   NInputNumber,
   NMessageProvider,
   NNotificationProvider,
+  NTooltip,
   NSpace,
   NSwitch,
   NTab,
@@ -55,6 +56,7 @@ const naive = create({
     NTag,
     NMessageProvider,
     NNotificationProvider,
+    NTooltip,
     NDialogProvider,
   ],
 })

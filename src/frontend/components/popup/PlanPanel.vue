@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { PlanSessionAdapter } from '../../composables/usePlanSession'
 import type { PlanStatus } from '../../types/plan'
 import { computed, onUnmounted, ref, toRef, watch } from 'vue'
 import { usePlanPanelPreferences } from '../../composables/usePlanPanelPreferences'
@@ -6,10 +7,13 @@ import { usePlanSession } from '../../composables/usePlanSession'
 
 const props = defineProps<{
   workspace: string
+  sessionAdapter?: PlanSessionAdapter
 }>()
 
 const workspace = toRef(props, 'workspace')
 const panelRef = ref<HTMLElement | null>(null)
+const settingsAreaRef = ref<HTMLElement | null>(null)
+const noteInputRef = ref<HTMLInputElement | null>(null)
 
 const {
   clearLocalNote,
@@ -18,14 +22,17 @@ const {
   isCollapsed,
   isDragging,
   isFloating,
+  isEditingNote,
   localNote,
   noteDraft,
   saveLocalNote,
+  startNoteEditing,
+  cancelNoteEditing,
   settingsOpen,
   showAllItems,
   startDragging,
   stopDragging,
-} = usePlanPanelPreferences({ workspace, panelRef })
+} = usePlanPanelPreferences({ workspace, panelRef, settingsAreaRef })
 
 const {
   allCompleted,
@@ -38,7 +45,7 @@ const {
   retry,
   snapshot,
   total,
-} = usePlanSession({ workspace })
+} = usePlanSession({ workspace, adapter: props.sessionAdapter })
 
 const completedTailLimit = 4
 // 中文说明：仅在展示层收起较早完成项，始终保留未完成项，不改变真实计划快照。
@@ -60,6 +67,19 @@ const visibleItems = computed(() => {
 })
 const remaining = computed(() => Math.max(0, total.value - completed.value))
 const canSaveNote = computed(() => noteDraft.value.trim().length > 0)
+
+function editLocalNote(): void {
+  startNoteEditing()
+  noteInputRef.value?.focus()
+}
+
+function closeSettingsWhenPanelContentClicked(event: MouseEvent): void {
+  if (!settingsOpen.value || !settingsAreaRef.value)
+    return
+  if (event.target instanceof Node && settingsAreaRef.value.contains(event.target))
+    return
+  settingsOpen.value = false
+}
 
 interface PanelStatusMeta {
   label: string
@@ -197,6 +217,7 @@ onUnmounted(() => {
     @pointermove="handleDragging"
     @pointerup="stopDragging"
     @pointercancel="stopDragging"
+    @click="closeSettingsWhenPanelContentClicked"
     @keydown.esc.stop="settingsOpen = false"
   >
     <span class="sr-only" aria-live="polite">{{ liveStatus }}</span>
@@ -241,16 +262,40 @@ onUnmounted(() => {
             <div class="i-carbon-drag-vertical h-3.5 w-3.5" aria-hidden="true" />
           </button>
 
-          <button
-            type="button"
-            class="plan-reset-button plan-icon-button"
-            :aria-expanded="settingsOpen"
-            aria-label="执行计划设置"
-            title="执行计划设置"
-            @click.stop="settingsOpen = !settingsOpen"
-          >
-            <div class="i-carbon-settings h-3.5 w-3.5" aria-hidden="true" />
-          </button>
+          <div ref="settingsAreaRef" class="relative">
+            <button
+              id="plan-panel-settings-trigger"
+              type="button"
+              class="plan-reset-button plan-icon-button"
+              :aria-expanded="settingsOpen"
+              aria-controls="plan-panel-settings"
+              aria-label="执行计划设置"
+              title="执行计划设置"
+              @click.stop="settingsOpen = !settingsOpen"
+            >
+              <div class="i-carbon-settings h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+
+            <div
+              v-if="settingsOpen"
+              id="plan-panel-settings"
+              class="absolute right-0 top-full z-30 mt-1 w-52 rounded-md border border-gray-300 bg-surface p-3 shadow-lg"
+              role="group"
+              aria-labelledby="plan-panel-settings-label"
+            >
+              <div class="flex items-center justify-between gap-3">
+                <div class="min-w-0">
+                  <div id="plan-panel-settings-label" class="text-xs font-medium text-on-surface">
+                    窗口内悬浮
+                  </div>
+                  <div class="mt-0.5 text-[11px] leading-4 text-on-surface-secondary">
+                    位置按工作区保存
+                  </div>
+                </div>
+                <n-switch v-model:value="isFloating" size="small" aria-label="窗口内悬浮" />
+              </div>
+            </div>
+          </div>
 
           <n-tooltip v-if="readError || realtimeError">
             <template #trigger>
@@ -265,25 +310,6 @@ onUnmounted(() => {
             </template>
             重新读取执行计划
           </n-tooltip>
-        </div>
-      </div>
-
-      <div
-        v-if="settingsOpen"
-        class="absolute right-2 top-full z-30 mt-1 w-52 rounded-md border border-gray-300 bg-surface p-3 shadow-lg"
-        role="group"
-        aria-label="执行计划设置"
-      >
-        <div class="flex items-center justify-between gap-3">
-          <div class="min-w-0">
-            <div class="text-xs font-medium text-on-surface">
-              窗口内悬浮
-            </div>
-            <div class="mt-0.5 text-[11px] leading-4 text-on-surface-secondary">
-              位置按工作区保存
-            </div>
-          </div>
-          <n-switch v-model:value="isFloating" size="small" aria-label="窗口内悬浮" />
         </div>
       </div>
     </header>
@@ -389,6 +415,15 @@ onUnmounted(() => {
               <button
                 type="button"
                 class="plan-reset-button inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-on-surface-secondary transition-colors hover:bg-container-tertiary hover:text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/45"
+                aria-label="编辑本地备注"
+                title="编辑本地备注"
+                @click="editLocalNote"
+              >
+                <div class="i-carbon-edit h-3 w-3" aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                class="plan-reset-button inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-on-surface-secondary transition-colors hover:bg-container-tertiary hover:text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/45"
                 aria-label="清除本地备注"
                 title="清除本地备注"
                 @click="clearLocalNote"
@@ -400,13 +435,25 @@ onUnmounted(() => {
             <div class="flex items-center gap-1.5 rounded-md border border-gray-300/70 bg-surface px-2 py-1.5 focus-within:border-primary-500/60 focus-within:ring-1 focus-within:ring-primary-500/25">
               <div class="i-carbon-edit h-3.5 w-3.5 shrink-0 text-primary-500" aria-hidden="true" />
               <input
+                ref="noteInputRef"
                 v-model="noteDraft"
                 type="text"
                 class="min-w-0 flex-1 border-0 bg-transparent p-0 text-xs leading-5 text-on-surface outline-none placeholder:text-on-surface-muted"
                 aria-label="添加执行计划本地备注"
-                placeholder="添加本地备注"
+                :placeholder="isEditingNote ? '修改本地备注' : '添加本地备注'"
                 @keydown.enter.prevent="saveLocalNote"
+                @keydown.esc.stop.prevent="cancelNoteEditing"
               >
+              <button
+                v-if="isEditingNote"
+                type="button"
+                class="plan-reset-button inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-on-surface-secondary transition-colors hover:bg-container-secondary hover:text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/45"
+                aria-label="取消编辑本地备注"
+                title="取消编辑本地备注"
+                @click="cancelNoteEditing"
+              >
+                <div class="i-carbon-close h-3 w-3" aria-hidden="true" />
+              </button>
               <button
                 type="button"
                 class="plan-reset-button inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-primary-500 transition-colors hover:bg-container-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/45 disabled:cursor-not-allowed disabled:opacity-35"
