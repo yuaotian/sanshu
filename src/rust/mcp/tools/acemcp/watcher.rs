@@ -19,7 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
-use super::mcp::should_skip_auto_index_for_auth_failure;
+use super::mcp::{ensure_project_scope_allowed, should_skip_auto_index_for_auth_failure};
+use super::scope_guard::effective_exclude_patterns;
 use super::types::AcemcpConfig;
 use crate::config::load_standalone_config;
 use crate::log_debug;
@@ -29,51 +30,6 @@ use crate::log_important;
 pub const DEFAULT_DEBOUNCE_MS: u64 = 30_000;
 /// 默认最大等待时间（毫秒）：5 分钟兜底，防止持续小写入永远触发不了 flush
 pub const DEFAULT_MAX_WAIT_MS: u64 = 300_000;
-
-/// 始终忽略的路径段（按目录名匹配，跨平台通用）
-/// 说明：这些目录通常包含构建产物、缓存、依赖或 IDE 元数据，
-/// 写入频率极高，且对代码索引无价值。
-const ALWAYS_IGNORE_SEGMENTS: &[&str] = &[
-    "target",
-    "node_modules",
-    ".git",
-    "dist",
-    "build",
-    "out",
-    "coverage",
-    ".next",
-    ".nuxt",
-    ".vite",
-    ".cache",
-    ".turbo",
-    ".idea",
-    ".vscode",
-    ".gradle",
-    ".mvn",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    "__pycache__",
-    "venv",
-    ".venv",
-    "env",
-    "logs",
-    "log",
-    "tmp",
-    ".tmp",
-];
-
-/// 始终忽略的文件名后缀（按文件名匹配）
-const ALWAYS_IGNORE_FILE_SUFFIXES: &[&str] = &[
-    ".log",
-    ".tmp",
-    ".swp",
-    ".swo",
-    ".lock",
-    ".pyc",
-    ".class",
-    ".DS_Store",
-];
 
 /// 规范化项目路径（去除 Windows 扩展路径前缀并统一使用正斜杠）
 ///
@@ -149,28 +105,7 @@ impl PathFilter {
             return true;
         }
 
-        // 1) 路径段黑名单
-        for seg in rel.split('/') {
-            if seg.is_empty() {
-                continue;
-            }
-            if ALWAYS_IGNORE_SEGMENTS
-                .iter()
-                .any(|i| i.eq_ignore_ascii_case(seg))
-            {
-                return true;
-            }
-        }
-
-        // 2) 文件名后缀黑名单
-        let last = rel.rsplit('/').next().unwrap_or("");
-        for suffix in ALWAYS_IGNORE_FILE_SUFFIXES {
-            if last.ends_with(suffix) {
-                return true;
-            }
-        }
-
-        // 3) 用户 exclude_patterns（与索引层一致，使用 globset）
+        // 统一使用索引层合并后的内置规则和用户 exclude_patterns。
         if let Some(gs) = &self.user_globset {
             if gs.is_match(rel) {
                 return true;
@@ -353,6 +288,10 @@ impl WatcherManager {
             .unwrap_or_else(|_| PathBuf::from(&project_root));
         let normalized_root = normalize_project_path(&watch_path.to_string_lossy());
 
+        if !ensure_project_scope_allowed(&config, &normalized_root).await? {
+            anyhow::bail!("项目索引范围存在风险，已暂停文件监听: {}", normalized_root);
+        }
+
         // 检查是否已经在监听
         {
             let watchers = self.watchers.lock().unwrap();
@@ -397,14 +336,7 @@ impl WatcherManager {
         };
 
         // 构建路径过滤器（在监听回调里使用）
-        let exclude_patterns = config.exclude_patterns.clone().unwrap_or_else(|| {
-            vec![
-                "node_modules".to_string(),
-                ".git".to_string(),
-                "target".to_string(),
-                "dist".to_string(),
-            ]
-        });
+        let exclude_patterns = effective_exclude_patterns(config.exclude_patterns.as_deref());
         let filter = PathFilter::new(&normalized_root, &exclude_patterns);
 
         // 事件通道：closure → debounce task

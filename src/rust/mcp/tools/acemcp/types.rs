@@ -61,6 +61,30 @@ pub enum IndexStatus {
     Failed,
 }
 
+/// 项目索引范围的风险等级。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectScopeRiskLevel {
+    /// 文件系统根目录或用户主目录等关键路径。
+    CriticalPath,
+    /// 候选文件数量或体积超过有界预检阈值。
+    ExcessiveScale,
+}
+
+/// 项目索引范围风险诊断，供后端持久化并由 GUI 明确展示原因。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectScopeRisk {
+    pub level: ProjectScopeRiskLevel,
+    pub reason_code: String,
+    pub reason: String,
+    pub scanned_entries: usize,
+    pub candidate_files: usize,
+    pub candidate_bytes: u64,
+    pub project_markers: Vec<String>,
+    pub requires_secondary_confirmation: bool,
+    pub detected_at: DateTime<Utc>,
+}
+
 /// 项目索引状态信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectIndexStatus {
@@ -114,6 +138,9 @@ pub struct ProjectIndexStatus {
     /// 任务检查点最后更新时间
     #[serde(default)]
     pub job_updated_at: Option<DateTime<Utc>>,
+    /// 当前项目是否因范围异常而暂停索引。
+    #[serde(default)]
+    pub scope_risk: Option<ProjectScopeRisk>,
 }
 
 impl Default for ProjectIndexStatus {
@@ -139,6 +166,7 @@ impl Default for ProjectIndexStatus {
             total_batches: 0,
             completed_batches: 0,
             job_updated_at: None,
+            scope_risk: None,
         }
     }
 }

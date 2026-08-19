@@ -103,6 +103,7 @@ pub fn build_tauri_app() -> Builder<tauri::Wry> {
             crate::mcp::tools::acemcp::commands::stop_project_watching,
             crate::mcp::tools::acemcp::commands::stop_all_watching,
             crate::mcp::tools::acemcp::commands::remove_acemcp_project_index,
+            crate::mcp::tools::acemcp::commands::confirm_acemcp_project_scope,
             crate::mcp::tools::acemcp::commands::check_directory_exists,
             // acemcp 代理命令
             crate::mcp::tools::acemcp::commands::detect_acemcp_proxy,

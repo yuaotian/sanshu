@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import type { WechatNotificationState } from '../composables/useMcpHandler'
-import { useMessage } from 'naive-ui'
+import type { ProjectIndexStatus, ProjectsIndexStatus } from '../types/tauri'
+import { invoke } from '@tauri-apps/api/core'
+import { useDialog, useMessage } from 'naive-ui'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAcemcpSync } from '../composables/useAcemcpSync'
 import { setupExitWarningListener } from '../composables/useExitWarning'
@@ -8,6 +10,7 @@ import { useKeyboard } from '../composables/useKeyboard'
 import { useLogViewer } from '../composables/useLogViewer'
 import { useMcpToolsReactive } from '../composables/useMcpTools'
 import { useVersionCheck } from '../composables/useVersionCheck'
+import ProjectScopeRiskDialog from './common/ProjectScopeRiskDialog.vue'
 import UpdateModal from './common/UpdateModal.vue'
 import LayoutWrapper from './layout/LayoutWrapper.vue'
 import McpIndexStatusDrawer from './popup/McpIndexStatusDrawer.vue'
@@ -86,6 +89,98 @@ const { show: showLogViewer, open: openLogViewer } = useLogViewer()
 
 // 初始化 Naive UI 消息实例
 const message = useMessage()
+const dialog = useDialog()
+
+// 项目范围风险由后端持久化；窗口打开时只负责展示和收集明确选择。
+const scopeRiskStatus = ref<ProjectIndexStatus | null>(null)
+const scopeRiskBusy = ref(false)
+let scopeRiskRefreshTimer: ReturnType<typeof setTimeout> | null = null
+
+function normalizeProjectPath(path: string): string {
+  return path.replace(/^[/\\]{2}\?[/\\]/, '').replace(/\\/g, '/').toLocaleLowerCase()
+}
+
+async function refreshProjectScopeRisk(preferredRoot?: string) {
+  try {
+    const result = await invoke<ProjectsIndexStatus>('get_all_acemcp_index_status')
+    const riskyStatuses = Object.values(result.projects)
+      .filter(status => !!status.scope_risk)
+      .sort((left, right) => {
+        if (!preferredRoot)
+          return left.scope_risk?.level === 'critical_path' ? -1 : 1
+        const preferred = normalizeProjectPath(preferredRoot)
+        return Number(normalizeProjectPath(right.project_root) === preferred)
+          - Number(normalizeProjectPath(left.project_root) === preferred)
+      })
+    scopeRiskStatus.value = riskyStatuses[0] ?? null
+  }
+  catch (error) {
+    console.error('读取项目索引范围风险失败:', error)
+  }
+}
+
+function closeProjectScopeRisk() {
+  scopeRiskStatus.value = null
+}
+
+async function removeRiskyProject() {
+  const projectRoot = scopeRiskStatus.value?.project_root
+  if (!projectRoot || scopeRiskBusy.value)
+    return
+  scopeRiskBusy.value = true
+  try {
+    await invoke<string>('remove_acemcp_project_index', { projectRootPath: projectRoot })
+    message.success('已移除索引记录和持久监听')
+    scopeRiskStatus.value = null
+    await refreshProjectScopeRisk()
+  }
+  catch (error) {
+    console.error('移除异常项目索引失败:', error)
+    message.error(`移除失败: ${String(error)}`)
+  }
+  finally {
+    scopeRiskBusy.value = false
+  }
+}
+
+async function confirmRiskyProject() {
+  const projectRoot = scopeRiskStatus.value?.project_root
+  if (!projectRoot || scopeRiskBusy.value)
+    return
+  scopeRiskBusy.value = true
+  try {
+    await invoke<string>('confirm_acemcp_project_scope', { projectRootPath: projectRoot })
+    message.success('已确认项目路径，后续索引请求可继续')
+    scopeRiskStatus.value = null
+    await refreshProjectScopeRisk()
+  }
+  catch (error) {
+    console.error('确认项目索引范围失败:', error)
+    message.error(`确认失败: ${String(error)}`)
+  }
+  finally {
+    scopeRiskBusy.value = false
+  }
+}
+
+function requestProjectScopeConfirmation() {
+  const status = scopeRiskStatus.value
+  if (!status?.scope_risk)
+    return
+  if (!status.scope_risk.requires_secondary_confirmation) {
+    void confirmRiskyProject()
+    return
+  }
+  dialog.warning({
+    title: '再次确认关键路径',
+    content: `该路径属于系统根目录或用户主目录，可能包含大量非项目文件。\n\n${status.project_root}\n\n确认后将允许后续索引请求继续，是否仍要确认？`,
+    positiveText: '再次确认',
+    negativeText: '返回',
+    onPositiveClick: async () => {
+      await confirmRiskyProject()
+    },
+  })
+}
 
 // 键盘快捷键处理
 const { handleExitShortcut } = useKeyboard()
@@ -174,6 +269,8 @@ watch(() => props.mcpRequest, (newRequest) => {
     activeTab.value = 'intro'
     pendingMcpToolConfig.value = null
   }
+  if (newRequest?.project_root_path)
+    void refreshProjectScopeRisk(newRequest.project_root_path)
 }, { immediate: true })
 
 // 全局键盘事件处理器
@@ -192,16 +289,31 @@ onMounted(() => {
 
   // 加载 MCP 工具配置（用于检测 sou 是否启用）
   loadMcpTools()
+  void refreshProjectScopeRisk(props.mcpRequest?.project_root_path)
+  // MCP 启动恢复与窗口挂载可能并发，短延迟复查一次持久化诊断。
+  scopeRiskRefreshTimer = setTimeout(() => {
+    void refreshProjectScopeRisk(props.mcpRequest?.project_root_path)
+  }, 1500)
 })
 
 onUnmounted(() => {
   // 移除键盘事件监听器
   document.removeEventListener('keydown', handleGlobalKeydown)
+  if (scopeRiskRefreshTimer)
+    clearTimeout(scopeRiskRefreshTimer)
 })
 </script>
 
 <template>
   <div class="min-h-screen bg-black">
+    <ProjectScopeRiskDialog
+      :show="!!scopeRiskStatus"
+      :status="scopeRiskStatus"
+      :busy="scopeRiskBusy"
+      @close="closeProjectScopeRisk"
+      @remove="removeRiskyProject"
+      @confirm="requestProjectScopeConfirmation"
+    />
     <!-- 图标搜索弹窗模式 -->
     <IconPopupMode
       v-if="props.isIconMode && props.iconParams"

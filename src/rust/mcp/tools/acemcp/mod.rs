@@ -4,6 +4,7 @@
 pub mod commands;
 pub mod jobs;
 pub mod mcp;
+pub mod scope_guard;
 pub mod types;
 pub mod watcher;
 

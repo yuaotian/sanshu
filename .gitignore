@@ -91,6 +91,7 @@ demo/
 !/docs/log-viewer-global-debug.md
 !/docs/sou-local-fallback.md
 !/docs/wechat-notification-console.md
+!/docs/acemcp-index-memory-guard.md
 
 
 test/

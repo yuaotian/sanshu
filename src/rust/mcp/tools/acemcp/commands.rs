@@ -1911,6 +1911,16 @@ fn normalize_watch_project_path(path: &str) -> String {
     normalize_path_key(path)
 }
 
+fn normalized_paths_equal(left: &str, right: &str) -> bool {
+    let left = normalize_path_key(left);
+    let right = normalize_path_key(right);
+    if cfg!(windows) {
+        left.eq_ignore_ascii_case(&right)
+    } else {
+        left == right
+    }
+}
+
 fn normalize_project_list(projects: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut normalized = Vec::new();
@@ -2152,8 +2162,81 @@ pub(crate) fn purge_project_index_records(
 /// 删除指定项目的索引记录
 /// 同时清理 projects.json 和 projects_status.json 中的数据
 #[tauri::command]
-pub async fn remove_acemcp_project_index(project_root_path: String) -> Result<String, String> {
-    purge_project_index_records(&project_root_path, true)
+pub async fn remove_acemcp_project_index(
+    project_root_path: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<String, String> {
+    let normalized_root = normalize_path_key(&project_root_path);
+    let result = purge_project_index_records(&normalized_root, true)?;
+    {
+        let mut config = state
+            .config
+            .lock()
+            .map_err(|error| format!("获取配置失败: {}", error))?;
+        let watched = config
+            .mcp_config
+            .acemcp_watched_projects
+            .clone()
+            .unwrap_or_default();
+        config.mcp_config.acemcp_watched_projects = Some(
+            watched
+                .into_iter()
+                .filter(|path| !normalized_paths_equal(path, &normalized_root))
+                .collect(),
+        );
+        let confirmed = config
+            .mcp_config
+            .acemcp_confirmed_project_roots
+            .clone()
+            .unwrap_or_default();
+        config.mcp_config.acemcp_confirmed_project_roots = Some(
+            confirmed
+                .into_iter()
+                .filter(|path| !normalized_paths_equal(path, &normalized_root))
+                .collect(),
+        );
+    }
+    save_config(&state, &app)
+        .await
+        .map_err(|error| format!("保存项目清理结果失败: {}", error))?;
+    Ok(result)
+}
+
+/// 确认异常路径确实是用户要索引的项目根目录。
+#[tauri::command]
+pub async fn confirm_acemcp_project_scope(
+    project_root_path: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<String, String> {
+    let normalized_root = normalize_path_key(&project_root_path);
+    {
+        let mut config = state
+            .config
+            .lock()
+            .map_err(|error| format!("获取配置失败: {}", error))?;
+        let mut confirmed = config
+            .mcp_config
+            .acemcp_confirmed_project_roots
+            .clone()
+            .unwrap_or_default();
+        if !confirmed
+            .iter()
+            .any(|path| normalized_paths_equal(path, &normalized_root))
+        {
+            confirmed.push(normalized_root.clone());
+        }
+        config.mcp_config.acemcp_confirmed_project_roots =
+            Some(normalize_project_list(confirmed));
+    }
+    save_config(&state, &app)
+        .await
+        .map_err(|error| format!("保存项目范围确认失败: {}", error))?;
+    super::mcp::clear_project_scope_risk(&normalized_root)
+        .map_err(|error| format!("清理项目范围暂停状态失败: {}", error))?;
+    log_important!(info, "用户已确认 ACE 项目索引范围: {}", normalized_root);
+    Ok(format!("已确认项目索引范围: {}", normalized_root))
 }
 
 /// 检查指定目录是否存在

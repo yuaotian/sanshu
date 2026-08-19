@@ -5,6 +5,20 @@ declare module '@tauri-apps/plugin-shell' {
 // Acemcp 索引状态类型定义
 export type IndexStatus = 'idle' | 'indexing' | 'paused' | 'synced' | 'failed'
 
+export type ProjectScopeRiskLevel = 'critical_path' | 'excessive_scale'
+
+export interface ProjectScopeRisk {
+  level: ProjectScopeRiskLevel
+  reason_code: string
+  reason: string
+  scanned_entries: number
+  candidate_files: number
+  candidate_bytes: number
+  project_markers: string[]
+  requires_secondary_confirmation: boolean
+  detected_at: string
+}
+
 export interface ProjectIndexStatus {
   project_root: string
   status: IndexStatus
@@ -26,6 +40,7 @@ export interface ProjectIndexStatus {
   total_batches?: number
   completed_batches?: number
   job_updated_at?: string | null
+  scope_risk?: ProjectScopeRisk | null
 }
 
 export interface ProjectsIndexStatus {

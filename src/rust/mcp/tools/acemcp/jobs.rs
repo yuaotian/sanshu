@@ -19,6 +19,7 @@ pub(crate) const JOB_QUEUED: &str = "queued";
 pub(crate) const JOB_COLLECTING: &str = "collecting";
 pub(crate) const JOB_UPLOADING: &str = "uploading";
 pub(crate) const JOB_PAUSED: &str = "paused";
+pub(crate) const JOB_SCOPE_BLOCKED: &str = "scope_blocked";
 pub(crate) const JOB_COMPLETED: &str = "completed";
 pub(crate) const JOB_FAILED: &str = "failed";
 pub(crate) const INDEX_JOB_EVENT: &str = "acemcp-index-job";
@@ -45,7 +46,7 @@ pub(crate) struct IndexJob {
     pub project_root: String,
     /// incremental | full
     pub mode: String,
-    /// queued | collecting | uploading | paused | completed | failed
+    /// queued | collecting | uploading | paused | scope_blocked | completed | failed
     pub status: String,
     /// ACE 连接身份与索引参数的综合签名。
     pub scope_hash: String,

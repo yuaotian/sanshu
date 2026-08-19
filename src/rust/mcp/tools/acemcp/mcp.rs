@@ -19,12 +19,16 @@ use tauri::AppHandle;
 
 use super::jobs::{
     self, IndexJob, JOB_COLLECTING, JOB_COMPLETED, JOB_FAILED, JOB_PAUSED, JOB_QUEUED,
-    JOB_UPLOADING,
+    JOB_SCOPE_BLOCKED, JOB_UPLOADING,
+};
+use super::scope_guard::{
+    critical_path_risk, effective_exclude_patterns, is_confirmed_project_root,
+    preflight_project_scope,
 };
 use super::types::{
     AcemcpConfig, AcemcpRequest, FileIndexStatus, FileIndexStatusKind, IndexStatus,
-    NestedProjectInfo, ProjectFilesStatus, ProjectIndexStatus, ProjectWithNestedStatus,
-    ProjectsIndexStatus,
+    NestedProjectInfo, ProjectFilesStatus, ProjectIndexStatus, ProjectScopeRisk,
+    ProjectWithNestedStatus, ProjectsIndexStatus,
 };
 use crate::log_debug;
 use crate::log_important;
@@ -85,6 +89,19 @@ impl AcemcpTool {
                 )
                 .await
             {
+                if get_project_status(&request.project_root_path)
+                    .scope_risk
+                    .is_some()
+                {
+                    return Ok(CallToolResult {
+                        content: vec![Content::text(
+                            "代码搜索已暂停：项目路径或索引规模存在风险。请打开等一下窗口确认该项目路径，或移除错误的索引记录。",
+                        )],
+                        is_error: Some(true),
+                        meta: None,
+                        structured_content: None,
+                    });
+                }
                 log_debug!("启动文件监听失败（不影响搜索）: {}", e);
             }
         }
@@ -184,6 +201,22 @@ impl AcemcpTool {
         if let Some(base) = &acemcp_config.base_url {
             let normalized = normalize_base_url(base);
             acemcp_config.base_url = Some(normalized);
+        }
+
+        if !ensure_project_scope_allowed(&acemcp_config, &request.project_root_path)
+            .await
+            .map_err(|error| {
+                McpError::internal_error(format!("检查项目索引范围失败: {}", error), None)
+            })?
+        {
+            return Ok(CallToolResult {
+                content: vec![Content::text(
+                    "索引更新已暂停：项目路径或索引规模存在风险，请在等一下窗口中确认。",
+                )],
+                is_error: Some(true),
+                meta: None,
+                structured_content: None,
+            });
         }
 
         // 先执行索引更新
@@ -365,7 +398,8 @@ impl AcemcpTool {
         let acemcp_config = Self::get_acemcp_config().await?;
         let max_lines = acemcp_config.max_lines_per_blob.unwrap_or(800) as usize;
         let text_exts = acemcp_config.text_extensions.clone().unwrap_or_default();
-        let exclude_patterns = acemcp_config.exclude_patterns.clone().unwrap_or_default();
+        let exclude_patterns =
+            effective_exclude_patterns(acemcp_config.exclude_patterns.as_deref());
 
         // 读取 projects.json，获取已索引的 blob 名称集合
         let projects = load_projects_file();
@@ -487,17 +521,11 @@ impl AcemcpTool {
         let mut regular_directories = Vec::new();
 
         // 从配置读取排除模式，用于过滤嵌套目录（与索引阶段保持一致）
-        let exclude_patterns = crate::config::load_standalone_config()
+        let configured_excludes = crate::config::load_standalone_config()
             .ok()
             .and_then(|c| c.mcp_config.acemcp_exclude_patterns)
-            .unwrap_or_else(|| {
-                vec![
-                    "node_modules".to_string(),
-                    ".git".to_string(),
-                    "target".to_string(),
-                    "dist".to_string(),
-                ]
-            });
+            .unwrap_or_default();
+        let exclude_patterns = effective_exclude_patterns(Some(&configured_excludes));
         let exclude_globset = if exclude_patterns.is_empty() {
             None
         } else {
@@ -614,6 +642,7 @@ enum BackgroundIndexLaunchState {
     Started,
     AlreadyRunning,
     Skipped,
+    ScopeBlocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -657,13 +686,14 @@ fn normalized_config_values(values: Option<&Vec<String>>) -> Vec<String> {
 pub(crate) fn build_index_scope_hash(config: &AcemcpConfig) -> Option<String> {
     let normalized_base_url = normalize_base_url(config.base_url.as_deref()?);
     let token = config.token.as_deref()?.trim();
+    let effective_excludes = effective_exclude_patterns(config.exclude_patterns.as_deref());
     let fingerprint = serde_json::json!({
         "base_url": normalized_base_url,
         "token": token,
         "batch_size": config.batch_size.unwrap_or(10),
         "max_lines_per_blob": config.max_lines_per_blob.unwrap_or(800),
         "text_extensions": normalized_config_values(config.text_extensions.as_ref()),
-        "exclude_patterns": normalized_config_values(config.exclude_patterns.as_ref()),
+        "exclude_patterns": normalized_config_values(Some(&effective_excludes)),
     });
     let mut ctx = ShaContext::new(&SHA256);
     ctx.update(fingerprint.to_string().as_bytes());
@@ -723,6 +753,95 @@ fn enrich_project_scope_state(status: &mut ProjectIndexStatus) {
     };
 }
 
+fn record_project_scope_risk(project_root: &str, risk: ProjectScopeRisk) -> anyhow::Result<()> {
+    let normalized_root = super::scope_guard::normalize_root(project_root);
+    let error_message = format!("索引范围需要确认：{}", risk.reason);
+    let _ = jobs::update_job(
+        &normalized_root,
+        "scope_blocked",
+        Some(error_message.clone()),
+        |job| {
+            job.status = JOB_SCOPE_BLOCKED.to_string();
+            job.last_error = Some(error_message.clone());
+        },
+    );
+    update_project_status(&normalized_root, |status| {
+        status.status = IndexStatus::Paused;
+        status.last_error = Some(error_message.clone());
+        status.last_failure_time = Some(chrono::Utc::now());
+        status.scope_risk = Some(risk.clone());
+    })?;
+    log_important!(
+        warn,
+        "ACE 索引已因项目范围风险暂停: project_root={}, reason_code={}, reason={}",
+        normalized_root,
+        risk.reason_code,
+        risk.reason
+    );
+    Ok(())
+}
+
+pub(crate) fn clear_project_scope_risk(project_root: &str) -> anyhow::Result<()> {
+    let normalized_root = super::scope_guard::normalize_root(project_root);
+    let blocked_job = jobs::get_job(&normalized_root)
+        .is_some_and(|job| job.status == JOB_SCOPE_BLOCKED);
+    if get_project_status(&normalized_root).scope_risk.is_none() && !blocked_job {
+        return Ok(());
+    }
+    if blocked_job {
+        jobs::remove_job(&normalized_root)?;
+    }
+    update_project_status(&normalized_root, |status| {
+        status.scope_risk = None;
+        if status
+            .last_error
+            .as_deref()
+            .is_some_and(|message| message.starts_with("索引范围需要确认："))
+        {
+            status.last_error = None;
+        }
+        if status.status == IndexStatus::Paused {
+            status.status = IndexStatus::Idle;
+        }
+    })
+}
+
+/// 在启动 watcher 或索引 worker 前完成有界范围预检；已确认路径直接放行。
+pub(crate) async fn ensure_project_scope_allowed(
+    config: &AcemcpConfig,
+    project_root: &str,
+) -> anyhow::Result<bool> {
+    if is_confirmed_project_root(project_root) {
+        clear_project_scope_risk(project_root)?;
+        return Ok(true);
+    }
+    if let Some(risk) = critical_path_risk(project_root) {
+        record_project_scope_risk(project_root, risk)?;
+        return Ok(false);
+    }
+
+    let project_root = project_root.to_string();
+    let project_root_for_preflight = project_root.clone();
+    let text_extensions = config.text_extensions.clone().unwrap_or_default();
+    let exclude_patterns = effective_exclude_patterns(config.exclude_patterns.as_deref());
+    let risk = tokio::task::spawn_blocking(move || {
+        preflight_project_scope(
+            &project_root_for_preflight,
+            &text_extensions,
+            &exclude_patterns,
+        )
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("项目范围预检任务失败: {}", error))??;
+
+    if let Some(risk) = risk {
+        record_project_scope_risk(project_root.as_str(), risk)?;
+        return Ok(false);
+    }
+    clear_project_scope_risk(project_root.as_str())?;
+    Ok(true)
+}
+
 /// 运行中的任务只保留一个后继请求；全量优先于增量，避免文件事件风暴制造重复任务。
 fn request_followup_index(project_root: &str, mode: IndexJobMode) {
     let requested_mode = mode.as_str().to_string();
@@ -761,6 +880,9 @@ async fn start_background_index_with_mode(
     mode: IndexJobMode,
     app: Option<AppHandle>,
 ) -> anyhow::Result<BackgroundIndexLaunchState> {
+    if !ensure_project_scope_allowed(config, project_root).await? {
+        return Ok(BackgroundIndexLaunchState::ScopeBlocked);
+    }
     launch_index_worker(config, project_root, force, mode, app)
 }
 
@@ -946,26 +1068,28 @@ fn launch_index_worker(
                     "检测到索引任务执行期间 ACE 配置已变更，提交新签名全量任务: project_root={}",
                     normalized_root_clone
                 );
-                let _ = launch_index_worker(
+                let _ = start_background_index_with_mode(
                     &latest_config,
                     &normalized_root_clone,
                     true,
                     IndexJobMode::Full,
                     None,
-                );
+                )
+                .await;
             } else if task_succeeded {
                 // 当前任务收集文件后发生的新变更，合并为一轮后继任务，避免异步排队吞掉监听事件。
                 let rerun_mode = jobs::get_job(&normalized_root_clone)
                     .and_then(|job| job.rerun_mode)
                     .map(|mode| IndexJobMode::from_str(&mode));
                 if let Some(rerun_mode) = rerun_mode {
-                    let _ = launch_index_worker(
+                    let _ = start_background_index_with_mode(
                         &latest_config,
                         &normalized_root_clone,
                         true,
                         rerun_mode,
                         None,
-                    );
+                    )
+                    .await;
                 }
             }
         }
@@ -1426,6 +1550,10 @@ fn reconcile_project_status_with_job(status: &mut ProjectIndexStatus) {
             }
             status.last_error = job.last_error.clone();
         }
+        JOB_SCOPE_BLOCKED => {
+            status.status = IndexStatus::Paused;
+            status.last_error = job.last_error.clone();
+        }
         JOB_FAILED => {
             status.status = IndexStatus::Failed;
             if status.last_failure_time.is_none() {
@@ -1544,7 +1672,7 @@ fn strip_chunk_suffix(path: &str) -> &str {
 }
 
 /// 构建排除模式的 GlobSet
-fn build_exclude_globset(exclude_patterns: &[String]) -> Result<GlobSet> {
+pub(crate) fn build_exclude_globset(exclude_patterns: &[String]) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pattern in exclude_patterns {
         // 尝试将模式转换为 Glob
@@ -1562,7 +1690,11 @@ fn build_exclude_globset(exclude_patterns: &[String]) -> Result<GlobSet> {
 /// 检查路径是否应该被排除
 /// 使用 globset 进行完整的 fnmatch 模式匹配（与 Python 版本保持一致）
 /// Python 版本使用 fnmatch.fnmatch 检查路径的各个部分和完整路径
-fn should_exclude(path: &Path, root: &Path, exclude_globset: Option<&GlobSet>) -> bool {
+pub(crate) fn should_exclude(
+    path: &Path,
+    root: &Path,
+    exclude_globset: Option<&GlobSet>,
+) -> bool {
     if exclude_globset.is_none() {
         return false;
     }
@@ -1655,21 +1787,34 @@ fn collect_blobs(
         };
         for entry in entries.flatten() {
             let p = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            // 中文说明：不跟随符号链接或目录联接，保证实际收集范围与预检一致。
+            if file_type.is_symlink() {
+                continue;
+            }
 
             // 检查 .gitignore
             if let Some(gi) = &gitignore {
-                if gi.matched_path_or_any_parents(&p, p.is_dir()).is_ignore() {
+                if gi
+                    .matched_path_or_any_parents(&p, file_type.is_dir())
+                    .is_ignore()
+                {
                     continue;
                 }
             }
 
             // 检查排除模式
-            if p.is_dir() {
+            if file_type.is_dir() {
                 if should_exclude(&p, &root_path, exclude_globset.as_ref()) {
                     excluded_count += 1;
                     continue;
                 }
                 dirs_stack.push(p);
+                continue;
+            }
+            if !file_type.is_file() {
                 continue;
             }
 
@@ -1704,8 +1849,7 @@ fn collect_blobs(
                 let blob_count = parts.len();
                 indexed_files += 1;
                 out.extend(parts);
-                log_important!(
-                    info,
+                log_debug!(
                     "索引文件: path={}, content_length={}, blobs={}",
                     rel,
                     content.len(),
@@ -1769,19 +1913,31 @@ fn collect_file_statuses(
 
         for entry in entries.flatten() {
             let p = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
 
             // .gitignore 过滤
             if let Some(gi) = &gitignore {
-                if gi.matched_path_or_any_parents(&p, p.is_dir()).is_ignore() {
+                if gi
+                    .matched_path_or_any_parents(&p, file_type.is_dir())
+                    .is_ignore()
+                {
                     continue;
                 }
             }
 
-            if p.is_dir() {
+            if file_type.is_dir() {
                 if should_exclude(&p, &root_path, exclude_globset.as_ref()) {
                     continue;
                 }
                 dirs_stack.push(p);
+                continue;
+            }
+            if !file_type.is_file() {
                 continue;
             }
 
@@ -1981,7 +2137,7 @@ async fn update_index_with_mode(
     let batch_size = (config.batch_size.unwrap_or(10) as usize).max(1);
     let max_lines = (config.max_lines_per_blob.unwrap_or(800) as usize).max(1);
     let text_exts = config.text_extensions.clone().unwrap_or_default();
-    let exclude_patterns = config.exclude_patterns.clone().unwrap_or_default();
+    let exclude_patterns = effective_exclude_patterns(config.exclude_patterns.as_deref());
     let normalized_root = normalize_project_path(
         &PathBuf::from(project_root_path)
             .canonicalize()
@@ -2045,11 +2201,11 @@ async fn update_index_with_mode(
 
     // 固定排序保证进程重启后重新分批时仍能稳定核对断点。
     let mut blob_entries = blobs
-        .iter()
-        .cloned()
+        .into_iter()
         .map(|blob| (sha256_hex(&blob.path, &blob.content), blob))
         .collect::<Vec<_>>();
     blob_entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let total_blobs = blob_entries.len();
     let all_blob_hashes = blob_entries
         .iter()
         .map(|(hash, _)| hash.clone())
@@ -2097,11 +2253,9 @@ async fn update_index_with_mode(
         .collect::<HashSet<_>>();
     let mut completed_hashes = existing_hashes.clone();
     completed_hashes.extend(checkpoint_hashes.iter().cloned());
-    let new_entries = blob_entries
-        .iter()
-        .filter(|(hash, _)| !completed_hashes.contains(hash))
-        .cloned()
-        .collect::<Vec<_>>();
+    // 中文说明：原集合直接收缩并移动，避免百万级文件内容被完整 clone 两次。
+    blob_entries.retain(|(hash, _)| !completed_hashes.contains(hash));
+    let new_entries = blob_entries;
     let max_confirmed_batch_count = if checkpoint_hashes.is_empty() {
         0
     } else {
@@ -2113,7 +2267,7 @@ async fn update_index_with_mode(
 
     jobs::update_job(&normalized_root, "uploading", None, |job| {
         job.status = JOB_UPLOADING.to_string();
-        job.total_blobs = blobs.len();
+        job.total_blobs = total_blobs;
         job.completed_blobs = completed_hashes.len();
         job.completed_blob_hashes = checkpoint_hashes.iter().cloned().collect();
         job.uploaded_blob_names = checkpoint_names.clone();
@@ -2124,9 +2278,9 @@ async fn update_index_with_mode(
     .ok_or_else(|| anyhow::anyhow!("ACE 索引任务检查点不存在"))?;
     let _ = update_project_status(project_root_path, |status| {
         status.status = IndexStatus::Indexing;
-        status.total_files = blobs.len();
+        status.total_files = total_blobs;
         status.indexed_files = completed_hashes.len();
-        status.pending_files = blobs.len().saturating_sub(completed_hashes.len());
+        status.pending_files = total_blobs.saturating_sub(completed_hashes.len());
         status.failed_files = 0;
         status.progress = calculate_index_progress(status.indexed_files, status.total_files);
     });
@@ -2134,11 +2288,11 @@ async fn update_index_with_mode(
     log_important!(
         info,
         "ACE断点核对: total_blobs={}, projects_confirmed={}, checkpoint_confirmed={}, remaining={}, progress={}％",
-        blobs.len(),
+        total_blobs,
         existing_hashes.len(),
         completed_hashes.len().saturating_sub(existing_hashes.len()),
         new_entries.len(),
-        calculate_index_progress(completed_hashes.len(), blobs.len())
+        calculate_index_progress(completed_hashes.len(), total_blobs)
     );
 
     let client = create_acemcp_client(config)?;
@@ -2336,18 +2490,18 @@ async fn update_index_with_mode(
 
     let final_job = jobs::get_job(&normalized_root)
         .ok_or_else(|| anyhow::anyhow!("ACE 索引任务在完成前丢失"))?;
-    if final_job.completed_blobs != blobs.len() {
+    if final_job.completed_blobs != total_blobs {
         let message = format!(
             "索引检查点核对失败: 已确认 {} / 总计 {}",
             final_job.completed_blobs,
-            blobs.len()
+            total_blobs
         );
         mark_index_job_error(
             project_root_path,
             &normalized_root,
             &message,
             None,
-            blobs.len().saturating_sub(final_job.completed_blobs),
+            total_blobs.saturating_sub(final_job.completed_blobs),
             None,
         );
         anyhow::bail!(message);
@@ -2385,10 +2539,10 @@ async fn update_index_with_mode(
     jobs::update_job(
         &normalized_root,
         "completed",
-        Some(format!("索引完成，共 {} 个 blobs", blobs.len())),
+        Some(format!("索引完成，共 {} 个 blobs", total_blobs)),
         |job| {
             job.status = JOB_COMPLETED.to_string();
-            job.completed_blobs = blobs.len();
+            job.completed_blobs = total_blobs;
             job.last_error = None;
             job.failed_batches.clear();
         },
@@ -2397,8 +2551,8 @@ async fn update_index_with_mode(
     let _ = update_project_status(project_root_path, |status| {
         status.status = IndexStatus::Synced;
         status.progress = 100;
-        status.total_files = blobs.len();
-        status.indexed_files = blobs.len();
+        status.total_files = total_blobs;
+        status.indexed_files = total_blobs;
         status.pending_files = 0;
         status.failed_files = 0;
         status.last_success_time = Some(chrono::Utc::now());
@@ -2435,7 +2589,7 @@ fn write_index_memory_to_ji(project_root_path: &str, config: &AcemcpConfig) {
 
     // 构建记忆内容
     let text_exts = config.text_extensions.clone().unwrap_or_default();
-    let exclude_patterns = config.exclude_patterns.clone().unwrap_or_default();
+    let exclude_patterns = effective_exclude_patterns(config.exclude_patterns.as_deref());
     let batch_size = config.batch_size.unwrap_or(10);
     let max_lines = config.max_lines_per_blob.unwrap_or(800);
 
@@ -2518,6 +2672,9 @@ async fn search_only(
                 "检测到 API 配置已变更，当前项目索引正在后台重建，请稍后重试。"
             }
             BackgroundIndexLaunchState::Skipped => "检测到 API 配置已变更，请稍后重试。",
+            BackgroundIndexLaunchState::ScopeBlocked => {
+                "项目索引范围存在风险，已暂停后台重建，请在等一下窗口中确认。"
+            }
         };
         return Ok(message.to_string());
     }
@@ -2530,6 +2687,9 @@ async fn search_only(
             }
             BackgroundIndexLaunchState::AlreadyRunning => "当前项目正在后台索引中，请稍后重试。",
             BackgroundIndexLaunchState::Skipped => "当前项目索引尚未就绪，请稍后重试。",
+            BackgroundIndexLaunchState::ScopeBlocked => {
+                "项目索引范围存在风险，已暂停后台索引，请在等一下窗口中确认。"
+            }
         };
         return Ok(message.to_string());
     }
