@@ -3,7 +3,7 @@ use rmcp::model::*;
 use rmcp::{
     model::ErrorData as McpError,
     service::{RequestContext, ServerInitializeError},
-    transport::stdio,
+    transport::{async_rw::AsyncRwTransport, stdio, Transport},
     RoleServer, ServerHandler, ServiceExt,
 };
 use std::collections::HashMap;
@@ -25,6 +25,77 @@ use crate::{log_debug, log_important};
 
 const WINDSURF_ZHI_ALIAS: &str = "work_note";
 const MCP_PROFILE_ENV: &str = "SANSHU_MCP_PROFILE";
+const MCP_SERVER_DISCOVER_METHOD: &str = "server/discover";
+
+/// 兼容会先探测新版生命周期、再回退旧版 initialize 的 MCP 客户端。
+struct DiscoverFallbackTransport<T> {
+    inner: T,
+    check_initial_request: bool,
+}
+
+impl<T> DiscoverFallbackTransport<T> {
+    fn new(inner: T) -> Self {
+        Self {
+            inner,
+            check_initial_request: true,
+        }
+    }
+}
+
+impl<T> Transport<RoleServer> for DiscoverFallbackTransport<T>
+where
+    T: Transport<RoleServer>,
+{
+    type Error = T::Error;
+
+    fn send(
+        &mut self,
+        item: ServerJsonRpcMessage,
+    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.inner.send(item)
+    }
+
+    fn receive(
+        &mut self,
+    ) -> impl std::future::Future<Output = Option<ClientJsonRpcMessage>> + Send {
+        async move {
+            loop {
+                let message = self.inner.receive().await?;
+                if !self.check_initial_request {
+                    return Some(message);
+                }
+
+                self.check_initial_request = false;
+                let ClientJsonRpcMessage::Request(JsonRpcRequest {
+                    id,
+                    request: ClientRequest::CustomRequest(request),
+                    ..
+                }) = &message
+                else {
+                    return Some(message);
+                };
+                if request.method != MCP_SERVER_DISCOVER_METHOD {
+                    return Some(message);
+                }
+
+                // 中文说明：返回“不支持”后保持 stdio 打开，让新版客户端回退发送旧版 initialize。
+                let response = ServerJsonRpcMessage::error(
+                    McpError::new(ErrorCode::METHOD_NOT_FOUND, "Method not found", None),
+                    id.clone(),
+                );
+                if let Err(error) = self.inner.send(response).await {
+                    log_important!(error, "回应 MCP server/discover 兼容探测失败: {}", error);
+                    return None;
+                }
+                log_debug!("已拒绝首包 server/discover，等待客户端回退发送 initialize");
+            }
+        }
+    }
+
+    fn close(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
+        self.inner.close()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum McpClientProfile {
@@ -689,11 +760,10 @@ impl ServerHandler for ZhiServer {
 
 /// 启动MCP服务器
 pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
-    // 中文说明：MCP 进程负责长期维护代码监听；GUI 只写入配置中的监听意图。
-    start_acemcp_watch_config_sync();
-
     // 创建并运行服务器
-    let service = match ZhiServer::new().serve(stdio()).await {
+    let (stdin, stdout) = stdio();
+    let transport = DiscoverFallbackTransport::new(AsyncRwTransport::new_server(stdin, stdout));
+    let service = match ZhiServer::new().serve(transport).await {
         Ok(service) => service,
         Err(e) => {
             match &e {
@@ -710,6 +780,9 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
             return Err(Box::new(e));
         }
     };
+
+    // 中文说明：MCP 进程长期维护代码监听；握手成功后再恢复，避免探测失败产生批量取消日志。
+    start_acemcp_watch_config_sync();
 
     // 等待服务器关闭
     service.waiting().await?;
@@ -730,4 +803,133 @@ fn start_acemcp_watch_config_sync() {
             watcher_manager.sync_with_persisted_watch_projects().await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::convert::Infallible;
+    use std::sync::{Arc, Mutex};
+
+    struct MockTransport {
+        incoming: VecDeque<ClientJsonRpcMessage>,
+        sent: Arc<Mutex<Vec<ServerJsonRpcMessage>>>,
+    }
+
+    impl MockTransport {
+        fn new(incoming: Vec<ClientJsonRpcMessage>) -> Self {
+            Self {
+                incoming: incoming.into(),
+                sent: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl Transport<RoleServer> for MockTransport {
+        type Error = Infallible;
+
+        fn send(
+            &mut self,
+            item: ServerJsonRpcMessage,
+        ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static {
+            let sent = Arc::clone(&self.sent);
+            async move {
+                sent.lock().expect("sent lock poisoned").push(item);
+                Ok(())
+            }
+        }
+
+        fn receive(
+            &mut self,
+        ) -> impl std::future::Future<Output = Option<ClientJsonRpcMessage>> + Send {
+            std::future::ready(self.incoming.pop_front())
+        }
+
+        fn close(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
+            std::future::ready(Ok(()))
+        }
+    }
+
+    fn client_message(value: serde_json::Value) -> ClientJsonRpcMessage {
+        serde_json::from_value(value).expect("valid client JSON-RPC message")
+    }
+
+    fn discover_request(id: u64) -> ClientJsonRpcMessage {
+        client_message(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": MCP_SERVER_DISCOVER_METHOD,
+            "params": {}
+        }))
+    }
+
+    fn initialize_request(id: u64) -> ClientJsonRpcMessage {
+        client_message(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "transport-test",
+                    "version": "1.0.0"
+                }
+            }
+        }))
+    }
+
+    fn assert_client_message_eq(
+        actual: Option<ClientJsonRpcMessage>,
+        expected: &ClientJsonRpcMessage,
+    ) {
+        let actual = actual.expect("expected client JSON-RPC message");
+        assert_eq!(
+            serde_json::to_value(actual).expect("serialize actual message"),
+            serde_json::to_value(expected).expect("serialize expected message")
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_discover_returns_method_not_found_then_forwards_initialize() {
+        let initialize = initialize_request(2);
+        let mock = MockTransport::new(vec![discover_request(1), initialize.clone()]);
+        let sent = Arc::clone(&mock.sent);
+        let mut transport = DiscoverFallbackTransport::new(mock);
+
+        assert_client_message_eq(transport.receive().await, &initialize);
+
+        let sent = sent.lock().expect("sent lock poisoned");
+        assert_eq!(sent.len(), 1);
+        let ServerJsonRpcMessage::Error(error) = &sent[0] else {
+            panic!("expected method-not-found error");
+        };
+        assert_eq!(error.id, RequestId::Number(1));
+        assert_eq!(error.error.code, ErrorCode::METHOD_NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn legacy_initialize_is_forwarded_without_response() {
+        let initialize = initialize_request(1);
+        let mock = MockTransport::new(vec![initialize.clone()]);
+        let sent = Arc::clone(&mock.sent);
+        let mut transport = DiscoverFallbackTransport::new(mock);
+
+        assert_client_message_eq(transport.receive().await, &initialize);
+        assert!(sent.lock().expect("sent lock poisoned").is_empty());
+    }
+
+    #[tokio::test]
+    async fn discover_after_initial_request_is_not_intercepted() {
+        let initialize = initialize_request(1);
+        let discover = discover_request(2);
+        let mock = MockTransport::new(vec![initialize.clone(), discover.clone()]);
+        let sent = Arc::clone(&mock.sent);
+        let mut transport = DiscoverFallbackTransport::new(mock);
+
+        assert_client_message_eq(transport.receive().await, &initialize);
+        assert_client_message_eq(transport.receive().await, &discover);
+        assert!(sent.lock().expect("sent lock poisoned").is_empty());
+    }
 }
