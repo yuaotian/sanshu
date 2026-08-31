@@ -34,17 +34,9 @@ pub const ZH_TO_EN_EXPANSIONS: &[(&str, &[&str])] = &[
     ("现代", &["modern", "clean", "minimal"]),
     (
         "科技感",
-        &[
-            "futuristic",
-            "neon",
-            "hud",
-            "cyberpunk",
-            "retro-futurism",
-            "aurora",
-            "vaporwave",
-        ],
+        &["futuristic", "hud", "technical", "wireframe", "sci-fi"],
     ),
-    ("科幻", &["futuristic", "hud", "retro-futurism"]),
+    ("科幻", &["futuristic", "hud", "sci-fi"]),
     ("赛博", &["cyberpunk", "neon", "retro-futurism"]),
     ("霓虹", &["neon", "glow"]),
     ("渐变", &["gradient", "aurora", "mesh"]),
@@ -118,9 +110,6 @@ pub const EN_SYNONYMS: &[(&str, &[&str])] = &[
         "direct2d",
         &["canvas", "native", "rendering", "performance"],
     ),
-    (
-        "canvas",
-        &["drawing", "rendering", "animation", "performance"],
-    ),
+    ("canvas", &["rendering", "animation", "performance"]),
     ("space", &["cosmic", "aerospace", "orbital"]),
 ];

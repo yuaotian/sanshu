@@ -104,14 +104,25 @@ async fn uiux_auto_uses_local_bm25_for_long_chinese_narrative() {
         Some("matched")
     );
     assert_eq!(retrieval["knowledge_hit_count"].as_u64(), Some(3));
-    assert!(retrieval["knowledge_diagnostics"]["domains"]
+    let domains = retrieval["knowledge_diagnostics"]["domains"]
         .as_array()
-        .is_some_and(|domains| domains.len() >= 2));
+        .expect("应返回知识域诊断");
+    for expected in ["style", "product", "motion"] {
+        assert!(
+            domains
+                .iter()
+                .any(|domain| domain.as_str() == Some(expected)),
+            "应包含 {expected} 知识域，实际为: {domains:?}"
+        );
+    }
     assert!(value["data"]["uiux_hits"]
         .as_array()
         .is_some_and(|hits| hits.iter().all(|hit| hit["location"]
             .as_str()
             .is_some_and(|location| location.contains("ui-ux-pro-max-v2.15.0/data/")))));
+    let hits_text = value["data"]["uiux_hits"].to_string();
+    assert!(hits_text.contains("HUD / Sci-Fi FUI"));
+    assert!(hits_text.contains("Space Tech / Aerospace"));
 }
 
 #[tokio::test]

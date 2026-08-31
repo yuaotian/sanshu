@@ -79,7 +79,8 @@ try {
     }
 
     if (-not $SkipCheck) {
-        cargo check --lib
+        # 当前主机默认并行检查偶发 zlib-rs CTFE 尺寸异常；scoped 验证固定单任务以获得可重复结果。
+        cargo check --lib -j 1
         Assert-NativeSuccess 'Rust library 编译检查' $LASTEXITCODE
     }
 

@@ -13,7 +13,7 @@ use anyhow::{anyhow, Context, Result};
 use super::structured_search;
 
 /// 知识库文件名（fast-context 命中结果按该文件名过滤）
-pub const UIUX_MARKDOWN_FILENAME: &str = "ui-ux-pro-max-v2.15.0.md";
+pub const UIUX_MARKDOWN_FILENAME: &str = "ui-ux-pro-max-skill.md";
 
 /// 知识库目录：<系统配置目录>/sanshu/uiux-knowledge
 fn knowledge_dir() -> Result<PathBuf> {

@@ -196,6 +196,7 @@ pub fn search(query: &str, action: UiuxAction, max_results: usize) -> SearchRepo
     if rewritten.tokens.is_empty() {
         return empty_report(rewritten);
     }
+    let raw_query_tokens = tokenize(query);
 
     let routing = route_domains(query, &rewritten.tokens, action);
     let minimum_matches = if rewritten.tokens.len() <= 3 { 1 } else { 2 };
@@ -220,7 +221,8 @@ pub fn search(query: &str, action: UiuxAction, max_results: usize) -> SearchRepo
                 .iter()
                 .filter(|token| document.term_frequencies.contains_key(token.as_str()))
                 .count();
-            let identity_bonus = identity_bonus(query, &rewritten.tokens, document);
+            // 身份字段加权只认用户原文，查询扩展词不能伪装成显式 Style ID/产品名。
+            let identity_bonus = identity_bonus(query, &raw_query_tokens, document);
             if matched < minimum_matches && identity_bonus == 0.0 {
                 continue;
             }
@@ -1243,18 +1245,21 @@ mod tests {
 
         assert_eq!(report.hits.len(), 3, "原始长查询应稳定返回 3 条知识");
         assert!(
-            excerpts.contains("HUD / Sci-Fi FUI") || excerpts.contains("Space Tech / Aerospace"),
-            "top-3 应包含科幻 HUD 或航天产品知识，实际为: {excerpts}"
+            report
+                .hits
+                .iter()
+                .any(|hit| hit.domain == "style" && hit.excerpt.contains("HUD / Sci-Fi FUI")),
+            "top-3 的 style 域应命中 HUD / Sci-Fi FUI，实际为: {excerpts}"
         );
         assert!(
-            excerpts.contains("3D & Hyperrealism")
-                || excerpts.contains("深度")
-                || excerpts.contains("immersive"),
-            "top-3 应包含 3D/沉浸方向，实际为: {excerpts}"
+            report.hits.iter().any(
+                |hit| hit.domain == "product" && hit.excerpt.contains("Space Tech / Aerospace")
+            ),
+            "top-3 的 product 域应命中 Space Tech / Aerospace，实际为: {excerpts}"
         );
         assert!(
-            report.domains.len() >= 2,
-            "top-3 应跨至少两个知识域，实际为: {:?}",
+            report.hits.iter().any(|hit| hit.domain == "motion"),
+            "top-3 应包含 motion 性能/动效知识，实际为: {:?}",
             report.domains
         );
         assert!(!report.abstained);
