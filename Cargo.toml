@@ -80,6 +80,9 @@ tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-dialog = "2.4.2"
 csv = "1.3"
 tempfile = "3.10"
+# UIUX 本地语义检索使用动态 ONNX Runtime，避开预编译静态库的 MSVC ABI 绑定。
+fastembed = { version = "=6.0.2", default-features = false, features = ["ort-load-dynamic"] }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic", "std"] }
 
 # 图标工坊 - SVG 转 PNG 支持
 resvg = "0.38"

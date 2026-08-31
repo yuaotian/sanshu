@@ -1,6 +1,7 @@
 param(
     [switch]$SkipCheck,
-    [switch]$SkipFrontend
+    [switch]$SkipFrontend,
+    [switch]$RunModelE2E
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,18 +34,35 @@ try {
         'src/rust/mcp/tools/uiux/knowledge_base.rs'
         'src/rust/mcp/tools/uiux/lexicon.rs'
         'src/rust/mcp/tools/uiux/mcp.rs'
+        'src/rust/mcp/tools/uiux/model_manager.rs'
         'src/rust/mcp/tools/uiux/mod.rs'
+        'src/rust/mcp/tools/uiux/semantic_search.rs'
         'src/rust/mcp/tools/uiux/structured_search.rs'
         'src/rust/mcp/tools/uiux/types.rs'
+        'src/rust/network/geo.rs'
+        'src/rust/network/github_strategy.rs'
+        'src/rust/network/mod.rs'
+        'src/rust/ui/updater.rs'
         'tests/uiux_mcp.rs'
     )
     rustfmt --edition 2021 --check --config skip_children=true $rustFiles
     Assert-NativeSuccess 'Rust 格式检查' $LASTEXITCODE
 
-    cargo test --lib uiux::
+    cargo test --lib uiux:: -j 1
     Assert-NativeSuccess 'UIUX 模块单元测试' $LASTEXITCODE
 
-    cargo test --lib mcp::tools::sou::tests
+    if ($RunModelE2E) {
+        cargo test --lib model_download_index_and_query_e2e -j 1 -- --ignored --nocapture
+        Assert-NativeSuccess 'UIUX BGE 模型下载、索引与查询 E2E' $LASTEXITCODE
+    }
+
+    cargo test --lib network::github_strategy::tests -j 1
+    Assert-NativeSuccess 'GitHub 路由策略单元测试' $LASTEXITCODE
+
+    cargo test --lib ui::updater::tests -j 1
+    Assert-NativeSuccess '更新摘要校验单元测试' $LASTEXITCODE
+
+    cargo test --lib mcp::tools::sou::tests -j 1
     Assert-NativeSuccess 'sou 结构化片段单元测试' $LASTEXITCODE
 
     if ($env:OS -eq 'Windows_NT') {
@@ -85,8 +103,8 @@ try {
     }
 
     if (-not $SkipFrontend) {
-        pnpm exec eslint src/frontend/components/tools/SouConfig.vue
-        Assert-NativeSuccess 'SouConfig ESLint 检查' $LASTEXITCODE
+        pnpm exec eslint src/frontend/components/tools/SouConfig.vue src/frontend/components/tools/UiuxConfig.vue src/frontend/components/tabs/McpToolsTab.vue
+        Assert-NativeSuccess 'UIUX 配置界面 ESLint 检查' $LASTEXITCODE
 
         pnpm build
         Assert-NativeSuccess '前端生产构建' $LASTEXITCODE

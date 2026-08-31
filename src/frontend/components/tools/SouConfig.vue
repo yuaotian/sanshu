@@ -50,7 +50,6 @@ const config = ref({
   sou_include_backend_headers: true,
   sou_include_failed_backend_errors: true,
   sou_local_enabled: true,
-  uiux_knowledge_backend: 'auto' as 'auto' | 'fast_context' | 'local',
   // fast-context 配置
   fast_context_api_key: '',
   fast_context_tree_depth: 3,
@@ -343,11 +342,6 @@ const autoOrderOptions = [
 ]
 
 const backendConfigOptions = backendOptions.filter(item => item.value !== 'default')
-const uiuxKnowledgeBackendOptions = [
-  { label: '自动（跟随 sou 与 API Key 状态）', value: 'auto' },
-  { label: '优先 Fast Context', value: 'fast_context' },
-  { label: '仅本地 Markdown（A/B 基线）', value: 'local' },
-]
 const backendNameMap: Record<string, string> = {
   ace: 'ACE',
   fast_context: 'Fast Context',
@@ -579,7 +573,6 @@ async function loadAcemcpConfig() {
       sou_include_backend_headers: res.sou_include_backend_headers ?? true,
       sou_include_failed_backend_errors: res.sou_include_failed_backend_errors ?? true,
       sou_local_enabled: res.sou_local_enabled ?? true,
-      uiux_knowledge_backend: res.uiux_knowledge_backend || 'auto',
       // fast-context 配置
       fast_context_api_key: res.fast_context_api_key || '',
       fast_context_tree_depth: res.fast_context_tree_depth || 3,
@@ -719,7 +712,6 @@ async function saveConfig() {
         souIncludeBackendHeaders: config.value.sou_include_backend_headers,
         souIncludeFailedBackendErrors: config.value.sou_include_failed_backend_errors,
         souLocalEnabled: config.value.sou_local_enabled,
-        uiuxKnowledgeBackend: config.value.uiux_knowledge_backend,
         // fast-context 配置
         fastContextApiKey: config.value.fast_context_api_key,
         fastContextTreeDepth: config.value.fast_context_tree_depth,
@@ -1212,16 +1204,6 @@ defineExpose({ saveConfig })
                     </n-form-item>
                   </n-grid-item>
                 </n-grid>
-
-                <n-form-item label="UIUX 知识检索默认策略">
-                  <n-select
-                    v-model:value="config.uiux_knowledge_backend"
-                    :options="uiuxKnowledgeBackendOptions"
-                  />
-                  <template #feedback>
-                    <span class="form-feedback">请求中的 knowledge_backend 会覆盖此默认值。</span>
-                  </template>
-                </n-form-item>
 
                 <n-grid :x-gap="24" :y-gap="16" :cols="4">
                   <n-grid-item>

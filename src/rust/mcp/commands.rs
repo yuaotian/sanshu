@@ -139,7 +139,7 @@ pub async fn get_mcp_tools_config(
         icon: "i-carbon-color-palette text-lg text-pink-600 dark:text-pink-400".to_string(),
         icon_bg: "bg-pink-100 dark:bg-pink-900".to_string(),
         dark_icon_bg: "dark:bg-pink-800".to_string(),
-        has_config: false,
+        has_config: true, // UIUX 提供本地语义模型与检索配置。
     });
 
     // 提示词增强工具 - 依赖 acemcp 配置

@@ -112,6 +112,14 @@ pub fn build_tauri_app() -> Builder<tauri::Wry> {
             crate::mcp::tools::context7::commands::test_context7_connection,
             crate::mcp::tools::context7::commands::get_context7_config,
             crate::mcp::tools::context7::commands::save_context7_config,
+            // UIUX 本地语义模型与检索配置命令
+            crate::mcp::tools::uiux::model_manager::get_uiux_config,
+            crate::mcp::tools::uiux::model_manager::set_uiux_config,
+            crate::mcp::tools::uiux::model_manager::select_uiux_model_directory,
+            crate::mcp::tools::uiux::model_manager::get_uiux_model_status,
+            crate::mcp::tools::uiux::model_manager::start_uiux_model_download,
+            crate::mcp::tools::uiux::model_manager::cancel_uiux_model_download,
+            crate::mcp::tools::uiux::model_manager::remove_uiux_model,
             // tavily 命令
             crate::mcp::tools::tavily::commands::get_tavily_config,
             crate::mcp::tools::tavily::commands::save_tavily_config,

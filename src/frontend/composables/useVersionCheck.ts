@@ -36,6 +36,7 @@ interface UpdateInfo {
   latest_version: string
   release_notes: string
   download_url: string
+  expected_sha256?: string
   // 网络状态信息（新增）
   network_status: NetworkStatus
 }

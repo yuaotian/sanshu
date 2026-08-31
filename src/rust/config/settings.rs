@@ -171,8 +171,12 @@ pub struct McpConfig {
     pub uiux_max_results_cap: Option<u32>,
     /// 是否启用 UI 提示词美化（默认 true）
     pub uiux_beautify_enabled: Option<bool>,
-    /// 知识检索后端："auto"（fast-context 可用则优先，默认）| "fast_context"（强制）| "local"（仅本地，便于 A/B 对比）
+    /// 知识检索后端："auto"（本地混合检索，默认）| "fast_context"（显式 A/B）| "local"（仅本地 BM25）
     pub uiux_knowledge_backend: Option<String>,
+    /// 是否在 auto 模式启用 BGE 本地语义检索；模型未就绪时仍回落 BM25。
+    pub uiux_semantic_enabled: Option<bool>,
+    /// UIUX 模型目录；留空时使用系统本地数据目录。
+    pub uiux_model_dir: Option<String>,
 
     // 图标工坊配置
     /// 默认保存路径（相对于项目根目录，如 "assets/icons"）
@@ -422,6 +426,8 @@ pub fn default_mcp_config() -> McpConfig {
         uiux_max_results_cap: Some(10),
         uiux_beautify_enabled: Some(true),
         uiux_knowledge_backend: Some("auto".to_string()),
+        uiux_semantic_enabled: Some(true),
+        uiux_model_dir: None,
         // 图标工坊配置默认值
         icon_default_save_path: None,    // 使用默认 "assets/icons"
         icon_default_format: None,       // 默认 SVG

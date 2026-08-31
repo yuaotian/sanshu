@@ -16,6 +16,7 @@ const emit = defineEmits<{
 }>()
 // 异步加载配置组件
 const SouConfig = defineAsyncComponent(() => import('../tools/SouConfig.vue'))
+const UiuxConfig = defineAsyncComponent(() => import('../tools/UiuxConfig.vue'))
 const Context7Config = defineAsyncComponent(() => import('../tools/Context7Config.vue'))
 const IconWorkshop = defineAsyncComponent(() => import('../tools/IconWorkshop/IconWorkshop.vue'))
 const EnhanceConfig = defineAsyncComponent(() => import('../tools/EnhanceConfig.vue'))
@@ -240,6 +241,7 @@ onMounted(async () => {
     >
       <div class="config-modal-body min-h-[400px]">
         <SouConfig v-if="currentToolId === 'sou'" :active="showToolConfigModal" />
+        <UiuxConfig v-else-if="currentToolId === 'uiux'" :active="showToolConfigModal" />
         <Context7Config v-else-if="currentToolId === 'context7'" :active="showToolConfigModal" />
         <EnhanceConfig
           v-else-if="currentToolId === 'enhance'"

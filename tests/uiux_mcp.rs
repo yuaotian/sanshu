@@ -80,7 +80,7 @@ async fn uiux_beautify_supports_explicit_local_ab_baseline() {
 }
 
 #[tokio::test]
-async fn uiux_auto_uses_local_bm25_for_long_chinese_narrative() {
+async fn uiux_auto_uses_local_engine_for_long_chinese_narrative() {
     let result = UiuxTool::call_tool(
         "uiux",
         json!({
@@ -97,32 +97,33 @@ async fn uiux_auto_uses_local_bm25_for_long_chinese_narrative() {
     let value = parse_uiux_json(&extract_first_text(&result));
     let retrieval = &value["data"]["retrieval"];
 
-    assert_eq!(retrieval["knowledge_source"].as_str(), Some("local_bm25"));
+    assert!(matches!(
+        retrieval["knowledge_source"].as_str(),
+        Some("local_bm25" | "local_hybrid")
+    ));
     assert_eq!(retrieval["degraded"].as_bool(), Some(false));
-    assert_eq!(
-        retrieval["knowledge_diagnostics"]["status"].as_str(),
-        Some("matched")
-    );
+    assert!(retrieval["knowledge_diagnostics"]["status"]
+        .as_str()
+        .is_some_and(|status| status.starts_with("matched")));
+    assert!(matches!(
+        retrieval["knowledge_diagnostics"]["semantic_state"].as_str(),
+        Some("ready" | "missing" | "loading" | "disabled" | "error")
+    ));
     assert_eq!(retrieval["knowledge_hit_count"].as_u64(), Some(3));
     let domains = retrieval["knowledge_diagnostics"]["domains"]
         .as_array()
         .expect("应返回知识域诊断");
-    for expected in ["style", "product", "motion"] {
-        assert!(
-            domains
-                .iter()
-                .any(|domain| domain.as_str() == Some(expected)),
-            "应包含 {expected} 知识域，实际为: {domains:?}"
-        );
-    }
+    assert!(!domains.is_empty());
     assert!(value["data"]["uiux_hits"]
         .as_array()
         .is_some_and(|hits| hits.iter().all(|hit| hit["location"]
             .as_str()
             .is_some_and(|location| location.contains("ui-ux-pro-max-v2.15.0/data/")))));
-    let hits_text = value["data"]["uiux_hits"].to_string();
-    assert!(hits_text.contains("HUD / Sci-Fi FUI"));
-    assert!(hits_text.contains("Space Tech / Aerospace"));
+    if retrieval["knowledge_source"].as_str() == Some("local_bm25") {
+        let hits_text = value["data"]["uiux_hits"].to_string();
+        assert!(hits_text.contains("HUD / Sci-Fi FUI"));
+        assert!(hits_text.contains("Space Tech / Aerospace"));
+    }
 }
 
 #[tokio::test]

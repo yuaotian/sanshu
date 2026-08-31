@@ -115,6 +115,16 @@ pub struct KnowledgeHit {
     pub domain: String,
 }
 
+/// 提供给本地语义索引的稳定文档视图；顺序与内置 CSV 语料顺序一致。
+#[derive(Debug, Clone)]
+pub struct SemanticDocument {
+    pub identity: String,
+    pub domain: String,
+    pub location: String,
+    pub text: String,
+    pub excerpt: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchReport {
     pub hits: Vec<KnowledgeHit>,
@@ -144,6 +154,7 @@ struct KnowledgeDocument {
     normalized_identity: String,
     term_frequencies: HashMap<String, usize>,
     length: usize,
+    search_text: String,
     location: String,
     excerpt: String,
 }
@@ -188,6 +199,24 @@ static MATERIALIZED_MARKDOWN: Lazy<String> = Lazy::new(|| {
         }
     }
     output
+});
+
+static SEMANTIC_DOCUMENTS: Lazy<Vec<SemanticDocument>> = Lazy::new(|| {
+    INDEXES
+        .iter()
+        .flat_map(|index| {
+            index.documents.iter().map(|document| SemanticDocument {
+                identity: document.identity.clone(),
+                domain: index.domain.clone(),
+                location: document.location.clone(),
+                text: format!(
+                    "{}\n{}\n{}",
+                    document.identity, document.search_text, document.excerpt
+                ),
+                excerpt: document.excerpt.clone(),
+            })
+        })
+        .collect()
 });
 
 pub fn search(query: &str, action: UiuxAction, max_results: usize) -> SearchReport {
@@ -287,6 +316,10 @@ pub fn materialized_markdown() -> &'static str {
     MATERIALIZED_MARKDOWN.as_str()
 }
 
+pub fn semantic_documents() -> &'static [SemanticDocument] {
+    SEMANTIC_DOCUMENTS.as_slice()
+}
+
 #[cfg(test)]
 fn document_count() -> usize {
     INDEXES.iter().map(|index| index.documents.len()).sum()
@@ -343,6 +376,7 @@ fn build_domain_index(spec: CorpusSpec) -> Option<DomainIndex> {
             identity: identity.clone(),
             term_frequencies,
             length: tokens.len(),
+            search_text,
             location: format!(
                 "{ASSET_ROOT}/data/{}:{}",
                 spec.relative_path,

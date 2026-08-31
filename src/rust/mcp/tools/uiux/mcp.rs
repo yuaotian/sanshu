@@ -1,5 +1,5 @@
 // UI/UX MCP 工具定义与调用入口
-// 新协议目标：单一 uiux 工具，知识库默认走本地结构化 BM25；
+// 新协议目标：单一 uiux 工具，知识库默认走本地 BM25 + BGE 混合检索；
 // fast-context 仅在显式请求时用于 A/B 诊断，项目上下文仍通过 sou 检索用户项目。
 
 use std::borrow::Cow;
@@ -18,6 +18,7 @@ use crate::{log_debug, log_important};
 use super::knowledge_base;
 use super::localize;
 use super::response::{UiuxError, UiuxResponse};
+use super::semantic_search;
 use super::structured_search;
 use super::types::{UiuxAction, UiuxKnowledgeBackend, UiuxLang, UiuxOutputFormat, UiuxRequest};
 
@@ -52,7 +53,7 @@ impl UiuxDefaults {
             .and_then(|c| c.uiux_max_results_cap)
             .unwrap_or(10)
             .max(1);
-        // 知识检索后端：默认 auto，本地结构化 BM25 是稳定主链。
+        // 知识检索后端：默认 auto 使用本地 BM25/BGE 混合检索，模型未就绪时保底 BM25。
         let knowledge_backend = mcp_config
             .and_then(|c| c.uiux_knowledge_backend.as_deref())
             .and_then(parse_knowledge_backend)
@@ -92,6 +93,14 @@ struct UiuxKnowledgeDiagnostics {
     query_rewrites: Vec<String>,
     top_score: f64,
     token_coverage: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    semantic_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    semantic_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    semantic_top_score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fusion: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -135,7 +144,7 @@ impl UiuxTool {
                 "context_query": { "type": "string", "description": "项目上下文检索查询（可选，不传则自动生成）" },
                 "append_project_context": { "type": "boolean", "description": "是否追加项目上下文，默认 true" },
                 "max_results": { "type": "number", "description": "最大返回结果数（可选）" },
-                "knowledge_backend": { "type": "string", "enum": ["auto", "fast_context", "local"], "description": "知识检索后端（可选）：auto/local 使用本地结构化 BM25；fast_context 仅用于显式 A/B 诊断" },
+                "knowledge_backend": { "type": "string", "enum": ["auto", "fast_context", "local"], "description": "知识检索后端（可选）：auto 使用本地 BM25 + BGE，local 使用确定性 BM25，fast_context 仅用于显式 A/B 诊断" },
                 "output_format": { "type": "string", "enum": ["json", "text"], "description": "输出格式（兼容字段，当前统一返回 JSON）" },
                 "lang": { "type": "string", "enum": ["zh", "en"], "description": "输出语言（zh/en）" }
             },
@@ -145,7 +154,7 @@ impl UiuxTool {
         if let serde_json::Value::Object(schema_map) = schema {
             vec![Tool {
                 name: Cow::Borrowed("uiux"),
-                description: Some(Cow::Borrowed("单一 UI/UX 工具：优先通过 sou 检索项目页面与 UI/UX 资料，并在 sou 不可用时回退到本地 markdown 检索，统一生成可直接喂给 AI 的 UI 提示词。")),
+                description: Some(Cow::Borrowed("单一 UI/UX 工具：本地混合检索 UI/UX 知识，并通过 sou 追加项目页面上下文，统一生成可直接交给代码型 AI 的 UI 提示词。")),
                 input_schema: Arc::new(schema_map),
                 annotations: None,
                 icons: None,
@@ -379,9 +388,10 @@ impl SearchOutcome {
 }
 
 /// 知识检索主链路：
-/// 1) auto/local 直接使用 v2.15.0 本地结构化 BM25，结果稳定且不消耗远端配额；
-/// 2) 只有显式 fast_context 才物化同源知识库并执行 A/B 诊断；
-/// 3) 显式远端失败时回落本地，同时保留可区分的状态和消息。
+/// 1) auto 尝试本地 BM25 + BGE 混合检索，模型未就绪时在 2 秒预算内稳定保底 BM25；
+/// 2) local 固定使用 v2.15.0 本地结构化 BM25，作为可复现 A/B 基线；
+/// 3) 只有显式 fast_context 才物化同源知识库并执行 A/B 诊断；
+/// 4) 显式远端失败时回落本地，同时保留可区分的状态和消息。
 async fn collect_knowledge_hits(
     knowledge_backend: UiuxKnowledgeBackend,
     local_query: &str,
@@ -391,14 +401,8 @@ async fn collect_knowledge_hits(
 ) -> SearchOutcome {
     match knowledge_backend {
         UiuxKnowledgeBackend::Auto => {
-            return local_structured_outcome(
-                local_query,
-                action,
-                max_results,
-                false,
-                "matched",
-                "auto 已使用 ui-ux-pro-max v2.15.0 本地结构化 BM25 检索".to_string(),
-            );
+            let outcome = semantic_search::search(local_query, action, max_results).await;
+            return local_hybrid_outcome(outcome);
         }
         UiuxKnowledgeBackend::Local => {
             return local_structured_outcome(
@@ -440,6 +444,10 @@ async fn collect_knowledge_hits(
                 query_rewrites: Vec::new(),
                 top_score: 0.0,
                 token_coverage: 0.0,
+                semantic_model: None,
+                semantic_state: None,
+                semantic_top_score: None,
+                fusion: None,
             }),
         },
         Ok(_) => local_structured_outcome(
@@ -461,6 +469,53 @@ async fn collect_knowledge_hits(
                 err
             ),
         ),
+    }
+}
+
+fn local_hybrid_outcome(outcome: semantic_search::HybridSearchOutcome) -> SearchOutcome {
+    let report = outcome.report;
+    let mut status = if outcome.semantic_state == "ready" {
+        "matched_hybrid".to_string()
+    } else {
+        format!("matched_bm25_semantic_{}", outcome.semantic_state)
+    };
+    let mut message = outcome.message;
+    if report.abstained {
+        status.push_str("_low_confidence");
+        message.push_str("；本地检索因低置信度拒答");
+    }
+    let source = if outcome.semantic_state == "ready" {
+        "local_hybrid"
+    } else {
+        "local_bm25"
+    };
+    SearchOutcome {
+        source: source.to_string(),
+        hits: report
+            .hits
+            .into_iter()
+            .map(|hit| UiuxSnippet {
+                source: hit.source,
+                location: Some(hit.location),
+                excerpt: hit.excerpt,
+            })
+            .collect(),
+        degraded: false,
+        message: Some(message),
+        knowledge_diagnostics: Some(UiuxKnowledgeDiagnostics {
+            engine: outcome.engine,
+            version: structured_search::KNOWLEDGE_VERSION.to_string(),
+            status,
+            domains: report.domains,
+            rewritten_query: report.rewritten_query,
+            query_rewrites: report.query_rewrites,
+            top_score: report.top_score,
+            token_coverage: report.token_coverage,
+            semantic_model: Some(super::model_manager::MODEL_NAME.to_string()),
+            semantic_state: Some(outcome.semantic_state),
+            semantic_top_score: outcome.semantic_top_score,
+            fusion: outcome.fusion,
+        }),
     }
 }
 
@@ -503,6 +558,10 @@ fn local_structured_outcome(
             query_rewrites: report.query_rewrites,
             top_score: report.top_score,
             token_coverage: report.token_coverage,
+            semantic_model: None,
+            semantic_state: None,
+            semantic_top_score: None,
+            fusion: None,
         }),
     }
 }
@@ -522,6 +581,10 @@ fn local_diagnostics(status: &str) -> UiuxKnowledgeDiagnostics {
         query_rewrites: Vec::new(),
         top_score: 0.0,
         token_coverage: 0.0,
+        semantic_model: None,
+        semantic_state: None,
+        semantic_top_score: None,
+        fusion: None,
     }
 }
 
@@ -958,7 +1021,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_backend_always_uses_local_structured_search() {
+    fn auto_backend_never_uses_fast_context() {
         assert!(!should_use_fast_context(UiuxKnowledgeBackend::Auto, true));
         assert!(!should_use_fast_context(UiuxKnowledgeBackend::Auto, false));
     }

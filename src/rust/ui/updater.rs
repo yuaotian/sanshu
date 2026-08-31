@@ -1,7 +1,7 @@
 use crate::config::AppState;
-use crate::network::geo::GeoLocation;
+use crate::network::geo::detect_geo_location_full;
 use crate::network::{
-    download_with_strategy_with_progress, fetch_announcement_with_strategy,
+    download_verified_with_strategy_with_progress, fetch_announcement_with_strategy,
     fetch_latest_release_with_strategy,
 };
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,8 @@ pub struct UpdateInfo {
     pub latest_version: String,
     pub release_notes: String,
     pub download_url: String,
+    #[serde(default)]
+    pub expected_sha256: Option<String>,
     /// 网络状态信息（新增）
     pub network_status: NetworkStatus,
 }
@@ -158,7 +160,7 @@ pub async fn check_for_updates(
     log::info!("🔄 版本比较结果 - 有更新: {}", has_update);
 
     // 获取实际的下载URL（从assets中找到对应平台的文件）
-    let download_url = get_platform_download_url(&release)?;
+    let (download_url, expected_sha256) = get_platform_download_asset(&release)?;
 
     let update_info = UpdateInfo {
         available: has_update,
@@ -166,6 +168,7 @@ pub async fn check_for_updates(
         latest_version,
         release_notes: release["body"].as_str().unwrap_or("").to_string(),
         download_url,
+        expected_sha256,
         network_status,
     };
 
@@ -314,7 +317,9 @@ pub fn get_platform_info() -> String {
 }
 
 /// 获取当前平台对应的下载URL
-fn get_platform_download_url(release: &serde_json::Value) -> Result<String, String> {
+fn get_platform_download_asset(
+    release: &serde_json::Value,
+) -> Result<(String, Option<String>), String> {
     let assets = release["assets"]
         .as_array()
         .ok_or_else(|| "无法获取release assets".to_string())?;
@@ -361,7 +366,8 @@ fn get_platform_download_url(release: &serde_json::Value) -> Result<String, Stri
                 if let Some(download_url) = asset["browser_download_url"].as_str() {
                     log::info!("✅ 找到匹配的下载文件: {}", name);
                     log::info!("🔗 下载URL: {}", download_url);
-                    return Ok(download_url.to_string());
+                    let digest = asset["digest"].as_str().and_then(normalize_sha256_digest);
+                    return Ok((download_url.to_string(), digest));
                 }
             }
         }
@@ -370,7 +376,16 @@ fn get_platform_download_url(release: &serde_json::Value) -> Result<String, Stri
     // 如果找不到对应平台的文件，返回release页面URL作为fallback
     log::warn!("⚠️ 未找到平台 {} 的下载文件，使用release页面", platform);
     log::warn!("💡 可能的原因：1. 该平台没有预编译版本 2. 文件名格式不匹配");
-    Ok(release["html_url"].as_str().unwrap_or("").to_string())
+    Ok((release["html_url"].as_str().unwrap_or("").to_string(), None))
+}
+
+fn normalize_sha256_digest(value: &str) -> Option<String> {
+    let digest = value.trim().strip_prefix("sha256:")?;
+    (digest.len() == 64
+        && digest
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()))
+    .then(|| digest.to_ascii_lowercase())
 }
 
 /// 实际的下载和安装实现
@@ -418,10 +433,11 @@ async fn download_and_install_update_impl(
 
     let progress_app = app.clone();
     // 中文说明：下载同样走统一 GitHub 策略，同时透传 chunk 进度给前端更新弹窗。
-    let route = download_with_strategy_with_progress(
+    let route = download_verified_with_strategy_with_progress(
         &update_info.download_url,
         &file_path,
         &proxy_config,
+        update_info.expected_sha256.as_deref(),
         move |progress| {
             let update_progress = UpdateProgress {
                 chunk_length: progress.chunk_length,
@@ -1023,89 +1039,18 @@ fn replace_all_files_unix(app_dir: &PathBuf, files: &[PathBuf]) -> Result<(), St
     Ok(())
 }
 
-/// 检测完整的地理位置信息
-///
-/// 与 `detect_geo_location` 不同，此函数返回完整的 GeoLocation 结构体
-/// 包含 IP、城市、国家等详细信息
-async fn detect_geo_location_full() -> GeoLocation {
-    log::info!("🌍 开始检测完整地理位置信息");
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    // 创建HTTP客户端，设置较短的超时时间
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!("⚠️ 创建HTTP客户端失败: {}", e);
-            return GeoLocation {
-                ip: "unknown".to_string(),
-                city: None,
-                region: None,
-                country: "UNKNOWN".to_string(),
-                loc: None,
-                org: None,
-                postal: None,
-                timezone: None,
-            };
-        }
-    };
-
-    // 请求 ipinfo.io API
-    match client.get("https://ipinfo.io/json").send().await {
-        Ok(response) => {
-            if !response.status().is_success() {
-                log::warn!("⚠️ IP地理位置检测请求失败: HTTP {}", response.status());
-                return GeoLocation {
-                    ip: "unknown".to_string(),
-                    city: None,
-                    region: None,
-                    country: "UNKNOWN".to_string(),
-                    loc: None,
-                    org: None,
-                    postal: None,
-                    timezone: None,
-                };
-            }
-
-            // 解析JSON响应
-            match response.json::<GeoLocation>().await {
-                Ok(geo) => {
-                    log::info!(
-                        "✅ 检测到地理位置: {} ({}) - IP: {}",
-                        geo.country,
-                        geo.city.as_deref().unwrap_or("未知城市"),
-                        geo.ip
-                    );
-                    geo
-                }
-                Err(e) => {
-                    log::warn!("⚠️ 解析地理位置信息失败: {}", e);
-                    GeoLocation {
-                        ip: "unknown".to_string(),
-                        city: None,
-                        region: None,
-                        country: "UNKNOWN".to_string(),
-                        loc: None,
-                        org: None,
-                        postal: None,
-                        timezone: None,
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            log::warn!("⚠️ IP地理位置检测网络请求失败: {}", e);
-            GeoLocation {
-                ip: "unknown".to_string(),
-                city: None,
-                region: None,
-                country: "UNKNOWN".to_string(),
-                loc: None,
-                org: None,
-                postal: None,
-                timezone: None,
-            }
-        }
+    #[test]
+    fn github_asset_digest_accepts_only_sha256_hex() {
+        let digest = "A".repeat(64);
+        assert_eq!(
+            normalize_sha256_digest(&format!("sha256:{}", digest)),
+            Some("a".repeat(64))
+        );
+        assert_eq!(normalize_sha256_digest(&digest), None);
+        assert_eq!(normalize_sha256_digest("sha256:xyz"), None);
     }
 }
