@@ -1,5 +1,5 @@
 // UI/UX 知识库物化模块
-// 意图：把编译期内嵌的 ui-ux-pro-max-skill.md 幂等落盘到稳定目录
+// 意图：把 v2.15.0 结构化索引导出的 Markdown 幂等落盘到稳定目录
 // （<系统配置目录>/sanshu/uiux-knowledge/），使 fast-context 这类基于
 // 文件系统的检索后端可以对知识库做定向精确检索。
 // 背景：旧实现尝试在"用户目标项目"里用 sou 搜索该文件，但文件只内嵌于
@@ -10,11 +10,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 
-/// 与 markdown_search 共用同一份内嵌知识库内容，保证两条检索路径数据一致
-const UIUX_MARKDOWN: &str = include_str!("../../../assets/resources/ui-ux-pro-max-skill.md");
+use super::structured_search;
 
 /// 知识库文件名（fast-context 命中结果按该文件名过滤）
-pub const UIUX_MARKDOWN_FILENAME: &str = "ui-ux-pro-max-skill.md";
+pub const UIUX_MARKDOWN_FILENAME: &str = "ui-ux-pro-max-v2.15.0.md";
 
 /// 知识库目录：<系统配置目录>/sanshu/uiux-knowledge
 fn knowledge_dir() -> Result<PathBuf> {
@@ -34,12 +33,13 @@ fn materialize_into(dir: &Path) -> Result<String> {
     fs::create_dir_all(dir).with_context(|| format!("创建知识库目录失败: {}", dir.display()))?;
 
     let file_path = dir.join(UIUX_MARKDOWN_FILENAME);
+    let knowledge = structured_search::materialized_markdown();
     // 中文说明：先比对现有内容，一致则跳过写入，避免每次调用都触碰磁盘 mtime
     let up_to_date = fs::read_to_string(&file_path)
-        .map(|existing| existing == UIUX_MARKDOWN)
+        .map(|existing| existing == knowledge)
         .unwrap_or(false);
     if !up_to_date {
-        fs::write(&file_path, UIUX_MARKDOWN)
+        fs::write(&file_path, knowledge)
             .with_context(|| format!("写入知识库文件失败: {}", file_path.display()))?;
     }
 
@@ -62,7 +62,7 @@ mod tests {
         assert!(file_path.exists(), "物化后知识库文件应存在");
         assert_eq!(
             fs::read_to_string(&file_path).expect("知识库文件应可读"),
-            UIUX_MARKDOWN
+            structured_search::materialized_markdown()
         );
         assert!(!returned.contains('\\'), "返回路径应为正斜杠形式");
 
@@ -70,7 +70,7 @@ mod tests {
         materialize_into(&dir).expect("重复物化应幂等成功");
         assert_eq!(
             fs::read_to_string(&file_path).expect("知识库文件应可读"),
-            UIUX_MARKDOWN
+            structured_search::materialized_markdown()
         );
     }
 
@@ -86,7 +86,7 @@ mod tests {
         materialize_into(&dir).expect("物化应成功");
         assert_eq!(
             fs::read_to_string(&file_path).expect("知识库文件应可读"),
-            UIUX_MARKDOWN
+            structured_search::materialized_markdown()
         );
     }
 }

@@ -34,7 +34,7 @@ pub fn success_summary(
                 text.push_str(" 已追加项目上下文。");
             }
             if degraded {
-                text.push_str(" 当前已降级到本地 markdown 检索。");
+                text.push_str(" 部分检索链路发生降级，详情见 retrieval.messages。");
             }
             text
         }
@@ -44,7 +44,7 @@ pub fn success_summary(
                 text.push_str(" Project context appended.");
             }
             if degraded {
-                text.push_str(" Fallback switched to local markdown retrieval.");
+                text.push_str(" Part of the retrieval pipeline degraded; see retrieval.messages.");
             }
             text
         }

@@ -43,7 +43,15 @@ async fn uiux_beautify_supports_explicit_local_ab_baseline() {
     assert_eq!(v["data"]["action"].as_str(), Some("beautify"));
     assert_eq!(
         v["data"]["retrieval"]["knowledge_source"].as_str(),
-        Some("local_markdown")
+        Some("local_bm25")
+    );
+    assert_eq!(
+        v["data"]["retrieval"]["knowledge_diagnostics"]["version"].as_str(),
+        Some("v2.15.0")
+    );
+    assert_eq!(
+        v["data"]["retrieval"]["knowledge_diagnostics"]["engine"].as_str(),
+        Some("structured_bm25_v1")
     );
     assert_eq!(v["data"]["retrieval"]["degraded"].as_bool(), Some(false));
     assert_eq!(
@@ -69,6 +77,41 @@ async fn uiux_beautify_supports_explicit_local_ab_baseline() {
         .as_array()
         .map(|arr| !arr.is_empty())
         .unwrap_or(false));
+}
+
+#[tokio::test]
+async fn uiux_auto_uses_local_bm25_for_long_chinese_narrative() {
+    let result = UiuxTool::call_tool(
+        "uiux",
+        json!({
+            "query": "查找鼠标动效主题美化：黑洞吞噬小星球、地球月球卫星战舰公转系统、深邃暗黑多层星空、巨手破空抓握地球拖入裂缝，保持 KISS/YAGNI 极简几何科技感与高性能 Direct2D/Canvas 实现",
+            "action": "beautify",
+            "knowledge_backend": "auto",
+            "append_project_context": false,
+            "max_results": 3,
+            "output_format": "json"
+        }),
+    )
+    .await
+    .expect("uiux auto 调用应成功");
+    let value = parse_uiux_json(&extract_first_text(&result));
+    let retrieval = &value["data"]["retrieval"];
+
+    assert_eq!(retrieval["knowledge_source"].as_str(), Some("local_bm25"));
+    assert_eq!(retrieval["degraded"].as_bool(), Some(false));
+    assert_eq!(
+        retrieval["knowledge_diagnostics"]["status"].as_str(),
+        Some("matched")
+    );
+    assert_eq!(retrieval["knowledge_hit_count"].as_u64(), Some(3));
+    assert!(retrieval["knowledge_diagnostics"]["domains"]
+        .as_array()
+        .is_some_and(|domains| domains.len() >= 2));
+    assert!(value["data"]["uiux_hits"]
+        .as_array()
+        .is_some_and(|hits| hits.iter().all(|hit| hit["location"]
+            .as_str()
+            .is_some_and(|location| location.contains("ui-ux-pro-max-v2.15.0/data/")))));
 }
 
 #[tokio::test]

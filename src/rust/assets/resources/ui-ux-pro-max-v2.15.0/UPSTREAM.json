@@ -1,0 +1,21 @@
+{
+  "name": "ui-ux-pro-max-skill",
+  "repository": "https://github.com/nextlevelbuilder/ui-ux-pro-max-skill",
+  "tag": "v2.15.0",
+  "commit": "a38d04c3d5c298c851dbe5e6ee1965ee3de42cb5",
+  "release_date": "2026-08-13",
+  "license": "MIT",
+  "catalog_verified_at": "2026-08-13",
+  "runtime_scope": {
+    "core_search_domains": 11,
+    "reasoning_profiles": true,
+    "provenance_records": true,
+    "technology_stacks": 22
+  },
+  "excluded_snapshots": [
+    "google-fonts.csv",
+    "google-font-licenses.json",
+    "phosphor-icons-upstream.json"
+  ],
+  "exclusion_reason": "The runtime consumes the curated typography.csv and icons.csv datasets; raw upstream snapshots would only increase the embedded binary size."
+}
