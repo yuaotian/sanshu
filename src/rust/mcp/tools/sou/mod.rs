@@ -940,8 +940,25 @@ fn parse_sou_sections(text: &str, default_backend: &str) -> Vec<SouSection> {
     let mut backend = default_backend.to_string();
     let mut current_location: Option<String> = None;
     let mut current_lines = Vec::new();
+    let mut current_ace_markdown = false;
+    let mut in_fenced_code = false;
+    let lines = text.lines().collect::<Vec<_>>();
 
-    for line in text.lines() {
+    for (index, line) in lines.iter().enumerate() {
+        if in_fenced_code {
+            if is_markdown_fence(line) {
+                in_fenced_code = false;
+            } else if current_location.is_some() {
+                current_lines.push(line.trim_end().to_string());
+            }
+            continue;
+        }
+
+        if current_location.is_some() && is_markdown_fence(line) {
+            in_fenced_code = true;
+            continue;
+        }
+
         if let Some(value) = line.strip_prefix("### sou backend: ") {
             flush_sou_section(
                 &mut sections,
@@ -950,6 +967,7 @@ fn parse_sou_sections(text: &str, default_backend: &str) -> Vec<SouSection> {
                 &mut current_lines,
             );
             backend = value.trim().to_string();
+            current_ace_markdown = false;
             continue;
         }
         if let Some(path) = line.strip_prefix("Path: ") {
@@ -960,12 +978,33 @@ fn parse_sou_sections(text: &str, default_backend: &str) -> Vec<SouSection> {
                 &mut current_lines,
             );
             current_location = Some(normalize_sou_location(path));
+            current_ace_markdown = false;
             continue;
         }
-        if let Some(range) = line.strip_prefix("Lines: L") {
-            if let Some(location) = current_location.as_mut() {
-                *location = format!("{}:{}", location, range.trim().replace("-L", "-"));
+
+        // ACE 当前响应使用“## 文件路径 + Lines: x-y + fenced code”格式。
+        if backend == BACKEND_ACE {
+            if let Some(path) = ace_markdown_path(line, &lines[index + 1..]) {
+                flush_sou_section(
+                    &mut sections,
+                    &backend,
+                    &mut current_location,
+                    &mut current_lines,
+                );
+                current_location = Some(normalize_sou_location(path));
+                current_ace_markdown = true;
+                continue;
             }
+        }
+
+        if let Some(range) = normalize_sou_line_range(line) {
+            if let Some(location) = current_location.as_mut() {
+                *location = format!("{}:{}", location, range);
+            }
+            continue;
+        }
+        if current_ace_markdown && (line.starts_with("Score: ") || line.starts_with("Confidence: "))
+        {
             continue;
         }
         if line.starts_with("The following code sections were retrieved:") {
@@ -993,6 +1032,38 @@ fn parse_sou_sections(text: &str, default_backend: &str) -> Vec<SouSection> {
         &mut current_lines,
     );
     sections
+}
+
+fn is_markdown_fence(line: &str) -> bool {
+    line.trim_start().starts_with("```")
+}
+
+fn ace_markdown_path<'a>(line: &'a str, following_lines: &[&str]) -> Option<&'a str> {
+    let path = line.strip_prefix("## ")?.trim();
+    if path.is_empty()
+        || !following_lines
+            .iter()
+            .take(5)
+            .any(|candidate| normalize_sou_line_range(candidate).is_some())
+    {
+        return None;
+    }
+    Some(path)
+}
+
+fn normalize_sou_line_range(line: &str) -> Option<String> {
+    let raw = line.strip_prefix("Lines: ")?.trim();
+    let normalized = raw.strip_prefix('L').unwrap_or(raw).replace("-L", "-");
+    let (start, end) = normalized
+        .split_once('-')
+        .map(|(start, end)| (start, Some(end)))
+        .unwrap_or((normalized.as_str(), None));
+    let start_number = start.parse::<usize>().ok()?;
+    let end_number = end.map(str::parse::<usize>).transpose().ok()??;
+    if start_number == 0 || end_number < start_number {
+        return None;
+    }
+    Some(format!("{}-{}", start_number, end_number))
 }
 
 fn normalize_sou_location(path: &str) -> String {
@@ -1247,6 +1318,44 @@ mod tests {
         assert_eq!(sections[0].backend, "ace");
         assert_eq!(sections[0].location, "E:/demo/panel.vue:8-16");
         assert_eq!(sections[0].excerpt, "const state = ref(false)");
+    }
+
+    #[test]
+    fn ace_sou_parses_current_markdown_response() {
+        let text = r#"## src/rust/mcp/tools/acemcp/mcp.rs
+Score: 0.604
+Confidence: high
+Lines: 27-79
+
+```text
+fn create_acemcp_client() {}
+Path: this line belongs to the code excerpt
+```
+
+## Cargo.toml
+Score: 0.418
+Confidence: medium
+Lines: 49-54
+
+```toml
+reqwest = { version = "0.11", features = ["socks"] }
+```
+"#;
+
+        let sections = parse_sou_sections(text, "ace");
+
+        assert_eq!(sections.len(), 2);
+        assert_eq!(
+            sections[0].location,
+            "src/rust/mcp/tools/acemcp/mcp.rs:27-79"
+        );
+        assert!(sections[0]
+            .excerpt
+            .contains("Path: this line belongs to the code excerpt"));
+        assert!(!sections[0].excerpt.contains("Score:"));
+        assert!(!sections[0].excerpt.contains("```"));
+        assert_eq!(sections[1].location, "Cargo.toml:49-54");
+        assert!(sections[1].excerpt.contains("reqwest ="));
     }
 
     #[test]

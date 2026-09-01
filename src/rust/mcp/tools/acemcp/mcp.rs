@@ -1319,6 +1319,31 @@ fn normalize_project_path(path: &str) -> String {
     p.replace('\\', "/")
 }
 
+/// 仅重试传输层瞬态错误，避免对认证、参数等确定性失败重复发起请求。
+fn is_retryable_request_error(error: &anyhow::Error) -> bool {
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .map(|request_error| request_error.is_connect() || request_error.is_timeout())
+            .unwrap_or(false)
+    }) {
+        return true;
+    }
+
+    let message = format!("{error:#}").to_ascii_lowercase();
+    [
+        "timeout",
+        "timed out",
+        "connection",
+        "error trying to connect",
+        "network",
+        "temporary",
+        "unexpected eof during handshake",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
+}
+
 async fn retry_request<F, Fut, T>(
     mut f: F,
     max_retries: usize,
@@ -1343,12 +1368,7 @@ where
                 last_error_str = Some(e.to_string());
                 attempt += 1;
 
-                // 检查是否为可重试的错误
-                let error_str = e.to_string();
-                let is_retryable = error_str.contains("timeout")
-                    || error_str.contains("connection")
-                    || error_str.contains("network")
-                    || error_str.contains("temporary");
+                let is_retryable = is_retryable_request_error(&e);
 
                 if attempt >= max_retries || !is_retryable {
                     log_debug!("请求失败，不再重试: {}", e);
@@ -1372,6 +1392,27 @@ where
     Err(last_error_str
         .and_then(|s| anyhow::anyhow!(s).into())
         .unwrap_or_else(|| anyhow::anyhow!("未知错误")))
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::is_retryable_request_error;
+
+    #[test]
+    fn ace_sou_retries_tls_handshake_eof() {
+        let error = anyhow::anyhow!(
+            "error sending request for url (https://TARGET): error trying to connect: unexpected EOF during handshake"
+        );
+
+        assert!(is_retryable_request_error(&error));
+    }
+
+    #[test]
+    fn ace_sou_keeps_deterministic_http_error_terminal() {
+        let error = anyhow::anyhow!("HTTP 401 Unauthorized");
+
+        assert!(!is_retryable_request_error(&error));
+    }
 }
 
 pub(crate) fn home_projects_file() -> PathBuf {
