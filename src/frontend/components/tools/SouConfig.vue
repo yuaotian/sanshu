@@ -408,7 +408,7 @@ const backendNameMap: Record<string, string> = {
 const semanticModeOptions = [
   { label: '关闭', value: 'off' },
   { label: '均衡', value: 'balanced' },
-  { label: '准确', value: 'accurate' },
+  { label: '准确（实验）', value: 'accurate' },
 ]
 
 const selectedExtensionSet = computed(() => new Set(config.value.text_extensions || []))
@@ -461,7 +461,7 @@ const semanticModeDescription = computed(() => {
     case 'balanced':
       return '均衡：FTS5 与 BGE-small-zh-v1.5 通过加权 RRF 融合，适合日常代码检索。'
     case 'accurate':
-      return '准确：词法 Top10 与语义 Top50 去重后交给 BGE-reranker-base 重排，并保护精确词法 Top1。'
+      return '准确（实验）：Top50 语义与 Top10 词法召回后，按文件筛选 Top32 进行紧凑重排；正式查询采用 3 秒预算，超时返回均衡结果。'
     default:
       return '关闭：仅使用 FTS5 热索引；索引待同步时使用即时文本检索。'
   }
@@ -1734,7 +1734,7 @@ defineExpose({ saveConfig })
                     <span>文件 {{ rerankerModelStatus?.completed_files || 0 }} / {{ rerankerModelStatus?.total_files || 0 }}</span>
                     <span>{{ rerankerModelStatus?.runtime_threads || 8 }} 线程</span>
                     <span>批量 {{ rerankerModelStatus?.batch_size || 8 }}</span>
-                    <span>候选 Top50 + Top10</span>
+                    <span>召回 Top50 + Top10 · 重排 Top32</span>
                   </div>
                   <div v-if="rerankerModelStatus?.route" class="form-feedback">
                     下载路由：{{ rerankerModelStatus.route }}

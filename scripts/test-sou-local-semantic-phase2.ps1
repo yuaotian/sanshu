@@ -11,6 +11,8 @@ param(
     [int]$SyntheticMaxP95Ms = 120,
     [ValidateRange(500, 10000)]
     [int]$AccurateMaxP95Ms = 3000,
+    [ValidateRange(3000, 30000)]
+    [int]$AccurateObservationMs = 10000,
     [ValidateRange(512, 16384)]
     [int]$MaxPeakMiB = 4096,
     [ValidateRange(128, 4096)]
@@ -182,6 +184,8 @@ try {
     $env:SANSHU_SOU_20K_MAX_P95_MS = [string]$SyntheticMaxP95Ms
     $env:SANSHU_SOU_GATE_INDEX_DIR = Join-Path $runRoot 'indexes'
     $env:SANSHU_SOU_GATE_RERANKER_DIR = $rerankerRoot
+    # 仅测试二进制读取该覆盖值；门禁通过条件仍由 AccurateMaxP95Ms 控制。
+    $env:SANSHU_SOU_GATE_ACCURATE_OBSERVATION_MS = [string]$AccurateObservationMs
     $env:SANSHU_SOU_GATE_RELEASE_MARKER = $releaseMarkerPath
     $env:SANSHU_SOU_GATE_RELEASE_WAIT_SECONDS = [string]$ReleaseWaitSeconds
     if ($ModelDir) {
@@ -261,6 +265,8 @@ try {
         peak_working_set_bytes = $peakWorkingSetBytes
         peak_working_set_mib = [Math]::Round($peakWorkingSetBytes / 1MB, 2)
         max_peak_mib = $MaxPeakMiB
+        accurate_observation_ms = $AccurateObservationMs
+        accurate_max_p95_ms = $AccurateMaxP95Ms
         peak_memory_passed = $peakMemoryPassed
         release_wait_seconds = $ReleaseWaitSeconds
         release_sample_count = $releaseSampleCount

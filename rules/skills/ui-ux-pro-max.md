@@ -1,7 +1,8 @@
 # UI/UX Pro Max 规则
 
 来源：
-- src/rust/assets/resources/ui-ux-pro-max-skill.md
+- src/rust/assets/resources/ui-ux-pro-max-v2.15.0
+- src/rust/mcp/tools/uiux/structured_search.rs
 
 规则类别（按优先级）：
 1. 可访问性（CRITICAL）
@@ -23,11 +24,11 @@
 - 风格选择：风格需匹配产品类型；全站一致；避免用 emoji 作为图标。
 - 图表与数据：图表类型匹配数据形态；提供可访问色板与表格替代。
 
-备注：当前主知识源已收敛为 `src/rust/assets/resources/ui-ux-pro-max-skill.md`，由新 `uiux` 单工具统一编排 sou 检索与本地 markdown 降级。
+备注：当前正式知识基线为 `v2.15.0`。`uiux` 直接检索结构化 CSV，并按需物化同源 Markdown；旧单文件资源路径已移除。
 
 ## 触发与使用（MCP 版）
 
 - 当用户请求涉及 **前端页面 / UI 设计 / 视觉美化 / 组件布局 / 设计系统** 等场景时，直接使用单一工具 `uiux`。
-- `uiux` 优先通过 `sou` 检索项目内的真实页面/组件上下文，以及 `src/rust/assets/resources/ui-ux-pro-max-skill.md` 中的 UI/UX 描述知识；如果 `sou` 不可用，则自动降级到本地 markdown 检索。
+- `uiux` 使用 `sou` 检索项目内的真实页面/组件上下文；知识侧 `auto` 使用本地 v2.15.0 结构化 BM25 + BGE 混合检索，`local` 保留 BM25 基线，`fast_context` 仅作为显式对比入口。
 - 推荐显式传入 `action=beautify|describe|audit|design_system`，默认 `beautify`。
 - 保持用户控制：未经 `zhi` 明确确认，不自动执行 UI/UX 相关工具调用。

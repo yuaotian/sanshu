@@ -525,13 +525,31 @@ fn load_model(directory: &Path) -> Result<TextRerank, String> {
             tokenizer_config_file: read_file(&directory.join("tokenizer_config.json"))?,
         },
     );
-    TextRerank::try_new_from_user_defined(
+    let mut model = TextRerank::try_new_from_user_defined(
         model,
         RerankInitOptionsUserDefined::new()
             .with_max_length(MAX_LENGTH)
             .with_intra_threads(INTRA_THREADS),
     )
-    .map_err(|error| format!("创建 BGE reranker ONNX 会话失败: {}", error))
+    .map_err(|error| format!("创建 BGE reranker ONNX 会话失败: {}", error))?;
+
+    // 中文说明：固定 batch 预热一次 ONNX 图，避免首条真实查询承担算子初始化长尾。
+    let warmup_documents = (0..BATCH_SIZE)
+        .map(|index| format!("准确模式预热文档 {index}：代码上下文与业务流程"))
+        .collect::<Vec<_>>();
+    let warmup_refs = warmup_documents
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    model
+        .rerank(
+            "准确模式预热查询：定位相关代码实现",
+            &warmup_refs,
+            false,
+            Some(BATCH_SIZE),
+        )
+        .map_err(|error| format!("准确模式模型预热推理失败: {}", error))?;
+    Ok(model)
 }
 
 async fn download_assets(

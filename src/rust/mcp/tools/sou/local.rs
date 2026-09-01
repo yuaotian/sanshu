@@ -34,8 +34,12 @@ const MAX_QUERY_TERMS: usize = 24;
 const ACCURATE_LEXICAL_LIMIT: usize = 10;
 const ACCURATE_SEMANTIC_LIMIT: usize = 50;
 const ACCURATE_CANDIDATE_LIMIT: usize = 60;
+const ACCURATE_RERANK_LIMIT: usize = 32;
 const ACCURATE_QUERY_BUDGET: Duration = Duration::from_secs(3);
-const ACCURATE_FUSION_NAME: &str = "bge_reranker_base_top50_top10";
+const ACCURATE_FUSION_NAME: &str = "bge_reranker_base_top50_top10_file32_rrf";
+const RERANKER_CONTEXT_CHARS: usize = 768;
+const RERANKER_RRF_WEIGHT: f64 = 0.70;
+const RETRIEVAL_RRF_WEIGHT: f64 = 0.30;
 
 static PROJECT_INDEXES: Lazy<Mutex<HashMap<PathBuf, Arc<ProjectIndex>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -114,7 +118,22 @@ pub(super) struct LocalSearchOutput {
     pub reranker_model: Option<String>,
     pub reranker_duration_ms: Option<u64>,
     pub reranker_top_score: Option<f32>,
+    #[cfg(test)]
+    pub reranker_input_diagnostics: Option<RerankerInputDiagnostics>,
     pub fusion: Option<String>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct RerankerInputDiagnostics {
+    pub candidate_count: usize,
+    pub batch_count: usize,
+    pub truncated_candidate_count: usize,
+    pub total_chars: usize,
+    pub min_chars: usize,
+    pub p50_chars: usize,
+    pub p95_chars: usize,
+    pub max_chars: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -394,10 +413,12 @@ async fn search_with_index(
         .then(|| reranker::MODEL_NAME.to_string());
     let mut reranker_duration_ms = None;
     let mut reranker_top_score = None;
+    #[cfg(test)]
+    let mut reranker_input_diagnostics = None;
     let mut fusion = None;
     if options.semantic.enabled() && engine == "fts5" {
         let semantic_deadline = if semantic_mode.accurate() {
-            started_at + ACCURATE_QUERY_BUDGET
+            started_at + accurate_query_budget()
         } else {
             Instant::now() + Duration::from_secs(2)
         };
@@ -447,25 +468,25 @@ async fn search_with_index(
                 match semantic_result {
                     Ok(semantic_hits) => {
                         semantic_top_score = semantic_hits.first().map(|hit| hit.score);
-                        let balanced_hits = fuse_hits(
-                            hits.clone(),
-                            semantic_hits.clone(),
-                            &options.query,
-                            &terms,
-                            options.max_results,
-                        );
                         engine = "fts5+bge".to_string();
                         fusion = Some(semantic::FUSION_NAME.to_string());
                         if semantic_mode.accurate() {
                             let protected_exact =
                                 hits.first().filter(|hit| hit.exact_match).cloned();
-                            let candidates = merge_accurate_candidates(
+                            let retrieval_candidates = fuse_hits(
                                 hits,
                                 semantic_hits,
                                 &options.query,
                                 &terms,
+                                ACCURATE_CANDIDATE_LIMIT,
                             );
-                            hits = balanced_hits;
+                            hits = retrieval_candidates
+                                .iter()
+                                .take(options.max_results.max(1))
+                                .cloned()
+                                .collect();
+                            let candidates =
+                                select_accurate_rerank_candidates(retrieval_candidates);
                             if !reranker::assets_have_expected_sizes(
                                 &options.semantic.reranker_model_dir,
                             ) {
@@ -495,12 +516,16 @@ async fn search_with_index(
                                             let documents = candidates
                                                 .iter()
                                                 .map(|hit| {
-                                                    format!(
-                                                        "{}\n{}",
-                                                        hit.relative_path, hit.excerpt
-                                                    )
+                                                    let excerpt =
+                                                        bounded_reranker_context(&hit.excerpt);
+                                                    format!("{}\n{}", hit.relative_path, excerpt)
                                                 })
                                                 .collect::<Vec<_>>();
+                                            #[cfg(test)]
+                                            {
+                                                reranker_input_diagnostics =
+                                                    Some(summarize_reranker_inputs(&documents));
+                                            }
                                             let rerank_started = Instant::now();
                                             match reranker::rerank(
                                                 &options.semantic.reranker_model_dir,
@@ -558,7 +583,13 @@ async fn search_with_index(
                                 }
                             }
                         } else {
-                            hits = balanced_hits;
+                            hits = fuse_hits(
+                                hits,
+                                semantic_hits,
+                                &options.query,
+                                &terms,
+                                options.max_results,
+                            );
                         }
                     }
                     Err(error) => {
@@ -636,6 +667,8 @@ async fn search_with_index(
         reranker_model,
         reranker_duration_ms,
         reranker_top_score,
+        #[cfg(test)]
+        reranker_input_diagnostics,
         fusion,
     })
 }
@@ -1354,89 +1387,109 @@ fn fuse_hits(
     hits
 }
 
-fn merge_accurate_candidates(
-    lexical_hits: Vec<SearchHit>,
-    semantic_hits: Vec<semantic::SemanticHit>,
-    query: &str,
-    terms: &[String],
-) -> Vec<SearchHit> {
-    let mut candidates = Vec::with_capacity(ACCURATE_CANDIDATE_LIMIT);
-    let mut positions = HashMap::<(String, usize, usize), usize>::new();
-    for hit in lexical_hits.into_iter().take(ACCURATE_LEXICAL_LIMIT) {
-        let key = (hit.relative_path.clone(), hit.start_line, hit.end_line);
-        positions.insert(key, candidates.len());
-        candidates.push(hit);
+fn select_accurate_rerank_candidates(retrieval_candidates: Vec<SearchHit>) -> Vec<SearchHit> {
+    let mut seen_paths = HashSet::new();
+    retrieval_candidates
+        .into_iter()
+        .filter(|hit| seen_paths.insert(hit.relative_path.replace('\\', "/")))
+        .take(ACCURATE_RERANK_LIMIT)
+        .collect()
+}
+
+fn bounded_reranker_context(excerpt: &str) -> String {
+    let chars = excerpt.chars().collect::<Vec<_>>();
+    if chars.len() <= RERANKER_CONTEXT_CHARS {
+        return excerpt.to_string();
     }
-    for semantic_hit in semantic_hits.into_iter().take(ACCURATE_SEMANTIC_LIMIT) {
-        let key = (
-            semantic_hit.relative_path.clone(),
-            semantic_hit.start_line,
-            semantic_hit.end_line,
-        );
-        if let Some(position) = positions.get(&key).copied() {
-            candidates[position].semantic_score = Some(semantic_hit.score);
-            continue;
-        }
-        if candidates.len() == ACCURATE_CANDIDATE_LIMIT {
-            break;
-        }
-        let mut hit = score_hit(
-            semantic_hit.relative_path,
-            semantic_hit.start_line,
-            semantic_hit.end_line,
-            semantic_hit.excerpt,
-            0.0,
-            query,
-            terms,
-        );
-        hit.semantic_score = Some(semantic_hit.score);
-        positions.insert(key, candidates.len());
-        candidates.push(hit);
+
+    // 中文说明：超长 JSON/SQL 只保留头尾，避免单个 chunk 让 tokenizer 扫描数十万字符。
+    let head_len = RERANKER_CONTEXT_CHARS * 2 / 3;
+    let tail_len = RERANKER_CONTEXT_CHARS - head_len;
+    let head = chars[..head_len].iter().collect::<String>();
+    let tail = chars[chars.len() - tail_len..].iter().collect::<String>();
+    format!("{}\n[context-truncated]\n{}", head, tail)
+}
+
+#[cfg(test)]
+fn summarize_reranker_inputs(documents: &[String]) -> RerankerInputDiagnostics {
+    let mut char_counts = documents
+        .iter()
+        .map(|document| document.chars().count())
+        .collect::<Vec<_>>();
+    char_counts.sort_unstable();
+    let percentile = |percent: usize| {
+        char_counts
+            .get(char_counts.len().saturating_sub(1) * percent / 100)
+            .copied()
+            .unwrap_or_default()
+    };
+
+    RerankerInputDiagnostics {
+        candidate_count: documents.len(),
+        batch_count: documents.len().div_ceil(reranker::BATCH_SIZE),
+        truncated_candidate_count: documents
+            .iter()
+            .filter(|document| document.contains("[context-truncated]"))
+            .count(),
+        total_chars: char_counts.iter().sum(),
+        min_chars: char_counts.first().copied().unwrap_or_default(),
+        p50_chars: percentile(50),
+        p95_chars: percentile(95),
+        max_chars: char_counts.last().copied().unwrap_or_default(),
     }
-    candidates
+}
+
+fn accurate_query_budget() -> Duration {
+    #[cfg(test)]
+    if let Ok(value) = std::env::var("SANSHU_SOU_GATE_ACCURATE_OBSERVATION_MS") {
+        if let Ok(milliseconds) = value.parse::<u64>() {
+            // 中文说明：测试门禁可延长观测窗口，但正式查询始终使用固定 3 秒预算。
+            if (3_000..=30_000).contains(&milliseconds) {
+                return Duration::from_millis(milliseconds);
+            }
+        }
+    }
+    ACCURATE_QUERY_BUDGET
 }
 
 fn apply_reranker_ranking(
-    candidates: Vec<SearchHit>,
+    mut candidates: Vec<SearchHit>,
     ranking: Vec<reranker::RerankMatch>,
     protected_exact: Option<SearchHit>,
     max_results: usize,
 ) -> Vec<SearchHit> {
-    let mut seen = HashSet::new();
-    let mut ranked = Vec::with_capacity(candidates.len());
-    for item in ranking {
-        if !seen.insert(item.index) {
-            continue;
-        }
-        if let Some(candidate) = candidates.get(item.index) {
-            let mut hit = candidate.clone();
-            hit.fusion_score = item.score as f64;
-            ranked.push(hit);
-        }
-    }
-    for (index, candidate) in candidates.into_iter().enumerate() {
-        if seen.insert(index) {
-            ranked.push(candidate);
+    const RRF_K: f64 = 60.0;
+    let mut reranker_ranks = HashMap::new();
+    for (rank, item) in ranking.into_iter().enumerate() {
+        if item.index < candidates.len() {
+            reranker_ranks.entry(item.index).or_insert(rank);
         }
     }
 
-    if let Some(protected) = protected_exact {
-        let protected_key = (
-            protected.relative_path.as_str(),
-            protected.start_line,
-            protected.end_line,
-        );
-        let protected = ranked
-            .iter()
-            .position(|hit| {
-                (hit.relative_path.as_str(), hit.start_line, hit.end_line) == protected_key
-            })
-            .map(|position| ranked.remove(position))
-            .unwrap_or(protected);
-        ranked.insert(0, protected);
+    for (retrieval_rank, candidate) in candidates.iter_mut().enumerate() {
+        let retrieval_score = RETRIEVAL_RRF_WEIGHT / (RRF_K + retrieval_rank as f64 + 1.0);
+        let reranker_score = reranker_ranks
+            .get(&retrieval_rank)
+            .map(|rank| RERANKER_RRF_WEIGHT / (RRF_K + *rank as f64 + 1.0))
+            .unwrap_or_default();
+        candidate.fusion_score = retrieval_score + reranker_score;
     }
-    ranked.truncate(max_results.max(1));
-    ranked
+    candidates.sort_by(|left, right| {
+        right
+            .fusion_score
+            .total_cmp(&left.fusion_score)
+            .then_with(|| right.exact_match.cmp(&left.exact_match))
+            .then_with(|| left.relative_path.cmp(&right.relative_path))
+            .then_with(|| left.start_line.cmp(&right.start_line))
+    });
+
+    if let Some(protected) = protected_exact {
+        let protected_path = protected.relative_path.replace('\\', "/");
+        candidates.retain(|hit| hit.relative_path.replace('\\', "/") != protected_path);
+        candidates.insert(0, protected);
+    }
+    candidates.truncate(max_results.max(1));
+    candidates
 }
 
 fn append_fallback(target: &mut Option<String>, reason: &str) {
@@ -2157,45 +2210,35 @@ mod tests {
     }
 
     #[test]
-    fn accurate_candidates_merge_top_ten_and_top_fifty_with_deduplication() {
-        let lexical = (0..ACCURATE_LEXICAL_LIMIT)
+    fn accurate_candidates_keep_top_thirty_two_distinct_files() {
+        let retrieval_candidates = (0..40)
             .map(|index| {
+                let path = if index < 8 {
+                    "src/repeated.rs".to_string()
+                } else {
+                    format!("src/file_{index}.rs")
+                };
                 score_hit(
-                    format!("src/lexical_{index}.rs"),
-                    1,
-                    10,
-                    format!("fn lexical_{index}() {{}}"),
+                    path,
+                    index + 1,
+                    index + 10,
+                    format!("fn candidate_{index}() {{}}"),
                     index as f64,
                     "intent",
                     &[],
                 )
             })
             .collect::<Vec<_>>();
-        let mut semantic = vec![semantic::SemanticHit {
-            relative_path: "src/lexical_0.rs".to_string(),
-            start_line: 1,
-            end_line: 10,
-            excerpt: "fn lexical_0() {}".to_string(),
-            score: 0.99,
-        }];
-        semantic.extend(
-            (0..ACCURATE_SEMANTIC_LIMIT).map(|index| semantic::SemanticHit {
-                relative_path: format!("src/semantic_{index}.rs"),
-                start_line: 1,
-                end_line: 10,
-                excerpt: format!("fn semantic_{index}() {{}}"),
-                score: 0.9 - index as f32 * 0.001,
-            }),
-        );
 
-        let candidates = merge_accurate_candidates(lexical, semantic, "intent", &[]);
-        assert_eq!(candidates.len(), ACCURATE_CANDIDATE_LIMIT - 1);
+        let candidates = select_accurate_rerank_candidates(retrieval_candidates);
+        assert_eq!(candidates.len(), ACCURATE_RERANK_LIMIT);
         let unique = candidates
             .iter()
-            .map(|hit| (&hit.relative_path, hit.start_line, hit.end_line))
+            .map(|hit| &hit.relative_path)
             .collect::<HashSet<_>>();
         assert_eq!(unique.len(), candidates.len());
-        assert_eq!(candidates[0].semantic_score, Some(0.99));
+        assert_eq!(candidates[0].relative_path, "src/repeated.rs");
+        assert_eq!(candidates[1].relative_path, "src/file_8.rs");
     }
 
     #[test]
@@ -2219,12 +2262,25 @@ mod tests {
             "ExactHandler",
             &[],
         );
+        let duplicate_path = score_hit(
+            "src/exact.rs".to_string(),
+            20,
+            30,
+            "fn secondary_exact_chunk() {}".to_string(),
+            0.0,
+            "ExactHandler",
+            &[],
+        );
         let ranked = apply_reranker_ranking(
-            vec![exact.clone(), other],
+            vec![exact.clone(), duplicate_path, other],
             vec![
                 reranker::RerankMatch {
-                    index: 1,
+                    index: 2,
                     score: 0.9,
+                },
+                reranker::RerankMatch {
+                    index: 1,
+                    score: 0.5,
                 },
                 reranker::RerankMatch {
                     index: 0,
@@ -2232,10 +2288,52 @@ mod tests {
                 },
             ],
             Some(exact),
-            2,
+            3,
         );
         assert_eq!(ranked[0].relative_path, "src/exact.rs");
         assert_eq!(ranked[1].relative_path, "src/semantic.rs");
+        assert_eq!(ranked.len(), 2);
+    }
+
+    #[test]
+    fn reranker_context_keeps_head_and_tail_with_a_bounded_length() {
+        let source = format!(
+            "HEAD{}MIDDLE{}TAIL",
+            "x".repeat(RERANKER_CONTEXT_CHARS),
+            "y".repeat(RERANKER_CONTEXT_CHARS)
+        );
+        let bounded = bounded_reranker_context(&source);
+        assert!(!bounded.is_empty());
+        assert!(bounded.contains("HEAD"));
+        assert!(bounded.contains("TAIL"));
+        assert!(bounded.contains("[context-truncated]"));
+        assert!(bounded.chars().count() <= RERANKER_CONTEXT_CHARS + 32);
+    }
+
+    #[test]
+    fn reranker_input_diagnostics_reports_candidate_and_length_distribution() {
+        let documents = vec![
+            "a".repeat(10),
+            "b".repeat(20),
+            "c".repeat(30),
+            format!("{}[context-truncated]{}", "d".repeat(10), "e".repeat(30)),
+        ];
+        let diagnostics = summarize_reranker_inputs(&documents);
+
+        assert_eq!(diagnostics.candidate_count, 4);
+        assert_eq!(diagnostics.batch_count, 1);
+        assert_eq!(diagnostics.truncated_candidate_count, 1);
+        assert_eq!(diagnostics.min_chars, 10);
+        assert_eq!(diagnostics.p50_chars, 20);
+        assert_eq!(diagnostics.p95_chars, 30);
+        assert_eq!(diagnostics.max_chars, documents[3].chars().count());
+        assert_eq!(
+            diagnostics.total_chars,
+            documents
+                .iter()
+                .map(|value| value.chars().count())
+                .sum::<usize>()
+        );
     }
 
     #[test]
@@ -2609,7 +2707,33 @@ mod tests {
             )
             .await
             .expect("真实项目 accurate 预热查询应成功");
-            assert_eq!(warmup.engine, "fts5+bge+reranker");
+            // 中文说明：门禁失败时保留完整阶段状态，便于区分预算耗尽与运行时未就绪。
+            println!(
+                "SOU_PHASE2_ACCURATE_WARMUP={}",
+                serde_json::json!({
+                    "project": project.name,
+                    "engine": warmup.engine,
+                    "semantic_mode": warmup.semantic_mode,
+                    "semantic_state": warmup.semantic_state,
+                    "reranker_state": warmup.reranker_state,
+                    "reranker_duration_ms": warmup.reranker_duration_ms,
+                    "reranker_input": warmup.reranker_input_diagnostics.as_ref(),
+                    "fallback_reason": warmup.fallback_reason,
+                    "duration_ms": warmup.duration_ms,
+                    "fusion": warmup.fusion,
+                })
+            );
+            assert_eq!(
+                warmup.engine,
+                "fts5+bge+reranker",
+                "accurate 预热状态: mode={}, semantic_state={}, reranker_state={:?}, fallback_reason={:?}, duration_ms={}, fusion={:?}",
+                warmup.semantic_mode,
+                warmup.semantic_state,
+                warmup.reranker_state,
+                warmup.fallback_reason,
+                warmup.duration_ms,
+                warmup.fusion
+            );
             assert_eq!(warmup.reranker_state.as_deref(), Some("ready"));
 
             let mut accurate_hits = 0usize;
@@ -2670,6 +2794,7 @@ mod tests {
                     "semantic_top_score": accurate.semantic_top_score,
                     "reranker_duration_ms": accurate.reranker_duration_ms,
                     "reranker_top_score": accurate.reranker_top_score,
+                    "reranker_input": accurate.reranker_input_diagnostics.as_ref(),
                     "top_paths": accurate_relative_paths,
                 }));
             }
