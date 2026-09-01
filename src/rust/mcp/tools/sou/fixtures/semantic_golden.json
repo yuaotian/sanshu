@@ -1,0 +1,301 @@
+{
+  "documents": [
+    {
+      "path": "src/auth/session.rs",
+      "content": "pub fn refresh_expired_access_token(session: &mut Session) { session.rotate_credentials(); session.persist(); }"
+    },
+    {
+      "path": "src/cache/panel.ts",
+      "content": "export function clearPreviewCache() { previewStore.resetAll(); imageCache.evictExpiredEntries(); }"
+    },
+    {
+      "path": "src/visual/blackhole.rs",
+      "content": "fn render_accretion_disk(canvas: &Canvas) { canvas.drawOrbitingParticles(); canvas.collapseIntoSingularity(); }"
+    },
+    {
+      "path": "src/database/migration.rs",
+      "content": "fn migrate_schema(connection: &Connection) { connection.beginTransaction(); connection.applyPendingMigrations(); connection.commit(); }"
+    },
+    {
+      "path": "src/config/storage.rs",
+      "content": "pub fn save_user_preferences(config: &AppConfig) { validateSettings(config); atomicWriteJson(config); }"
+    },
+    {
+      "path": "src/network/retry.rs",
+      "content": "async fn retry_with_exponential_backoff(request: Request) { respectRetryAfterHeader(); addJitterDelay(); sendAgain(request).await; }"
+    },
+    {
+      "path": "src/ui/theme.vue",
+      "content": "function switchColorTheme(mode: ThemeMode) { document.documentElement.dataset.theme = mode; persistThemeChoice(mode); }"
+    },
+    {
+      "path": "src/search/indexer.rs",
+      "content": "fn rebuild_incremental_search_index(changedPaths: &[PathBuf]) { deleteStaleChunks(); tokenizeChangedFiles(changedPaths); commitIndexGeneration(); }"
+    },
+    {
+      "path": "src/audio/player.cpp",
+      "content": "void AudioPlayer::restoreSystemVolumeAfterPlayback() { mixer_.setVolume(previousVolume_); releaseOutputDevice(); }"
+    },
+    {
+      "path": "src/telemetry/logger.rs",
+      "content": "fn redact_sensitive_fields(event: &mut LogEvent) { event.removeTokens(); event.hashUserIdentifier(); emitStructuredLog(event); }"
+    },
+    {
+      "path": "src/filesystem/watcher.rs",
+      "content": "fn debounce_file_change_events(events: Vec<FileEvent>) { coalesceDuplicatePaths(events); scheduleSingleRefresh(); }"
+    },
+    {
+      "path": "src/jobs/scheduler.rs",
+      "content": "fn resume_missed_scheduled_jobs(clock: &Clock) { loadPendingJobs(); skipExpiredOneShotTasks(clock); enqueueRecurringJobs(); }"
+    }
+  ],
+  "queries": [
+    {
+      "id": "auth-zh-1",
+      "kind": "zh_intent",
+      "query": "会话令牌过期后刷新认证凭据并保存",
+      "relevant_path": "src/auth/session.rs"
+    },
+    {
+      "id": "auth-zh-2",
+      "kind": "zh_intent",
+      "query": "用户登录态失效时轮换访问凭证",
+      "relevant_path": "src/auth/session.rs"
+    },
+    {
+      "id": "auth-alias",
+      "kind": "alias",
+      "query": "续签登录身份和持久化 session",
+      "relevant_path": "src/auth/session.rs"
+    },
+    {
+      "id": "auth-symbol",
+      "kind": "exact_identifier",
+      "query": "refresh_expired_access_token",
+      "relevant_path": "src/auth/session.rs"
+    },
+    {
+      "id": "cache-zh-1",
+      "kind": "zh_intent",
+      "query": "清空预览缓存并淘汰过期图片",
+      "relevant_path": "src/cache/panel.ts"
+    },
+    {
+      "id": "cache-zh-2",
+      "kind": "zh_intent",
+      "query": "重置预览状态避免继续显示旧图",
+      "relevant_path": "src/cache/panel.ts"
+    },
+    {
+      "id": "cache-alias",
+      "kind": "alias",
+      "query": "invalidate stale preview assets",
+      "relevant_path": "src/cache/panel.ts"
+    },
+    {
+      "id": "visual-zh-1",
+      "kind": "zh_intent",
+      "query": "绘制黑洞吸积盘和环绕粒子",
+      "relevant_path": "src/visual/blackhole.rs"
+    },
+    {
+      "id": "visual-zh-2",
+      "kind": "zh_intent",
+      "query": "粒子旋转后坍缩进入奇点的动画",
+      "relevant_path": "src/visual/blackhole.rs"
+    },
+    {
+      "id": "visual-alias",
+      "kind": "alias",
+      "query": "event horizon collapse rendering",
+      "relevant_path": "src/visual/blackhole.rs"
+    },
+    {
+      "id": "migration-zh-1",
+      "kind": "zh_intent",
+      "query": "在事务中应用尚未执行的数据库迁移",
+      "relevant_path": "src/database/migration.rs"
+    },
+    {
+      "id": "migration-zh-2",
+      "kind": "zh_intent",
+      "query": "升级表结构并在成功后提交事务",
+      "relevant_path": "src/database/migration.rs"
+    },
+    {
+      "id": "migration-alias",
+      "kind": "alias",
+      "query": "database schema upgrade transaction",
+      "relevant_path": "src/database/migration.rs"
+    },
+    {
+      "id": "migration-symbol",
+      "kind": "exact_identifier",
+      "query": "applyPendingMigrations",
+      "relevant_path": "src/database/migration.rs"
+    },
+    {
+      "id": "config-zh-1",
+      "kind": "zh_intent",
+      "query": "校验用户设置后原子写入配置文件",
+      "relevant_path": "src/config/storage.rs"
+    },
+    {
+      "id": "config-zh-2",
+      "kind": "zh_intent",
+      "query": "持久保存偏好并避免半写入状态",
+      "relevant_path": "src/config/storage.rs"
+    },
+    {
+      "id": "config-alias",
+      "kind": "alias",
+      "query": "durable preferences serialization",
+      "relevant_path": "src/config/storage.rs"
+    },
+    {
+      "id": "network-zh-1",
+      "kind": "zh_intent",
+      "query": "请求失败后使用指数退避和随机抖动重试",
+      "relevant_path": "src/network/retry.rs"
+    },
+    {
+      "id": "network-zh-2",
+      "kind": "zh_intent",
+      "query": "遵守 Retry-After 响应头再次发送网络请求",
+      "relevant_path": "src/network/retry.rs"
+    },
+    {
+      "id": "network-alias",
+      "kind": "alias",
+      "query": "backoff policy with jitter",
+      "relevant_path": "src/network/retry.rs"
+    },
+    {
+      "id": "network-symbol",
+      "kind": "exact_identifier",
+      "query": "retry_with_exponential_backoff",
+      "relevant_path": "src/network/retry.rs"
+    },
+    {
+      "id": "theme-zh-1",
+      "kind": "zh_intent",
+      "query": "切换界面配色主题并记住用户选择",
+      "relevant_path": "src/ui/theme.vue"
+    },
+    {
+      "id": "theme-zh-2",
+      "kind": "zh_intent",
+      "query": "修改根元素主题模式并持久化",
+      "relevant_path": "src/ui/theme.vue"
+    },
+    {
+      "id": "theme-alias",
+      "kind": "alias",
+      "query": "remember dark mode preference",
+      "relevant_path": "src/ui/theme.vue"
+    },
+    {
+      "id": "index-zh-1",
+      "kind": "zh_intent",
+      "query": "只为发生变化的文件重建搜索索引",
+      "relevant_path": "src/search/indexer.rs"
+    },
+    {
+      "id": "index-zh-2",
+      "kind": "zh_intent",
+      "query": "删除陈旧切片并提交新索引代次",
+      "relevant_path": "src/search/indexer.rs"
+    },
+    {
+      "id": "index-alias",
+      "kind": "alias",
+      "query": "incremental corpus refresh for changed paths",
+      "relevant_path": "src/search/indexer.rs"
+    },
+    {
+      "id": "index-symbol",
+      "kind": "exact_identifier",
+      "query": "rebuild_incremental_search_index",
+      "relevant_path": "src/search/indexer.rs"
+    },
+    {
+      "id": "audio-zh-1",
+      "kind": "zh_intent",
+      "query": "播放结束后恢复系统原来的音量",
+      "relevant_path": "src/audio/player.cpp"
+    },
+    {
+      "id": "audio-zh-2",
+      "kind": "zh_intent",
+      "query": "释放音频输出设备并还原混音器设置",
+      "relevant_path": "src/audio/player.cpp"
+    },
+    {
+      "id": "audio-alias",
+      "kind": "alias",
+      "query": "restore mixer level after sound",
+      "relevant_path": "src/audio/player.cpp"
+    },
+    {
+      "id": "log-zh-1",
+      "kind": "zh_intent",
+      "query": "写日志前移除令牌并散列用户标识",
+      "relevant_path": "src/telemetry/logger.rs"
+    },
+    {
+      "id": "log-zh-2",
+      "kind": "zh_intent",
+      "query": "结构化日志输出时脱敏敏感字段",
+      "relevant_path": "src/telemetry/logger.rs"
+    },
+    {
+      "id": "log-alias",
+      "kind": "alias",
+      "query": "sanitize confidential telemetry attributes",
+      "relevant_path": "src/telemetry/logger.rs"
+    },
+    {
+      "id": "watcher-zh-1",
+      "kind": "zh_intent",
+      "query": "合并短时间内重复出现的文件变更事件",
+      "relevant_path": "src/filesystem/watcher.rs"
+    },
+    {
+      "id": "watcher-zh-2",
+      "kind": "zh_intent",
+      "query": "文件监听抖动时只安排一次刷新",
+      "relevant_path": "src/filesystem/watcher.rs"
+    },
+    {
+      "id": "watcher-alias",
+      "kind": "alias",
+      "query": "coalesce noisy filesystem notifications",
+      "relevant_path": "src/filesystem/watcher.rs"
+    },
+    {
+      "id": "jobs-zh-1",
+      "kind": "zh_intent",
+      "query": "程序重启后恢复错过的周期调度任务",
+      "relevant_path": "src/jobs/scheduler.rs"
+    },
+    {
+      "id": "jobs-zh-2",
+      "kind": "zh_intent",
+      "query": "跳过过期的一次性任务并重新入队周期作业",
+      "relevant_path": "src/jobs/scheduler.rs"
+    },
+    {
+      "id": "jobs-alias",
+      "kind": "alias",
+      "query": "resume recurring work after downtime",
+      "relevant_path": "src/jobs/scheduler.rs"
+    }
+  ],
+  "negative_queries": [
+    "红烧肉炖煮时间和糖色比例",
+    "周末去海边露营需要准备什么",
+    "如何给室内绿植选择肥料",
+    "古典钢琴曲的和声分析",
+    "篮球比赛区域联防训练方法"
+  ]
+}

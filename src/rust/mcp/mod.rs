@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod embedding;
 pub mod handlers;
 pub mod server;
 pub mod tools;

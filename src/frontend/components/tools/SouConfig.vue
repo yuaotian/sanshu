@@ -50,6 +50,8 @@ const config = ref({
   sou_include_backend_headers: true,
   sou_include_failed_backend_errors: true,
   sou_local_enabled: true,
+  sou_local_semantic_enabled: false,
+  local_embedding_model_dir: '',
   // fast-context 配置
   fast_context_api_key: '',
   fast_context_tree_depth: 3,
@@ -99,6 +101,12 @@ interface DebugSearchResult {
   engine?: string
   index_state?: string
   fallback_reason?: string
+  semantic_state?: string
+  semantic_model?: string
+  semantic_indexed_chunks?: number
+  semantic_pending_chunks?: number
+  semantic_top_score?: number
+  fusion?: string
 }
 
 interface LocalIndexStatus {
@@ -110,6 +118,20 @@ interface LocalIndexStatus {
   sync_running: boolean
   pending_changes: boolean
   last_error?: string
+  semantic_state: 'disabled' | 'missing' | 'building' | 'syncing' | 'ready' | 'error'
+  semantic_model?: string
+  semantic_indexed_chunks: number
+  semantic_pending_chunks: number
+  semantic_last_error?: string
+}
+
+interface EmbeddingModelStatus {
+  phase: 'missing' | 'downloading' | 'verifying' | 'loading' | 'indexing' | 'ready' | 'error'
+  model_name: string
+  model_dir: string
+  progress_percent: number
+  message: string
+  error?: string
 }
 
 interface FastContextApiKeyDetectionResult {
@@ -129,6 +151,9 @@ const fastContextKeyStatusType = ref<'success' | 'warning' | 'error' | 'info'>('
 const localIndexStatus = ref<LocalIndexStatus | null>(null)
 const localIndexLoading = ref(false)
 const localIndexSyncing = ref(false)
+const effectiveEmbeddingModelDir = ref('')
+const embeddingModelStatus = ref<EmbeddingModelStatus | null>(null)
+const embeddingModelOperating = ref(false)
 
 interface ExtensionGroup {
   id: string
@@ -413,6 +438,29 @@ const localIndexTagType = computed<'default' | 'info' | 'success' | 'error'>(() 
   }
 })
 
+const semanticStateLabel = computed(() => {
+  if (!config.value.sou_local_semantic_enabled)
+    return '已关闭'
+  return {
+    disabled: '已关闭',
+    missing: '模型或索引未就绪',
+    building: '构建中',
+    syncing: '同步中',
+    ready: '混合检索可用',
+    error: '异常',
+  }[localIndexStatus.value?.semantic_state || 'missing']
+})
+
+const semanticTagType = computed<'default' | 'info' | 'success' | 'error'>(() => {
+  switch (localIndexStatus.value?.semantic_state) {
+    case 'ready': return 'success'
+    case 'building': return 'info'
+    case 'syncing': return 'info'
+    case 'error': return 'error'
+    default: return 'default'
+  }
+})
+
 const backendStrategySummary = computed(() => {
   switch (config.value.sou_default_backend) {
     case 'ace':
@@ -512,6 +560,18 @@ const debugStatusItems = computed<DebugStatusItem[]>(() => {
         : 'i-carbon-pending',
       tone: lastDebugTone,
     },
+    {
+      key: 'semantic-index',
+      label: '语义检索',
+      value: semanticStateLabel.value,
+      detail: lastResult?.semantic_top_score != null
+        ? `最高分 ${lastResult.semantic_top_score.toFixed(4)} · ${lastResult.fusion || '词法结果'}`
+        : `${localIndexStatus.value?.semantic_indexed_chunks || 0} 向量分块`,
+      icon: 'i-carbon-ai-status',
+      tone: localIndexStatus.value?.semantic_state === 'ready'
+        ? 'success'
+        : (localIndexStatus.value?.semantic_state === 'error' ? 'danger' : 'neutral'),
+    },
   ]
 })
 
@@ -573,6 +633,8 @@ async function loadAcemcpConfig() {
       sou_include_backend_headers: res.sou_include_backend_headers ?? true,
       sou_include_failed_backend_errors: res.sou_include_failed_backend_errors ?? true,
       sou_local_enabled: res.sou_local_enabled ?? true,
+      sou_local_semantic_enabled: res.sou_local_semantic_enabled ?? false,
+      local_embedding_model_dir: res.local_embedding_model_dir || '',
       // fast-context 配置
       fast_context_api_key: res.fast_context_api_key || '',
       fast_context_tree_depth: res.fast_context_tree_depth || 3,
@@ -582,6 +644,7 @@ async function loadAcemcpConfig() {
       fast_context_timeout_ms: res.fast_context_timeout_ms || 30000,
       fast_context_exclude_paths: res.fast_context_exclude_paths || ['node_modules', '.git', 'dist', 'build', 'target'],
     }
+    effectiveEmbeddingModelDir.value = res.effective_local_embedding_model_dir || ''
     if (!config.value.fast_context_api_key) {
       // 中文说明：配置页首次加载时依次尝试 Devin 与 Windsurf 登录库，失败时保留手动填写入口。
       await detectFastContextApiKey(false)
@@ -648,11 +711,11 @@ async function detectFastContextApiKey(showFeedback = true) {
   }
 }
 
-async function saveConfig() {
+async function saveConfig(): Promise<boolean> {
   try {
     if (config.value.base_url && !/^https?:\/\//i.test(config.value.base_url)) {
       message.error('URL无效，需以 http(s):// 开头；如只使用 fast-context，可留空')
-      return
+      return false
     }
 
     // 支持用户直接粘贴完整代理地址（http(s)/socks5://user:pass@host:port）
@@ -664,7 +727,7 @@ async function saveConfig() {
         const scheme = (u.protocol || '').replace(':', '')
         if (!['http', 'https', 'socks5'].includes(scheme)) {
           message.error('代理地址协议不支持，仅支持 http/https/socks5')
-          return
+          return false
         }
 
         config.value.proxy_type = scheme as 'http' | 'https' | 'socks5'
@@ -681,7 +744,7 @@ async function saveConfig() {
       }
       catch (e) {
         message.error(`代理地址格式无效: ${String(e)}`)
-        return
+        return false
       }
     }
 
@@ -712,6 +775,8 @@ async function saveConfig() {
         souIncludeBackendHeaders: config.value.sou_include_backend_headers,
         souIncludeFailedBackendErrors: config.value.sou_include_failed_backend_errors,
         souLocalEnabled: config.value.sou_local_enabled,
+        souLocalSemanticEnabled: config.value.sou_local_semantic_enabled,
+        localEmbeddingModelDir: config.value.local_embedding_model_dir,
         // fast-context 配置
         fastContextApiKey: config.value.fast_context_api_key,
         fastContextTreeDepth: config.value.fast_context_tree_depth,
@@ -729,9 +794,11 @@ async function saveConfig() {
         duration: 5000,
       })
     }
+    return true
   }
   catch (err) {
     message.error(`保存失败: ${err}`)
+    return false
   }
 }
 
@@ -804,6 +871,32 @@ async function syncLocalIndex() {
   }
   finally {
     localIndexSyncing.value = false
+  }
+}
+
+async function refreshEmbeddingModelStatus(showFeedback = false) {
+  try {
+    embeddingModelStatus.value = await invoke<EmbeddingModelStatus>('get_local_embedding_model_status')
+  }
+  catch (error) {
+    if (showFeedback)
+      message.error(`读取共享模型状态失败: ${error}`)
+  }
+}
+
+async function installEmbeddingModel() {
+  embeddingModelOperating.value = true
+  try {
+    if (!await saveConfig())
+      return
+    embeddingModelStatus.value = await invoke<EmbeddingModelStatus>('start_uiux_model_download')
+    message.success('共享 BGE 模型下载任务已启动')
+  }
+  catch (error) {
+    message.error(`启动模型下载失败: ${error}`)
+  }
+  finally {
+    embeddingModelOperating.value = false
   }
 }
 
@@ -1046,6 +1139,7 @@ onMounted(async () => {
     await Promise.all([
       fetchAutoIndexEnabled(),
       fetchWatchingProjects(),
+      refreshEmbeddingModelStatus(false),
     ])
   }
 })
@@ -1253,6 +1347,14 @@ defineExpose({ saveConfig })
                       <n-switch v-model:value="config.sou_local_enabled" />
                     </n-form-item>
                   </n-grid-item>
+                  <n-grid-item>
+                    <n-form-item label="Local 语义混合">
+                      <n-switch
+                        v-model:value="config.sou_local_semantic_enabled"
+                        :disabled="!config.sou_local_enabled"
+                      />
+                    </n-form-item>
+                  </n-grid-item>
                 </n-grid>
               </n-space>
             </ConfigSection>
@@ -1278,10 +1380,70 @@ defineExpose({ saveConfig })
                     </n-form-item>
                   </n-grid-item>
                 </n-grid>
+                <n-grid :x-gap="24" :y-gap="16" :cols="2">
+                  <n-grid-item>
+                    <n-form-item label="语义状态">
+                      <n-space align="center">
+                        <n-tag :type="semanticTagType" :bordered="false">
+                          {{ semanticStateLabel }}
+                        </n-tag>
+                        <span v-if="localIndexStatus && config.sou_local_semantic_enabled" class="form-feedback">
+                          {{ localIndexStatus.semantic_indexed_chunks }} 已索引 / {{ localIndexStatus.semantic_pending_chunks }} 待处理
+                        </span>
+                      </n-space>
+                    </n-form-item>
+                  </n-grid-item>
+                  <n-grid-item>
+                    <n-form-item label="共享模型">
+                      <n-space align="center">
+                        <n-tag :type="embeddingModelStatus?.phase === 'ready' ? 'success' : 'default'" :bordered="false">
+                          {{ embeddingModelStatus?.phase || '未读取' }}
+                        </n-tag>
+                        <span class="form-feedback">{{ embeddingModelStatus?.model_name || 'bge-small-zh-v1.5' }}</span>
+                      </n-space>
+                    </n-form-item>
+                  </n-grid-item>
+                  <n-grid-item :span="2">
+                    <n-form-item label="模型目录">
+                      <n-input
+                        v-model:value="config.local_embedding_model_dir"
+                        :placeholder="effectiveEmbeddingModelDir || '使用系统默认目录'"
+                        clearable
+                      />
+                    </n-form-item>
+                  </n-grid-item>
+                </n-grid>
                 <n-alert v-if="localIndexStatus?.last_error" type="error" :bordered="false">
                   {{ localIndexStatus.last_error }}
                 </n-alert>
+                <n-alert v-if="localIndexStatus?.semantic_last_error" type="warning" :bordered="false">
+                  {{ localIndexStatus.semantic_last_error }}
+                </n-alert>
+                <n-alert v-if="embeddingModelStatus?.error" type="error" :bordered="false">
+                  {{ embeddingModelStatus.error }}
+                </n-alert>
                 <div class="flex justify-end gap-2">
+                  <n-tooltip trigger="hover">
+                    <template #trigger>
+                      <n-button quaternary circle :loading="embeddingModelOperating" @click="refreshEmbeddingModelStatus(true)">
+                        <template #icon>
+                          <div class="i-carbon-renew" />
+                        </template>
+                      </n-button>
+                    </template>
+                    刷新共享模型状态
+                  </n-tooltip>
+                  <n-button
+                    v-if="embeddingModelStatus?.phase !== 'ready'"
+                    secondary
+                    :loading="embeddingModelOperating"
+                    @click="installEmbeddingModel"
+                  >
+                    <template #icon>
+                      <div class="i-carbon-download" />
+                    </template>
+                    下载模型
+                  </n-button>
                   <n-button secondary :loading="localIndexLoading" :disabled="!debugProjectRoot" @click="refreshLocalIndexStatus(true)">
                     <template #icon>
                       <div class="i-carbon-renew" />

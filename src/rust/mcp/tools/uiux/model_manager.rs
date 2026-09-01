@@ -1,8 +1,5 @@
 //! UIUX 本地 BGE 模型的下载、校验、索引缓存与进程内推理生命周期。
 
-use fastembed::{
-    InitOptionsUserDefined, Pooling, TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel,
-};
 use futures_util::StreamExt;
 use once_cell::sync::Lazy;
 use reqwest::header::RANGE;
@@ -17,16 +14,15 @@ use std::time::{Duration, Instant};
 
 use crate::config::{load_standalone_config, AppState, ProxyConfig};
 use crate::log_important;
+use crate::mcp::embedding;
 use crate::network::download_verified_with_strategy_with_progress_and_cancel;
 use crate::network::proxy::{ProxyDetector, ProxyInfo, ProxyType};
 
 use super::structured_search;
 
-pub const MODEL_NAME: &str = "Xenova/bge-small-zh-v1.5";
-pub const MODEL_REVISION: &str = "75c43b069aac4d136ba6bc1122f995fedcfd2781";
-pub const MODEL_DIMENSION: usize = 512;
-pub const QUERY_PREFIX: &str = "为这个句子生成表示以用于检索相关文章：";
-pub const ORT_VERSION: &str = "1.28.0";
+pub use crate::mcp::embedding::{
+    MODEL_DIMENSION, MODEL_NAME, MODEL_REVISION, ORT_VERSION, QUERY_PREFIX,
+};
 
 const MODEL_TOTAL_BYTES: u64 = 95_292_210;
 const ORT_ARCHIVE_BYTES: u64 = 78_796_801;
@@ -158,7 +154,6 @@ enum RuntimePhase {
 struct RuntimeSlot {
     directory: Option<PathBuf>,
     phase: RuntimePhase,
-    model: Option<TextEmbedding>,
     embeddings: Vec<Vec<f32>>,
     error: Option<String>,
 }
@@ -168,7 +163,6 @@ impl Default for RuntimeSlot {
         Self {
             directory: None,
             phase: RuntimePhase::Empty,
-            model: None,
             embeddings: Vec::new(),
             error: None,
         }
@@ -186,29 +180,19 @@ pub fn semantic_settings() -> SemanticSettings {
         enabled: mcp
             .and_then(|value| value.uiux_semantic_enabled)
             .unwrap_or(true),
-        model_dir: effective_model_dir(mcp.and_then(|value| value.uiux_model_dir.as_deref())),
+        model_dir: embedding::effective_model_dir(
+            mcp.and_then(|value| value.local_embedding_model_dir.as_deref()),
+            mcp.and_then(|value| value.uiux_model_dir.as_deref()),
+        ),
     }
 }
 
 pub fn effective_model_dir(configured: Option<&str>) -> PathBuf {
-    if let Some(path) = configured.map(str::trim).filter(|value| !value.is_empty()) {
-        return PathBuf::from(path);
-    }
-    dirs::data_local_dir()
-        .or_else(dirs::config_dir)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("sanshu")
-        .join("models")
-        .join("bge-small-zh-v1.5")
+    embedding::effective_model_dir(configured, None)
 }
 
 fn effective_runtime_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .or_else(dirs::config_dir)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("sanshu")
-        .join("runtimes")
-        .join(format!("onnxruntime-{}", ORT_VERSION))
+    embedding::runtime_dir()
 }
 
 #[tauri::command]
@@ -218,16 +202,22 @@ pub fn get_uiux_config(state: tauri::State<'_, AppState>) -> Result<UiuxConfig, 
         .lock()
         .map_err(|error| format!("获取 UIUX 配置失败: {}", error))?;
     let mcp = &config.mcp_config;
-    let model_dir = mcp.uiux_model_dir.clone();
+    let model_dir = mcp
+        .local_embedding_model_dir
+        .clone()
+        .or_else(|| mcp.uiux_model_dir.clone());
     Ok(UiuxConfig {
         knowledge_backend: mcp
             .uiux_knowledge_backend
             .clone()
             .unwrap_or_else(|| "auto".to_string()),
         semantic_enabled: mcp.uiux_semantic_enabled.unwrap_or(true),
-        effective_model_dir: effective_model_dir(model_dir.as_deref())
-            .to_string_lossy()
-            .to_string(),
+        effective_model_dir: embedding::effective_model_dir(
+            mcp.local_embedding_model_dir.as_deref(),
+            mcp.uiux_model_dir.as_deref(),
+        )
+        .to_string_lossy()
+        .to_string(),
         model_dir,
     })
 }
@@ -250,7 +240,7 @@ pub async fn set_uiux_config(
         .model_dir
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let new_directory = effective_model_dir(model_dir.as_deref());
+    let new_directory = embedding::effective_model_dir(model_dir.as_deref(), None);
 
     let previous = {
         let mut app_config = state
@@ -260,11 +250,12 @@ pub async fn set_uiux_config(
         let previous = (
             app_config.mcp_config.uiux_knowledge_backend.clone(),
             app_config.mcp_config.uiux_semantic_enabled,
-            app_config.mcp_config.uiux_model_dir.clone(),
+            app_config.mcp_config.local_embedding_model_dir.clone(),
         );
         app_config.mcp_config.uiux_knowledge_backend = Some(backend.clone());
         app_config.mcp_config.uiux_semantic_enabled = Some(config.semantic_enabled);
-        app_config.mcp_config.uiux_model_dir = model_dir.clone();
+        // 新配置统一写入共享目录；旧 uiux_model_dir 仅作为读取兼容项保留。
+        app_config.mcp_config.local_embedding_model_dir = model_dir.clone();
         previous
     };
     if let Err(error) = crate::config::save_config(&state, &app_handle).await {
@@ -272,11 +263,11 @@ pub async fn set_uiux_config(
             let still_owns_values = app_config.mcp_config.uiux_knowledge_backend.as_deref()
                 == Some(backend.as_str())
                 && app_config.mcp_config.uiux_semantic_enabled == Some(config.semantic_enabled)
-                && app_config.mcp_config.uiux_model_dir == model_dir;
+                && app_config.mcp_config.local_embedding_model_dir == model_dir;
             if still_owns_values {
                 app_config.mcp_config.uiux_knowledge_backend = previous.0;
                 app_config.mcp_config.uiux_semantic_enabled = previous.1;
-                app_config.mcp_config.uiux_model_dir = previous.2;
+                app_config.mcp_config.local_embedding_model_dir = previous.2;
             }
         }
         return Err(format!("保存 UIUX 配置失败: {}", error));
@@ -317,7 +308,10 @@ pub fn get_uiux_model_status(state: tauri::State<'_, AppState>) -> Result<UiuxMo
             .config
             .lock()
             .map_err(|error| format!("获取 UIUX 配置失败: {}", error))?;
-        effective_model_dir(config.mcp_config.uiux_model_dir.as_deref())
+        embedding::effective_model_dir(
+            config.mcp_config.local_embedding_model_dir.as_deref(),
+            config.mcp_config.uiux_model_dir.as_deref(),
+        )
     };
     if assets_have_expected_sizes(&directory) {
         ensure_runtime_started(&directory);
@@ -339,7 +333,10 @@ pub async fn start_uiux_model_download(
             .config
             .lock()
             .map_err(|error| format!("获取 UIUX 配置失败: {}", error))?;
-        let directory = effective_model_dir(config.mcp_config.uiux_model_dir.as_deref());
+        let directory = embedding::effective_model_dir(
+            config.mcp_config.local_embedding_model_dir.as_deref(),
+            config.mcp_config.uiux_model_dir.as_deref(),
+        );
         let proxy_config = config.proxy_config.clone();
         drop(config);
         let initial = status_for(&directory, "downloading", "准备下载模型文件");
@@ -399,7 +396,10 @@ pub fn remove_uiux_model(state: tauri::State<'_, AppState>) -> Result<UiuxModelS
             .config
             .lock()
             .map_err(|error| format!("获取 UIUX 配置失败: {}", error))?;
-        effective_model_dir(config.mcp_config.uiux_model_dir.as_deref())
+        embedding::effective_model_dir(
+            config.mcp_config.local_embedding_model_dir.as_deref(),
+            config.mcp_config.uiux_model_dir.as_deref(),
+        )
     };
     fs::create_dir_all(&directory)
         .map_err(|error| format!("创建模型目录失败 {}: {}", directory.display(), error))?;
@@ -457,8 +457,13 @@ pub async fn rank_documents(
         }
     }
 
-    let query = format!("{}{}", QUERY_PREFIX, query.trim());
-    tokio::task::spawn_blocking(move || rank_documents_blocking(&query))
+    let query_embedding = embedding::embed_query(directory, query, wait_budget)
+        .await
+        .map_err(|error| SemanticUnavailable {
+            state: error.state,
+            message: error.message,
+        })?;
+    tokio::task::spawn_blocking(move || rank_documents_blocking(&query_embedding))
         .await
         .map_err(|error| SemanticUnavailable {
             state: "error".to_string(),
@@ -466,46 +471,26 @@ pub async fn rank_documents(
         })?
 }
 
-fn rank_documents_blocking(query: &str) -> Result<SemanticRanking, SemanticUnavailable> {
-    let mut runtime = RUNTIME.lock().map_err(|error| SemanticUnavailable {
+fn rank_documents_blocking(
+    query_embedding: &[f32],
+) -> Result<SemanticRanking, SemanticUnavailable> {
+    let runtime = RUNTIME.lock().map_err(|error| SemanticUnavailable {
         state: "error".to_string(),
-        message: format!("锁定 BGE 运行时失败: {}", error),
+        message: format!("锁定 UIUX 语义索引失败: {}", error),
     })?;
-    let RuntimeSlot {
-        model,
-        embeddings,
-        phase,
-        ..
-    } = &mut *runtime;
-    if *phase != RuntimePhase::Ready {
+    if runtime.phase != RuntimePhase::Ready {
         return Err(SemanticUnavailable {
             state: "loading".to_string(),
-            message: "BGE 运行时尚未就绪".to_string(),
+            message: "UIUX 语义索引尚未就绪".to_string(),
         });
     }
-    let model = model.as_mut().ok_or_else(|| SemanticUnavailable {
-        state: "error".to_string(),
-        message: "BGE 运行时缺少模型实例".to_string(),
-    })?;
-    let query_embedding = model
-        .embed(vec![query], Some(1))
-        .map_err(|error| SemanticUnavailable {
-            state: "error".to_string(),
-            message: format!("BGE 查询向量生成失败: {}", error),
-        })?
-        .into_iter()
-        .next()
-        .ok_or_else(|| SemanticUnavailable {
-            state: "error".to_string(),
-            message: "BGE 未返回查询向量".to_string(),
-        })?;
-
-    let mut matches = embeddings
+    let mut matches = runtime
+        .embeddings
         .iter()
         .enumerate()
         .map(|(document_index, embedding)| SemanticMatch {
             document_index,
-            score: cosine_similarity(&query_embedding, embedding),
+            score: embedding::cosine_similarity(query_embedding, embedding),
         })
         .collect::<Vec<_>>();
     matches.sort_by(|left, right| {
@@ -535,13 +520,12 @@ fn ensure_runtime_started(directory: &Path) {
     if !assets_have_expected_sizes(&directory) {
         runtime.directory = Some(directory);
         runtime.phase = RuntimePhase::Empty;
-        runtime.model = None;
         runtime.embeddings.clear();
         return;
     }
+    embedding::ensure_started(&directory);
     runtime.directory = Some(directory.clone());
     runtime.phase = RuntimePhase::Loading;
-    runtime.model = None;
     runtime.embeddings.clear();
     runtime.error = None;
     drop(runtime);
@@ -551,10 +535,9 @@ fn ensure_runtime_started(directory: &Path) {
     status.progress_percent = 100.0;
     let _ = write_status(&status);
     std::thread::spawn(move || match load_runtime(&directory) {
-        Ok((model, embeddings)) => {
+        Ok(embeddings) => {
             if let Ok(mut runtime) = RUNTIME.lock() {
                 if runtime.directory.as_deref() == Some(directory.as_path()) {
-                    runtime.model = Some(model);
                     runtime.embeddings = embeddings;
                     runtime.phase = RuntimePhase::Ready;
                     runtime.error = None;
@@ -581,7 +564,7 @@ fn ensure_runtime_started(directory: &Path) {
     });
 }
 
-fn load_runtime(directory: &Path) -> Result<(TextEmbedding, Vec<Vec<f32>>), String> {
+fn load_runtime(directory: &Path) -> Result<Vec<Vec<f32>>, String> {
     let corpus_hash = corpus_hash();
     let cache_path = directory.join(EMBEDDING_CACHE_FILE);
     let index_lock_path = directory.join(INDEX_LOCK_FILE_NAME);
@@ -589,27 +572,10 @@ fn load_runtime(directory: &Path) -> Result<(TextEmbedding, Vec<Vec<f32>>), Stri
     let _index_lease = wait_for_index_lease(&index_lock_path, &cache_path, &corpus_hash)?;
     verify_model_files(directory)?;
     verify_runtime_assets()?;
-    ort::init_from(runtime_dll_path())
-        .map_err(|error| format!("加载 ONNX Runtime {} 失败: {}", ORT_VERSION, error))?
-        .commit();
-    let model = UserDefinedEmbeddingModel::new(
-        read_file(&directory.join("onnx/model.onnx"))?,
-        TokenizerFiles {
-            tokenizer_file: read_file(&directory.join("tokenizer.json"))?,
-            config_file: read_file(&directory.join("config.json"))?,
-            special_tokens_map_file: read_file(&directory.join("special_tokens_map.json"))?,
-            tokenizer_config_file: read_file(&directory.join("tokenizer_config.json"))?,
-        },
-    )
-    .with_pooling(Pooling::Cls);
-    let mut engine = TextEmbedding::try_new_from_user_defined(
-        model,
-        InitOptionsUserDefined::new().with_max_length(512),
-    )
-    .map_err(|error| format!("创建 BGE ONNX 会话失败: {}", error))?;
+    embedding::ensure_started(directory);
 
     if let Ok(embeddings) = read_embedding_cache(&cache_path, &corpus_hash) {
-        return Ok((engine, embeddings));
+        return Ok(embeddings);
     }
 
     let documents = structured_search::semantic_documents();
@@ -617,17 +583,11 @@ fn load_runtime(directory: &Path) -> Result<(TextEmbedding, Vec<Vec<f32>>), Stri
     for (batch_index, batch) in documents.chunks(32).enumerate() {
         let texts = batch
             .iter()
-            .map(|document| document.text.as_str())
+            .map(|document| document.text.clone())
             .collect::<Vec<_>>();
-        let mut batch_embeddings = engine
-            .embed(texts, Some(32))
-            .map_err(|error| format!("生成 UIUX 文档向量失败: {}", error))?;
-        if batch_embeddings
-            .iter()
-            .any(|embedding| embedding.len() != MODEL_DIMENSION)
-        {
-            return Err("BGE 返回的文档向量维度不是 512".to_string());
-        }
+        let mut batch_embeddings =
+            embedding::embed_documents_blocking(directory, texts, Duration::from_secs(120))
+                .map_err(|error| error.message)?;
         embeddings.append(&mut batch_embeddings);
 
         let mut status = status_for(directory, "indexing", "正在建立 UIUX 语义索引");
@@ -639,7 +599,7 @@ fn load_runtime(directory: &Path) -> Result<(TextEmbedding, Vec<Vec<f32>>), Stri
         let _ = write_status(&status);
     }
     write_embedding_cache(&cache_path, &corpus_hash, &embeddings)?;
-    Ok((engine, embeddings))
+    Ok(embeddings)
 }
 
 fn try_acquire_lease(path: &Path, busy_message: &str) -> Result<File, String> {
@@ -1173,6 +1133,7 @@ fn reset_runtime() {
     if let Ok(mut runtime) = RUNTIME.lock() {
         *runtime = RuntimeSlot::default();
     }
+    embedding::reset();
 }
 
 fn mark_download_complete(status: &mut UiuxModelStatus) {
@@ -1211,10 +1172,6 @@ fn verify_sized_sha(path: &Path, expected_size: u64, expected_sha256: &str) -> R
         return Err(format!("{} SHA256 不匹配", path.display()));
     }
     Ok(())
-}
-
-fn runtime_dll_path() -> PathBuf {
-    effective_runtime_dir().join(ORT_DLL_FILE_NAME)
 }
 
 fn verify_runtime_assets() -> Result<(), String> {
@@ -1333,10 +1290,6 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(hex::encode(context.finish().as_ref()))
 }
 
-fn read_file(path: &Path) -> Result<Vec<u8>, String> {
-    fs::read(path).map_err(|error| format!("读取模型文件 {} 失败: {}", path.display(), error))
-}
-
 fn corpus_hash() -> [u8; 32] {
     let mut context = ShaContext::new(&SHA256);
     context.update(structured_search::KNOWLEDGE_VERSION.as_bytes());
@@ -1432,26 +1385,6 @@ fn read_u32(reader: &mut impl Read) -> Result<u32, String> {
     Ok(u32::from_le_bytes(bytes))
 }
 
-fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
-    if left.len() != right.len() || left.is_empty() {
-        return -1.0;
-    }
-    let mut dot = 0.0f32;
-    let mut left_norm = 0.0f32;
-    let mut right_norm = 0.0f32;
-    for (left, right) in left.iter().zip(right) {
-        dot += left * right;
-        left_norm += left * left;
-        right_norm += right * right;
-    }
-    let denominator = left_norm.sqrt() * right_norm.sqrt();
-    if denominator > f32::EPSILON {
-        dot / denominator
-    } else {
-        -1.0
-    }
-}
-
 fn status_path() -> Option<PathBuf> {
     dirs::config_dir().map(|directory| directory.join("sanshu").join(STATUS_FILE_NAME))
 }
@@ -1522,9 +1455,9 @@ mod tests {
 
     #[test]
     fn cosine_similarity_handles_normalized_and_empty_vectors() {
-        assert!((cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < 0.0001);
-        assert_eq!(cosine_similarity(&[], &[]), -1.0);
-        assert_eq!(cosine_similarity(&[1.0], &[1.0, 0.0]), -1.0);
+        assert!((embedding::cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < 0.0001);
+        assert_eq!(embedding::cosine_similarity(&[], &[]), -1.0);
+        assert_eq!(embedding::cosine_similarity(&[1.0], &[1.0, 0.0]), -1.0);
     }
 
     #[tokio::test]
@@ -1558,8 +1491,7 @@ mod tests {
             .await
             .expect("固定模型与运行时应完成下载和校验");
 
-        let (mut model, embeddings) =
-            load_runtime(&directory).expect("BGE 运行时应完成加载和建索引");
+        let embeddings = load_runtime(&directory).expect("BGE 运行时应完成加载和建索引");
         assert_eq!(
             embeddings.len(),
             structured_search::semantic_documents().len()
@@ -1572,14 +1504,14 @@ mod tests {
             "{}{}",
             QUERY_PREFIX, "黑洞吞噬星球、地月卫星公转、深邃多层星空与暗手抓握地球的鼠标动效"
         );
-        let query_embedding = model
-            .embed(vec![query], Some(1))
-            .expect("BGE 应生成查询向量")
-            .pop()
-            .expect("BGE 应返回一条查询向量");
+        let query_embedding =
+            embedding::embed_documents_blocking(&directory, vec![query], Duration::from_secs(120))
+                .expect("BGE 应生成查询向量")
+                .pop()
+                .expect("BGE 应返回一条查询向量");
         let top_score = embeddings
             .iter()
-            .map(|embedding| cosine_similarity(&query_embedding, embedding))
+            .map(|value| embedding::cosine_similarity(&query_embedding, value))
             .max_by(f32::total_cmp)
             .expect("语义索引应包含文档");
         assert!(top_score.is_finite() && top_score > 0.0);
@@ -1587,18 +1519,21 @@ mod tests {
         let semantic_only_query =
             format!("{}{}", QUERY_PREFIX, "用醒目卡片展示健身训练进度和健康指标");
         let unrelated_query = format!("{}{}", QUERY_PREFIX, "如何烹饪红烧肉并计算卡路里");
-        let scores = model
-            .embed(vec![semantic_only_query, unrelated_query], Some(2))
-            .expect("BGE 应生成质量门槛查询向量")
-            .into_iter()
-            .map(|query| {
-                embeddings
-                    .iter()
-                    .map(|embedding| cosine_similarity(&query, embedding))
-                    .max_by(f32::total_cmp)
-                    .expect("语义索引应包含文档")
-            })
-            .collect::<Vec<_>>();
+        let scores = embedding::embed_documents_blocking(
+            &directory,
+            vec![semantic_only_query, unrelated_query],
+            Duration::from_secs(120),
+        )
+        .expect("BGE 应生成质量门槛查询向量")
+        .into_iter()
+        .map(|query| {
+            embeddings
+                .iter()
+                .map(|value| embedding::cosine_similarity(&query, value))
+                .max_by(f32::total_cmp)
+                .expect("语义索引应包含文档")
+        })
+        .collect::<Vec<_>>();
         assert!(scores[0] >= super::super::semantic_search::SEMANTIC_ONLY_MIN_SCORE);
         assert!(scores[1] < super::super::semantic_search::SEMANTIC_ONLY_MIN_SCORE);
         println!(

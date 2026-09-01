@@ -19,8 +19,7 @@ impl IconTool {
     /// schema 由 TuRequest 的 schemars 派生自动生成，避免手写 JSON 与类型定义漂移
     pub fn get_tool_definition() -> Tool {
         let schema = schemars::schema_for!(TuRequest);
-        let schema_value =
-            serde_json::to_value(schema).expect("TuRequest schema 序列化不应失败");
+        let schema_value = serde_json::to_value(schema).expect("TuRequest schema 序列化不应失败");
 
         if let serde_json::Value::Object(schema_map) = schema_value {
             Tool {
@@ -47,9 +46,9 @@ impl IconTool {
     pub async fn tu(request: TuRequest) -> Result<CallToolResult, McpError> {
         match create_icon_popup(&request).await {
             Ok(response) => match response.status.as_str() {
-                "cancelled" => Ok(CallToolResult::success(vec![
-                    rmcp::model::Content::text("用户取消了图标选择操作"),
-                ])),
+                "cancelled" => Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+                    "用户取消了图标选择操作",
+                )])),
                 "error" => {
                     let mut message = format!(
                         "图标选择失败: {}",
@@ -64,9 +63,11 @@ impl IconTool {
                     }
                     Err(McpError::internal_error(message, None))
                 }
-                "saved" if response.saved_count == 0 => Ok(CallToolResult::success(vec![
-                    rmcp::model::Content::text("用户未选择任何图标"),
-                ])),
+                "saved" if response.saved_count == 0 => {
+                    Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+                        "用户未选择任何图标",
+                    )]))
+                }
                 "saved" => {
                     // 构建详细的成功消息
                     let message = format!(

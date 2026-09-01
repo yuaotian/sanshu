@@ -129,6 +129,13 @@ pub struct SaveAcemcpConfigArgs {
     pub sou_include_failed_backend_errors: Option<bool>,
     #[serde(alias = "souLocalEnabled", alias = "sou_local_enabled")]
     pub sou_local_enabled: Option<bool>,
+    #[serde(
+        alias = "souLocalSemanticEnabled",
+        alias = "sou_local_semantic_enabled"
+    )]
+    pub sou_local_semantic_enabled: Option<bool>,
+    #[serde(alias = "localEmbeddingModelDir", alias = "local_embedding_model_dir")]
+    pub local_embedding_model_dir: Option<String>,
     #[serde(alias = "uiuxKnowledgeBackend", alias = "uiux_knowledge_backend")]
     pub uiux_knowledge_backend: Option<String>,
     #[serde(alias = "fastContextCommand", alias = "fast_context_command")]
@@ -320,6 +327,16 @@ pub async fn save_acemcp_config(
         if let Some(v) = args.sou_local_enabled {
             config.mcp_config.sou_local_enabled = Some(v);
         }
+        if let Some(v) = args.sou_local_semantic_enabled {
+            config.mcp_config.sou_local_semantic_enabled = Some(v);
+        }
+        if args.local_embedding_model_dir.is_some() {
+            config.mcp_config.local_embedding_model_dir = args
+                .local_embedding_model_dir
+                .clone()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+        }
         if let Some(v) = args.uiux_knowledge_backend.as_deref() {
             let normalized = v.trim().to_ascii_lowercase().replace('-', "_");
             if !matches!(normalized.as_str(), "auto" | "fast_context" | "local") {
@@ -403,7 +420,11 @@ pub async fn save_acemcp_config(
             }
             // 中文说明：配置变更必须清掉旧空间记录，再由 manifest 任务重新建立可验证的全量批次。
             if let Err(error) = purge_project_index_records(&project_root, false) {
-                log::warn!("ACE 配置变更清理旧索引失败: project={}, error={}", project_root, error);
+                log::warn!(
+                    "ACE 配置变更清理旧索引失败: project={}, error={}",
+                    project_root,
+                    error
+                );
                 continue;
             }
             if let Err(error) = super::AcemcpTool::trigger_index_update_with_app(
@@ -413,7 +434,11 @@ pub async fn save_acemcp_config(
             )
             .await
             {
-                log::warn!("ACE 配置变更提交全量索引失败: project={}, error={}", project_root, error);
+                log::warn!(
+                    "ACE 配置变更提交全量索引失败: project={}, error={}",
+                    project_root,
+                    error
+                );
             }
         }
         log::info!("ACE 索引参数已变化，已提交已有项目的后台全量重建任务");
@@ -1170,6 +1195,9 @@ pub struct AcemcpConfigResponse {
     pub sou_include_backend_headers: bool,
     pub sou_include_failed_backend_errors: bool,
     pub sou_local_enabled: bool,
+    pub sou_local_semantic_enabled: bool,
+    pub local_embedding_model_dir: Option<String>,
+    pub effective_local_embedding_model_dir: String,
     pub uiux_knowledge_backend: String,
     pub fast_context_command: String,
     pub fast_context_script_path: Option<String>,
@@ -1326,6 +1354,17 @@ pub async fn get_acemcp_config(state: State<'_, AppState>) -> Result<AcemcpConfi
             .sou_include_failed_backend_errors
             .unwrap_or(true),
         sou_local_enabled: config.mcp_config.sou_local_enabled.unwrap_or(true),
+        sou_local_semantic_enabled: config
+            .mcp_config
+            .sou_local_semantic_enabled
+            .unwrap_or(false),
+        local_embedding_model_dir: config.mcp_config.local_embedding_model_dir.clone(),
+        effective_local_embedding_model_dir: crate::mcp::embedding::effective_model_dir(
+            config.mcp_config.local_embedding_model_dir.as_deref(),
+            config.mcp_config.uiux_model_dir.as_deref(),
+        )
+        .to_string_lossy()
+        .to_string(),
         uiux_knowledge_backend: config
             .mcp_config
             .uiux_knowledge_backend
@@ -1389,6 +1428,18 @@ pub struct DebugSearchResult {
     pub index_state: Option<String>,
     /// 触发降级的原因
     pub fallback_reason: Option<String>,
+    /// Local 语义索引状态
+    pub semantic_state: Option<String>,
+    /// 固定语义模型标识
+    pub semantic_model: Option<String>,
+    /// 已持久化向量切片数
+    pub semantic_indexed_chunks: Option<u64>,
+    /// 待生成向量切片数
+    pub semantic_pending_chunks: Option<u64>,
+    /// 本次语义最高相似度
+    pub semantic_top_score: Option<f32>,
+    /// 混合排序算法标识
+    pub fusion: Option<String>,
 }
 
 /// 纯 Rust 的调试命令：直接执行 acemcp 搜索，返回结果及耗时统计
@@ -1419,11 +1470,7 @@ pub async fn debug_acemcp_search(
     };
 
     // 调用搜索函数（日志会通过 log crate 输出到日志文件）
-    log::info!(
-        "[调试搜索] 开始执行: project={}, query={}",
-        project_root_path,
-        query
-    );
+    log::info!("[调试搜索] 开始执行: query_chars={}", query.chars().count());
     let search_result = SouTool::search_context(req).await;
 
     // 记录响应接收时间
@@ -1461,6 +1508,28 @@ pub async fn debug_acemcp_search(
                 .and_then(|value| value.get("fallback_reason"))
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string);
+            let semantic_state = metadata
+                .and_then(|value| value.get("semantic_state"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let semantic_model = metadata
+                .and_then(|value| value.get("semantic_model"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let semantic_indexed_chunks = metadata
+                .and_then(|value| value.get("semantic_indexed_chunks"))
+                .and_then(serde_json::Value::as_u64);
+            let semantic_pending_chunks = metadata
+                .and_then(|value| value.get("semantic_pending_chunks"))
+                .and_then(serde_json::Value::as_u64);
+            let semantic_top_score = metadata
+                .and_then(|value| value.get("semantic_top_score"))
+                .and_then(serde_json::Value::as_f64)
+                .map(|value| value as f32);
+            let fusion = metadata
+                .and_then(|value| value.get("fusion"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
 
             if let Ok(val) = serde_json::to_value(&result) {
                 if let Some(arr) = val.get("content").and_then(|v| v.as_array()) {
@@ -1491,6 +1560,12 @@ pub async fn debug_acemcp_search(
                 engine,
                 index_state,
                 fallback_reason,
+                semantic_state,
+                semantic_model,
+                semantic_indexed_chunks,
+                semantic_pending_chunks,
+                semantic_top_score,
+                fusion,
             })
         }
         Err(e) => {
@@ -1512,6 +1587,12 @@ pub async fn debug_acemcp_search(
                 engine: None,
                 index_state: None,
                 fallback_reason: None,
+                semantic_state: None,
+                semantic_model: None,
+                semantic_indexed_chunks: None,
+                semantic_pending_chunks: None,
+                semantic_top_score: None,
+                fusion: None,
             })
         }
     }
@@ -1520,8 +1601,87 @@ pub async fn debug_acemcp_search(
 #[tauri::command]
 pub fn get_sou_local_index_status(
     project_root_path: String,
+    state: State<'_, AppState>,
 ) -> Result<crate::mcp::tools::sou::local::LocalIndexStatus, String> {
-    crate::mcp::tools::sou::local::status(&project_root_path).map_err(|error| error.to_string())
+    let semantic_settings = {
+        let config = state
+            .config
+            .lock()
+            .map_err(|error| format!("获取配置失败: {}", error))?;
+        crate::mcp::tools::sou::local::LocalSemanticSettings {
+            enabled: config
+                .mcp_config
+                .sou_local_semantic_enabled
+                .unwrap_or(false),
+            model_dir: crate::mcp::embedding::effective_model_dir(
+                config.mcp_config.local_embedding_model_dir.as_deref(),
+                config.mcp_config.uiux_model_dir.as_deref(),
+            ),
+        }
+    };
+    crate::mcp::tools::sou::local::status(&project_root_path, semantic_settings)
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct LocalEmbeddingModelStatus {
+    pub phase: String,
+    pub model_name: String,
+    pub model_dir: String,
+    pub progress_percent: f64,
+    pub message: String,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_local_embedding_model_status(
+    state: State<'_, AppState>,
+) -> Result<LocalEmbeddingModelStatus, String> {
+    let model_dir = {
+        let config = state
+            .config
+            .lock()
+            .map_err(|error| format!("获取配置失败: {}", error))?;
+        crate::mcp::embedding::effective_model_dir(
+            config.mcp_config.local_embedding_model_dir.as_deref(),
+            config.mcp_config.uiux_model_dir.as_deref(),
+        )
+    };
+    let assets_ready = crate::mcp::embedding::assets_have_expected_sizes(&model_dir);
+    let snapshot = crate::mcp::embedding::snapshot(&model_dir);
+    let (phase, message, error) = if !assets_ready {
+        (
+            "missing".to_string(),
+            "固定 BGE 模型资产尚未就绪".to_string(),
+            None,
+        )
+    } else {
+        match snapshot.phase {
+            crate::mcp::embedding::RuntimePhase::Loading => (
+                "loading".to_string(),
+                "BGE 共享模型正在按需加载".to_string(),
+                None,
+            ),
+            crate::mcp::embedding::RuntimePhase::Error => (
+                "error".to_string(),
+                "BGE 共享模型初始化异常".to_string(),
+                snapshot.error,
+            ),
+            _ => (
+                "ready".to_string(),
+                "固定 BGE 模型资产已就绪".to_string(),
+                None,
+            ),
+        }
+    };
+    Ok(LocalEmbeddingModelStatus {
+        phase,
+        model_name: crate::mcp::embedding::MODEL_NAME.to_string(),
+        model_dir: model_dir.to_string_lossy().to_string(),
+        progress_percent: if assets_ready { 100.0 } else { 0.0 },
+        message,
+        error,
+    })
 }
 
 #[tauri::command]
@@ -1529,12 +1689,12 @@ pub async fn rebuild_sou_local_index(
     project_root_path: String,
     state: State<'_, AppState>,
 ) -> Result<crate::mcp::tools::sou::local::LocalIndexStatus, String> {
-    let excludes = {
+    let (excludes, semantic_settings) = {
         let config = state
             .config
             .lock()
             .map_err(|error| format!("获取配置失败: {}", error))?;
-        config
+        let excludes = config
             .mcp_config
             .fast_context_exclude_paths
             .clone()
@@ -1546,9 +1706,20 @@ pub async fn rebuild_sou_local_index(
                     "build".to_string(),
                     "target".to_string(),
                 ]
-            })
+            });
+        let semantic_settings = crate::mcp::tools::sou::local::LocalSemanticSettings {
+            enabled: config
+                .mcp_config
+                .sou_local_semantic_enabled
+                .unwrap_or(false),
+            model_dir: crate::mcp::embedding::effective_model_dir(
+                config.mcp_config.local_embedding_model_dir.as_deref(),
+                config.mcp_config.uiux_model_dir.as_deref(),
+            ),
+        };
+        (excludes, semantic_settings)
     };
-    crate::mcp::tools::sou::local::rebuild(&project_root_path, excludes)
+    crate::mcp::tools::sou::local::rebuild(&project_root_path, excludes, semantic_settings)
         .await
         .map_err(|error| error.to_string())
 }
@@ -2227,8 +2398,7 @@ pub async fn confirm_acemcp_project_scope(
         {
             confirmed.push(normalized_root.clone());
         }
-        config.mcp_config.acemcp_confirmed_project_roots =
-            Some(normalize_project_list(confirmed));
+        config.mcp_config.acemcp_confirmed_project_roots = Some(normalize_project_list(confirmed));
     }
     save_config(&state, &app)
         .await

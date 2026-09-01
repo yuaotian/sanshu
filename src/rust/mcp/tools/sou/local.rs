@@ -15,10 +15,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 
+use super::semantic;
+
 const INDEX_MISSING: u8 = 0;
 const INDEX_BUILDING: u8 = 1;
 const INDEX_READY: u8 = 2;
 const INDEX_ERROR: u8 = 3;
+const SEMANTIC_DISABLED: u8 = 0;
+const SEMANTIC_MISSING: u8 = 1;
+const SEMANTIC_BUILDING: u8 = 2;
+const SEMANTIC_SYNCING: u8 = 3;
+const SEMANTIC_READY: u8 = 4;
+const SEMANTIC_ERROR: u8 = 5;
 const CHUNK_LINES: usize = 80;
 const CHUNK_OVERLAP: usize = 20;
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -33,6 +41,13 @@ pub(super) struct LocalSearchOptions {
     pub query: String,
     pub max_results: usize,
     pub exclude_paths: Vec<String>,
+    pub semantic: LocalSemanticSettings,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LocalSemanticSettings {
+    pub enabled: bool,
+    pub model_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +58,12 @@ pub(super) struct LocalSearchOutput {
     pub index_state: String,
     pub fallback_reason: Option<String>,
     pub duration_ms: u64,
+    pub semantic_state: String,
+    pub semantic_model: Option<String>,
+    pub semantic_indexed_chunks: u64,
+    pub semantic_pending_chunks: u64,
+    pub semantic_top_score: Option<f32>,
+    pub fusion: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -55,6 +76,11 @@ pub struct LocalIndexStatus {
     pub sync_running: bool,
     pub pending_changes: bool,
     pub last_error: Option<String>,
+    pub semantic_state: String,
+    pub semantic_model: Option<String>,
+    pub semantic_indexed_chunks: u64,
+    pub semantic_pending_chunks: u64,
+    pub semantic_last_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +93,8 @@ struct SearchHit {
     exact_match: bool,
     path_matches: usize,
     lexical_score: f64,
+    semantic_score: Option<f32>,
+    fusion_score: f64,
 }
 
 struct ProjectIndex {
@@ -80,11 +108,20 @@ struct ProjectIndex {
     profile_hash: Mutex<String>,
     last_error: Mutex<Option<String>>,
     watcher: Mutex<Option<RecommendedWatcher>>,
+    semantic_state: AtomicU8,
+    semantic_indexed_chunks: AtomicU64,
+    semantic_pending_chunks: AtomicU64,
+    semantic_last_error: Mutex<Option<String>>,
 }
 
 impl ProjectIndex {
     fn new(root: PathBuf, db_path: PathBuf) -> Self {
         let (state, files, chunks, error) = inspect_existing_index(&db_path);
+        let semantic_stats = semantic::inspect(&db_path).ok();
+        let semantic_state = match semantic_stats {
+            Some(stats) if stats.pending_chunks == 0 && stats.indexed_chunks > 0 => SEMANTIC_READY,
+            _ => SEMANTIC_MISSING,
+        };
         Self {
             root,
             db_path,
@@ -97,6 +134,18 @@ impl ProjectIndex {
             profile_hash: Mutex::new(String::new()),
             last_error: Mutex::new(error),
             watcher: Mutex::new(None),
+            semantic_state: AtomicU8::new(semantic_state),
+            semantic_indexed_chunks: AtomicU64::new(
+                semantic_stats
+                    .map(|stats| stats.indexed_chunks)
+                    .unwrap_or_default(),
+            ),
+            semantic_pending_chunks: AtomicU64::new(
+                semantic_stats
+                    .map(|stats| stats.pending_chunks)
+                    .unwrap_or_default(),
+            ),
+            semantic_last_error: Mutex::new(None),
         }
     }
 
@@ -134,7 +183,20 @@ impl ProjectIndex {
         Ok(())
     }
 
-    fn status(&self) -> LocalIndexStatus {
+    fn semantic_state_name(&self, enabled: bool) -> &'static str {
+        if !enabled {
+            return "disabled";
+        }
+        match self.semantic_state.load(Ordering::Acquire) {
+            SEMANTIC_BUILDING => "building",
+            SEMANTIC_SYNCING => "syncing",
+            SEMANTIC_READY => "ready",
+            SEMANTIC_ERROR => "error",
+            _ => "missing",
+        }
+    }
+
+    fn status(&self, semantic_settings: &LocalSemanticSettings) -> LocalIndexStatus {
         LocalIndexStatus {
             project_root: normalize_path(&self.root),
             index_path: normalize_path(&self.db_path),
@@ -144,6 +206,17 @@ impl ProjectIndex {
             sync_running: self.sync_running.load(Ordering::Acquire),
             pending_changes: self.dirty.load(Ordering::Acquire),
             last_error: self.last_error.lock().ok().and_then(|value| value.clone()),
+            semantic_state: self
+                .semantic_state_name(semantic_settings.enabled)
+                .to_string(),
+            semantic_model: semantic_settings.enabled.then(|| semantic::model_key()),
+            semantic_indexed_chunks: self.semantic_indexed_chunks.load(Ordering::Acquire),
+            semantic_pending_chunks: self.semantic_pending_chunks.load(Ordering::Acquire),
+            semantic_last_error: self
+                .semantic_last_error
+                .lock()
+                .ok()
+                .and_then(|value| value.clone()),
         }
     }
 }
@@ -175,7 +248,13 @@ pub(super) async fn search_for_test(
     }
 
     let index = Arc::new(ProjectIndex::new(root.clone(), index_path));
-    sync_now(Arc::clone(&index), options.exclude_paths.clone()).await?;
+    refresh_profile(&index, &options.exclude_paths);
+    sync_now(
+        Arc::clone(&index),
+        options.exclude_paths.clone(),
+        options.semantic.clone(),
+    )
+    .await?;
     search_with_index(options, root, index, false).await
 }
 
@@ -202,16 +281,24 @@ async fn search_with_index(
     refresh_profile(&index, &options.exclude_paths);
 
     let mut fallback_reason = None;
-    let (hits, engine) = if index.state.load(Ordering::Acquire) == INDEX_READY {
+    let (mut hits, mut engine) = if index.state.load(Ordering::Acquire) == INDEX_READY {
         if index.dirty.load(Ordering::Acquire) || index.sync_running.load(Ordering::Acquire) {
             fallback_reason = Some("本地索引存在待同步变更，本次使用即时搜索".to_string());
-            schedule_sync(Arc::clone(&index), options.exclude_paths.clone());
+            schedule_sync(
+                Arc::clone(&index),
+                options.exclude_paths.clone(),
+                options.semantic.clone(),
+            );
             run_immediate_search(&root, &options, &terms).await?
         } else {
             let db_path = index.db_path.clone();
             let query = options.query.clone();
             let query_terms = terms.clone();
-            let max_results = options.max_results;
+            let max_results = if options.semantic.enabled {
+                options.max_results.saturating_mul(5).min(150)
+            } else {
+                options.max_results
+            };
             match tokio::task::spawn_blocking(move || {
                 query_index(&db_path, &query, &query_terms, max_results)
             })
@@ -222,7 +309,11 @@ async fn search_with_index(
                 Err(error) => {
                     let reason = format!("FTS5 查询失败: {}", error);
                     mark_index_error(&index, &reason);
-                    schedule_sync(Arc::clone(&index), options.exclude_paths.clone());
+                    schedule_sync(
+                        Arc::clone(&index),
+                        options.exclude_paths.clone(),
+                        options.semantic.clone(),
+                    );
                     fallback_reason = Some(reason);
                     run_immediate_search(&root, &options, &terms).await?
                 }
@@ -231,12 +322,110 @@ async fn search_with_index(
     } else {
         let state = index.state_name().to_string();
         fallback_reason = Some(format!("本地索引状态为 {}", state));
-        schedule_sync(Arc::clone(&index), options.exclude_paths.clone());
+        schedule_sync(
+            Arc::clone(&index),
+            options.exclude_paths.clone(),
+            options.semantic.clone(),
+        );
         run_immediate_search(&root, &options, &terms).await?
     };
 
+    let mut semantic_top_score = None;
+    let mut fusion = None;
+    if options.semantic.enabled && engine == "fts5" {
+        let semantic_deadline = Instant::now() + Duration::from_secs(2);
+        if !crate::mcp::embedding::assets_have_expected_sizes(&options.semantic.model_dir) {
+            index
+                .semantic_state
+                .store(SEMANTIC_MISSING, Ordering::Release);
+            append_fallback(
+                &mut fallback_reason,
+                "BGE 模型资产未就绪，本次保留 FTS5 结果",
+            );
+        } else {
+            if index.semantic_state.load(Ordering::Acquire) != SEMANTIC_READY {
+                schedule_sync(
+                    Arc::clone(&index),
+                    options.exclude_paths.clone(),
+                    options.semantic.clone(),
+                );
+                while matches!(
+                    index.semantic_state.load(Ordering::Acquire),
+                    SEMANTIC_BUILDING | SEMANTIC_SYNCING
+                ) && Instant::now() < semantic_deadline
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+
+            if index.semantic_state.load(Ordering::Acquire) == SEMANTIC_READY {
+                let semantic_limit = options.max_results.saturating_mul(5).min(150);
+                let remaining_budget = semantic_deadline.saturating_duration_since(Instant::now());
+                let semantic_result = if remaining_budget.is_zero() {
+                    Err("loading: 语义查询等待预算已用尽".to_string())
+                } else {
+                    semantic::search(
+                        &index.db_path,
+                        &options.semantic.model_dir,
+                        &options.query,
+                        semantic_limit,
+                        remaining_budget,
+                    )
+                    .await
+                };
+                match semantic_result {
+                    Ok(semantic_hits) => {
+                        semantic_top_score = semantic_hits.first().map(|hit| hit.score);
+                        hits = fuse_hits(
+                            hits,
+                            semantic_hits,
+                            &options.query,
+                            &terms,
+                            options.max_results,
+                        );
+                        engine = "fts5+bge".to_string();
+                        fusion = Some(semantic::FUSION_NAME.to_string());
+                    }
+                    Err(error) => {
+                        let failure_state = if error.starts_with("loading:") {
+                            SEMANTIC_BUILDING
+                        } else if error.starts_with("missing:") {
+                            SEMANTIC_MISSING
+                        } else {
+                            SEMANTIC_ERROR
+                        };
+                        index.semantic_state.store(failure_state, Ordering::Release);
+                        if let Ok(mut last_error) = index.semantic_last_error.lock() {
+                            *last_error = Some(error.clone());
+                        }
+                        append_fallback(
+                            &mut fallback_reason,
+                            &format!("BGE 查询失败，本次保留 FTS5 结果: {}", error),
+                        );
+                    }
+                }
+            } else {
+                append_fallback(
+                    &mut fallback_reason,
+                    &format!(
+                        "语义索引状态为 {}，本次保留 FTS5 结果",
+                        index.semantic_state_name(true)
+                    ),
+                );
+            }
+        }
+    }
+    if engine != "fts5+bge" {
+        hits.truncate(options.max_results.max(1));
+    }
+
     let duration_ms = started_at.elapsed().as_millis() as u64;
     let state = index.state_name().to_string();
+    let semantic_state = index
+        .semantic_state_name(options.semantic.enabled)
+        .to_string();
+    let semantic_indexed_chunks = index.semantic_indexed_chunks.load(Ordering::Acquire);
+    let semantic_pending_chunks = index.semantic_pending_chunks.load(Ordering::Acquire);
     let text = format_hits(
         &root,
         &hits,
@@ -244,6 +433,11 @@ async fn search_with_index(
         &state,
         duration_ms,
         fallback_reason.as_deref(),
+        &semantic_state,
+        semantic_indexed_chunks,
+        semantic_pending_chunks,
+        semantic_top_score,
+        fusion.as_deref(),
     );
     Ok(LocalSearchOutput {
         text,
@@ -252,24 +446,37 @@ async fn search_with_index(
         index_state: state,
         fallback_reason,
         duration_ms,
+        semantic_state,
+        semantic_model: options.semantic.enabled.then(|| semantic::model_key()),
+        semantic_indexed_chunks,
+        semantic_pending_chunks,
+        semantic_top_score,
+        fusion,
     })
 }
 
-pub async fn rebuild(project_root: &str, exclude_paths: Vec<String>) -> Result<LocalIndexStatus> {
+pub async fn rebuild(
+    project_root: &str,
+    exclude_paths: Vec<String>,
+    semantic_settings: LocalSemanticSettings,
+) -> Result<LocalIndexStatus> {
     let root = PathBuf::from(project_root)
         .canonicalize()
         .with_context(|| format!("本地索引项目路径无效: {}", project_root))?;
     let index = project_index(&root)?;
-    index.dirty.store(false, Ordering::Release);
-    sync_now(Arc::clone(&index), exclude_paths).await?;
-    Ok(index.status())
+    refresh_profile(&index, &exclude_paths);
+    sync_now(Arc::clone(&index), exclude_paths, semantic_settings.clone()).await?;
+    Ok(index.status(&semantic_settings))
 }
 
-pub fn status(project_root: &str) -> Result<LocalIndexStatus> {
+pub fn status(
+    project_root: &str,
+    semantic_settings: LocalSemanticSettings,
+) -> Result<LocalIndexStatus> {
     let root = PathBuf::from(project_root)
         .canonicalize()
         .with_context(|| format!("本地索引项目路径无效: {}", project_root))?;
-    Ok(project_index(&root)?.status())
+    Ok(project_index(&root)?.status(&semantic_settings))
 }
 
 fn project_index(root: &Path) -> Result<Arc<ProjectIndex>> {
@@ -299,7 +506,24 @@ fn refresh_profile(index: &ProjectIndex, excludes: &[String]) {
     }
 }
 
-fn schedule_sync(index: Arc<ProjectIndex>, exclude_paths: Vec<String>) {
+enum SemanticSyncOutcome {
+    Disabled,
+    Ready(semantic::SemanticSyncStats),
+    Missing(String),
+    Error(String),
+}
+
+struct SyncOutcome {
+    files: u64,
+    chunks: u64,
+    semantic: SemanticSyncOutcome,
+}
+
+fn schedule_sync(
+    index: Arc<ProjectIndex>,
+    exclude_paths: Vec<String>,
+    semantic_settings: LocalSemanticSettings,
+) {
     if index
         .sync_running
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -312,18 +536,32 @@ fn schedule_sync(index: Arc<ProjectIndex>, exclude_paths: Vec<String>) {
     if index.state.load(Ordering::Acquire) != INDEX_READY {
         index.state.store(INDEX_BUILDING, Ordering::Release);
     }
+    if semantic_settings.enabled {
+        let next_state = if index.semantic_state.load(Ordering::Acquire) == SEMANTIC_READY {
+            SEMANTIC_SYNCING
+        } else {
+            SEMANTIC_BUILDING
+        };
+        index.semantic_state.store(next_state, Ordering::Release);
+    }
 
     tokio::spawn(async move {
         let task_index = Arc::clone(&index);
-        let result = tokio::task::spawn_blocking(move || sync_index(&task_index, &exclude_paths))
-            .await
-            .map_err(|error| anyhow!("本地索引同步任务异常: {}", error))
-            .and_then(|value| value);
+        let result = tokio::task::spawn_blocking(move || {
+            sync_all(&task_index, &exclude_paths, &semantic_settings)
+        })
+        .await
+        .map_err(|error| anyhow!("本地索引同步任务异常: {}", error))
+        .and_then(|value| value);
         finish_sync(&index, result);
     });
 }
 
-async fn sync_now(index: Arc<ProjectIndex>, exclude_paths: Vec<String>) -> Result<()> {
+async fn sync_now(
+    index: Arc<ProjectIndex>,
+    exclude_paths: Vec<String>,
+    semantic_settings: LocalSemanticSettings,
+) -> Result<()> {
     if index
         .sync_running
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -331,12 +569,24 @@ async fn sync_now(index: Arc<ProjectIndex>, exclude_paths: Vec<String>) -> Resul
     {
         return Err(anyhow!("本地索引正在同步，请稍后重试"));
     }
+    // 当前同步任务消费既有 dirty；同步期间的新文件事件仍会再次置位。
+    index.dirty.store(false, Ordering::Release);
     index.state.store(INDEX_BUILDING, Ordering::Release);
+    if semantic_settings.enabled {
+        let next_state = if index.semantic_state.load(Ordering::Acquire) == SEMANTIC_READY {
+            SEMANTIC_SYNCING
+        } else {
+            SEMANTIC_BUILDING
+        };
+        index.semantic_state.store(next_state, Ordering::Release);
+    }
     let task_index = Arc::clone(&index);
-    let result = tokio::task::spawn_blocking(move || sync_index(&task_index, &exclude_paths))
-        .await
-        .map_err(|error| anyhow!("本地索引同步任务异常: {}", error))
-        .and_then(|value| value);
+    let result = tokio::task::spawn_blocking(move || {
+        sync_all(&task_index, &exclude_paths, &semantic_settings)
+    })
+    .await
+    .map_err(|error| anyhow!("本地索引同步任务异常: {}", error))
+    .and_then(|value| value);
     match result {
         Ok(counts) => {
             finish_sync(&index, Ok(counts));
@@ -350,29 +600,111 @@ async fn sync_now(index: Arc<ProjectIndex>, exclude_paths: Vec<String>) -> Resul
     }
 }
 
-fn finish_sync(index: &ProjectIndex, result: Result<(u64, u64)>) {
+fn sync_all(
+    index: &ProjectIndex,
+    exclude_paths: &[String],
+    semantic_settings: &LocalSemanticSettings,
+) -> Result<SyncOutcome> {
+    let (files, chunks) = sync_index(index, exclude_paths)?;
+    let semantic = if !semantic_settings.enabled {
+        index
+            .semantic_state
+            .store(SEMANTIC_DISABLED, Ordering::Release);
+        SemanticSyncOutcome::Disabled
+    } else if !crate::mcp::embedding::assets_have_expected_sizes(&semantic_settings.model_dir) {
+        SemanticSyncOutcome::Missing("BGE 模型资产未就绪".to_string())
+    } else {
+        index
+            .semantic_pending_chunks
+            .store(chunks, Ordering::Release);
+        match semantic::sync_vectors(
+            &index.db_path,
+            &semantic_settings.model_dir,
+            |indexed, pending| {
+                index
+                    .semantic_indexed_chunks
+                    .store(indexed, Ordering::Release);
+                index
+                    .semantic_pending_chunks
+                    .store(pending, Ordering::Release);
+            },
+        ) {
+            Ok(stats) => SemanticSyncOutcome::Ready(stats),
+            Err(error) => {
+                let message = error.to_string();
+                if message.starts_with("missing:") {
+                    SemanticSyncOutcome::Missing(message)
+                } else {
+                    SemanticSyncOutcome::Error(message)
+                }
+            }
+        }
+    };
+    Ok(SyncOutcome {
+        files,
+        chunks,
+        semantic,
+    })
+}
+
+fn finish_sync(index: &ProjectIndex, result: Result<SyncOutcome>) {
     match result {
-        Ok((files, chunks)) => {
-            index.indexed_files.store(files, Ordering::Release);
-            index.indexed_chunks.store(chunks, Ordering::Release);
+        Ok(outcome) => {
+            index.indexed_files.store(outcome.files, Ordering::Release);
+            index
+                .indexed_chunks
+                .store(outcome.chunks, Ordering::Release);
             index.state.store(INDEX_READY, Ordering::Release);
             if let Ok(mut error) = index.last_error.lock() {
                 *error = None;
             }
+            match outcome.semantic {
+                SemanticSyncOutcome::Disabled => {
+                    index
+                        .semantic_state
+                        .store(SEMANTIC_DISABLED, Ordering::Release);
+                }
+                SemanticSyncOutcome::Ready(stats) => {
+                    index
+                        .semantic_indexed_chunks
+                        .store(stats.indexed_chunks, Ordering::Release);
+                    index
+                        .semantic_pending_chunks
+                        .store(stats.pending_chunks, Ordering::Release);
+                    index
+                        .semantic_state
+                        .store(SEMANTIC_READY, Ordering::Release);
+                    if let Ok(mut error) = index.semantic_last_error.lock() {
+                        *error = None;
+                    }
+                }
+                SemanticSyncOutcome::Missing(message) => {
+                    index
+                        .semantic_state
+                        .store(SEMANTIC_MISSING, Ordering::Release);
+                    if let Ok(mut error) = index.semantic_last_error.lock() {
+                        *error = Some(message);
+                    }
+                }
+                SemanticSyncOutcome::Error(message) => {
+                    index
+                        .semantic_state
+                        .store(SEMANTIC_ERROR, Ordering::Release);
+                    if let Ok(mut error) = index.semantic_last_error.lock() {
+                        *error = Some(message);
+                    }
+                }
+            }
             log::info!(
-                "[sou-local] 索引同步完成: project={}, files={}, chunks={}",
-                index.root.display(),
-                files,
-                chunks
+                "[sou-local] 索引同步完成: files={}, chunks={}, semantic_state={}",
+                outcome.files,
+                outcome.chunks,
+                index.semantic_state_name(true)
             );
         }
         Err(error) => {
             mark_index_error(index, &error.to_string());
-            log::warn!(
-                "[sou-local] 索引同步失败: project={}, error={}",
-                index.root.display(),
-                error
-            );
+            log::warn!("[sou-local] 索引同步失败: {}", error);
         }
     }
     index.sync_running.store(false, Ordering::Release);
@@ -419,6 +751,7 @@ fn open_database(path: &Path) -> Result<Connection> {
              tokenize='unicode61 remove_diacritics 2'
          );",
     )?;
+    semantic::ensure_schema(&connection)?;
     Ok(connection)
 }
 
@@ -439,6 +772,10 @@ fn sync_index(index: &ProjectIndex, exclude_paths: &[String]) -> Result<(u64, u6
             continue;
         }
 
+        transaction.execute(
+            "DELETE FROM chunk_vectors WHERE path = ?1",
+            params![relative],
+        )?;
         transaction.execute("DELETE FROM chunks WHERE path = ?1", params![relative])?;
         transaction.execute("DELETE FROM files WHERE path = ?1", params![relative])?;
         let Some(content) = read_text_file(&path, metadata.len())? else {
@@ -465,6 +802,7 @@ fn sync_index(index: &ProjectIndex, exclude_paths: &[String]) -> Result<(u64, u6
     }
 
     for stale in existing.keys() {
+        transaction.execute("DELETE FROM chunk_vectors WHERE path = ?1", params![stale])?;
         transaction.execute("DELETE FROM chunks WHERE path = ?1", params![stale])?;
         transaction.execute("DELETE FROM files WHERE path = ?1", params![stale])?;
     }
@@ -745,6 +1083,8 @@ fn score_hit(
         exact_match,
         path_matches,
         lexical_score,
+        semantic_score: None,
+        fusion_score: 0.0,
     }
 }
 
@@ -769,6 +1109,73 @@ fn rank_and_limit(mut hits: Vec<SearchHit>, max_results: usize) -> Result<Vec<Se
     Ok(hits)
 }
 
+fn fuse_hits(
+    lexical_hits: Vec<SearchHit>,
+    semantic_hits: Vec<semantic::SemanticHit>,
+    query: &str,
+    terms: &[String],
+    max_results: usize,
+) -> Vec<SearchHit> {
+    const RRF_K: f64 = 60.0;
+    const LEXICAL_WEIGHT: f64 = 0.65;
+    const SEMANTIC_WEIGHT: f64 = 0.35;
+
+    let semantic_only = lexical_hits.is_empty();
+    let mut merged: HashMap<(String, usize, usize), SearchHit> = HashMap::new();
+    for (rank, mut hit) in lexical_hits.into_iter().enumerate() {
+        hit.fusion_score = LEXICAL_WEIGHT / (RRF_K + rank as f64 + 1.0);
+        let key = (hit.relative_path.clone(), hit.start_line, hit.end_line);
+        merged.insert(key, hit);
+    }
+    for (rank, semantic_hit) in semantic_hits.into_iter().enumerate() {
+        if semantic_only && semantic_hit.score < semantic::SEMANTIC_ONLY_THRESHOLD {
+            continue;
+        }
+        let key = (
+            semantic_hit.relative_path.clone(),
+            semantic_hit.start_line,
+            semantic_hit.end_line,
+        );
+        let contribution = SEMANTIC_WEIGHT / (RRF_K + rank as f64 + 1.0);
+        let hit = merged.entry(key).or_insert_with(|| {
+            score_hit(
+                semantic_hit.relative_path.clone(),
+                semantic_hit.start_line,
+                semantic_hit.end_line,
+                semantic_hit.excerpt.clone(),
+                0.0,
+                query,
+                terms,
+            )
+        });
+        hit.semantic_score = Some(semantic_hit.score);
+        hit.fusion_score += contribution;
+    }
+
+    let mut hits = merged.into_values().collect::<Vec<_>>();
+    hits.sort_by(|left, right| {
+        right
+            .fusion_score
+            .total_cmp(&left.fusion_score)
+            .then_with(|| right.exact_match.cmp(&left.exact_match))
+            .then_with(|| right.coverage.cmp(&left.coverage))
+            .then_with(|| left.relative_path.cmp(&right.relative_path))
+            .then_with(|| left.start_line.cmp(&right.start_line))
+    });
+    hits.truncate(max_results.max(1));
+    hits
+}
+
+fn append_fallback(target: &mut Option<String>, reason: &str) {
+    match target {
+        Some(current) => {
+            current.push_str("；");
+            current.push_str(reason);
+        }
+        None => *target = Some(reason.to_string()),
+    }
+}
+
 fn format_hits(
     root: &Path,
     hits: &[SearchHit],
@@ -776,6 +1183,11 @@ fn format_hits(
     state: &str,
     duration_ms: u64,
     fallback_reason: Option<&str>,
+    semantic_state: &str,
+    semantic_indexed_chunks: u64,
+    semantic_pending_chunks: u64,
+    semantic_top_score: Option<f32>,
+    fusion: Option<&str>,
 ) -> String {
     let mut parts = vec![
         "The following code sections were retrieved:".to_string(),
@@ -796,11 +1208,20 @@ fn format_hits(
         parts.push("No relevant files found.".to_string());
     }
     parts.push(format!(
-        "[sou-local] engine={}, index_state={}, hits={}, duration_ms={}",
+        "[sou-local] engine={}, index_state={}, hits={}, duration_ms={}, semantic_state={}, semantic_indexed_chunks={}, semantic_pending_chunks={}{}{}",
         engine,
         state,
         hits.len(),
-        duration_ms
+        duration_ms,
+        semantic_state,
+        semantic_indexed_chunks,
+        semantic_pending_chunks,
+        semantic_top_score
+            .map(|score| format!(", semantic_top_score={:.4}", score))
+            .unwrap_or_default(),
+        fusion
+            .map(|value| format!(", fusion={}", value))
+            .unwrap_or_default()
     ));
     if let Some(reason) = fallback_reason {
         parts.push(format!("[sou-local fallback] {}", reason));
@@ -1174,6 +1595,75 @@ mod tests {
     }
 
     #[test]
+    fn weighted_rrf_promotes_chunks_recalled_by_both_rankers() {
+        let terms = vec!["workspace".to_string()];
+        let lexical = vec![
+            score_hit(
+                "src/lexical.rs".to_string(),
+                1,
+                10,
+                "fn workspace() {}".to_string(),
+                -2.0,
+                "workspace",
+                &terms,
+            ),
+            score_hit(
+                "src/shared.rs".to_string(),
+                1,
+                10,
+                "fn workspace_state() {}".to_string(),
+                -1.0,
+                "workspace",
+                &terms,
+            ),
+        ];
+        let semantic = vec![
+            semantic::SemanticHit {
+                relative_path: "src/shared.rs".to_string(),
+                start_line: 1,
+                end_line: 10,
+                excerpt: "fn workspace_state() {}".to_string(),
+                score: 0.8,
+            },
+            semantic::SemanticHit {
+                relative_path: "src/semantic.rs".to_string(),
+                start_line: 1,
+                end_line: 10,
+                excerpt: "fn current_scope() {}".to_string(),
+                score: 0.7,
+            },
+        ];
+
+        let fused = fuse_hits(lexical, semantic, "workspace", &terms, 3);
+        assert_eq!(fused[0].relative_path, "src/shared.rs");
+        assert_eq!(fused[0].semantic_score, Some(0.8));
+    }
+
+    #[test]
+    fn semantic_only_results_apply_code_specific_threshold() {
+        let semantic = vec![
+            semantic::SemanticHit {
+                relative_path: "src/strong.rs".to_string(),
+                start_line: 1,
+                end_line: 10,
+                excerpt: "fn related_behavior() {}".to_string(),
+                score: semantic::SEMANTIC_ONLY_THRESHOLD + 0.05,
+            },
+            semantic::SemanticHit {
+                relative_path: "src/weak.rs".to_string(),
+                start_line: 1,
+                end_line: 10,
+                excerpt: "fn unrelated_behavior() {}".to_string(),
+                score: semantic::SEMANTIC_ONLY_THRESHOLD - 0.05,
+            },
+        ];
+
+        let fused = fuse_hits(Vec::new(), semantic, "related behavior", &[], 5);
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].relative_path, "src/strong.rs");
+    }
+
+    #[test]
     fn fts5_index_supports_warm_multi_keyword_search_and_incremental_update() {
         let temp = tempdir().expect("临时项目应创建成功");
         let root = temp.path().join("project");
@@ -1218,9 +1708,16 @@ mod tests {
             root.clone(),
             temp.path().join("pending.sqlite3"),
         ));
-        sync_now(Arc::clone(&index), Vec::new())
-            .await
-            .expect("旧内容索引应建立成功");
+        sync_now(
+            Arc::clone(&index),
+            Vec::new(),
+            LocalSemanticSettings {
+                enabled: false,
+                model_dir: crate::mcp::embedding::default_model_dir(),
+            },
+        )
+        .await
+        .expect("旧内容索引应建立成功");
 
         fs::write(&source, "pub struct CurrentFileValue;\n").expect("当前源码应写入成功");
         index.dirty.store(true, Ordering::Release);
@@ -1232,6 +1729,10 @@ mod tests {
                 query: "CurrentFileValue".to_string(),
                 max_results: 5,
                 exclude_paths: Vec::new(),
+                semantic: LocalSemanticSettings {
+                    enabled: false,
+                    model_dir: crate::mcp::embedding::default_model_dir(),
+                },
             },
             root,
             Arc::clone(&index),

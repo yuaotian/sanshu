@@ -212,7 +212,10 @@ fn atomic_write(path: &PathBuf, data: &str) -> Result<()> {
         }
     }
     if let Err(rename_error) = fs::rename(&tmp_path, path) {
-        log::warn!("原子替换 ACE 索引任务清单失败，将尝试恢复备份: {}", rename_error);
+        log::warn!(
+            "原子替换 ACE 索引任务清单失败，将尝试恢复备份: {}",
+            rename_error
+        );
         if had_original && backup_path.exists() {
             let _ = fs::rename(&backup_path, path);
         }

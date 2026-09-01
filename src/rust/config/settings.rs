@@ -149,6 +149,8 @@ pub struct McpConfig {
     pub sou_include_backend_headers: Option<bool>, // 是否在结果中标注后端来源
     pub sou_include_failed_backend_errors: Option<bool>, // 部分成功时是否附加失败后端诊断
     pub sou_local_enabled: Option<bool>,     // 是否启用 SQLite FTS5 / rg 本地兜底
+    pub sou_local_semantic_enabled: Option<bool>, // 是否在 Local 后端启用 BGE 混合检索，默认关闭
+    pub local_embedding_model_dir: Option<String>, // UIUX 与 sou 共享的 BGE 模型目录
     // Fast Context 配置
     pub fast_context_command: Option<String>, // 兼容旧配置：Rust 原生 fast-context 已不再使用
     pub fast_context_script_path: Option<String>, // 兼容旧配置：Rust 原生 fast-context 已不再使用
@@ -401,6 +403,8 @@ pub fn default_mcp_config() -> McpConfig {
         sou_include_backend_headers: Some(true),
         sou_include_failed_backend_errors: Some(true),
         sou_local_enabled: Some(true),
+        sou_local_semantic_enabled: Some(false),
+        local_embedding_model_dir: None,
         // Fast Context 默认配置：协议与本地命令执行已迁移为 Rust 原生实现
         fast_context_command: Some("node".to_string()),
         fast_context_script_path: None,

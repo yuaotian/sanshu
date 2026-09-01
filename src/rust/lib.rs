@@ -4,9 +4,9 @@ pub mod constants;
 pub mod mcp;
 pub mod network;
 pub mod telegram;
-pub mod wechat;
 pub mod ui;
 pub mod utils;
+pub mod wechat;
 
 // 避免重名导出，使用限定导出
 pub use config::*;

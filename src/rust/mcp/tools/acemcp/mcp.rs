@@ -339,7 +339,11 @@ impl AcemcpTool {
                 .await?;
                 launched.push((nested.relative_path.clone(), format!("{:?}", state)));
             }
-            Ok(format!("已提交 {} 个子项目后台索引任务: {:?}", launched.len(), launched))
+            Ok(format!(
+                "已提交 {} 个子项目后台索引任务: {:?}",
+                launched.len(),
+                launched
+            ))
         } else {
             // 策略B: 无嵌套子项目或开关关闭，直接提交父项目后台任务。
             let state = start_background_index_with_mode(
@@ -783,8 +787,8 @@ fn record_project_scope_risk(project_root: &str, risk: ProjectScopeRisk) -> anyh
 
 pub(crate) fn clear_project_scope_risk(project_root: &str) -> anyhow::Result<()> {
     let normalized_root = super::scope_guard::normalize_root(project_root);
-    let blocked_job = jobs::get_job(&normalized_root)
-        .is_some_and(|job| job.status == JOB_SCOPE_BLOCKED);
+    let blocked_job =
+        jobs::get_job(&normalized_root).is_some_and(|job| job.status == JOB_SCOPE_BLOCKED);
     if get_project_status(&normalized_root).scope_risk.is_none() && !blocked_job {
         return Ok(());
     }
@@ -863,14 +867,8 @@ async fn start_background_index(
     project_root: &str,
     force: bool,
 ) -> anyhow::Result<BackgroundIndexLaunchState> {
-    start_background_index_with_mode(
-        config,
-        project_root,
-        force,
-        IndexJobMode::Incremental,
-        None,
-    )
-    .await
+    start_background_index_with_mode(config, project_root, force, IndexJobMode::Incremental, None)
+        .await
 }
 
 async fn start_background_index_with_mode(
@@ -938,14 +936,20 @@ fn launch_index_worker(
     let lease = match jobs::try_acquire_project_lease(&normalized_root) {
         Ok(Some(lease)) => lease,
         Ok(None) => {
-            auto_index_inflight().lock().unwrap().remove(&normalized_root);
+            auto_index_inflight()
+                .lock()
+                .unwrap()
+                .remove(&normalized_root);
             if force {
                 request_followup_index(&normalized_root, mode);
             }
             return Ok(BackgroundIndexLaunchState::AlreadyRunning);
         }
         Err(error) => {
-            auto_index_inflight().lock().unwrap().remove(&normalized_root);
+            auto_index_inflight()
+                .lock()
+                .unwrap()
+                .remove(&normalized_root);
             return Err(error);
         }
     };
@@ -959,11 +963,17 @@ fn launch_index_worker(
                 && job.config_fingerprint == scope_hash
                 && (job.mode == mode.as_str()
                     || (job.mode == IndexJobMode::Full.as_str()
-                        && mode == IndexJobMode::Incremental)) => job,
+                        && mode == IndexJobMode::Incremental)) =>
+        {
+            job
+        }
         _ => match jobs::create_job(&normalized_root, mode.as_str(), &scope_hash, &scope_hash) {
             Ok(job) => job,
             Err(error) => {
-                auto_index_inflight().lock().unwrap().remove(&normalized_root);
+                auto_index_inflight()
+                    .lock()
+                    .unwrap()
+                    .remove(&normalized_root);
                 return Err(error);
             }
         },
@@ -996,62 +1006,57 @@ fn launch_index_worker(
             project_root_clone,
             job_id
         );
-        let task_succeeded = match update_index_with_mode(
-            &config_clone,
-            &project_root_clone,
-            mode,
-        )
-        .await
-        {
-            Ok(_) => {
-                log_important!(info, "后台索引成功: project_root={}", project_root_clone);
-                true
-            }
-            Err(error) => {
-                let error_message = error.to_string();
-                log_important!(
-                    info,
-                    "后台索引失败: project_root={}, error={}",
-                    project_root_clone,
-                    error_message
-                );
-                // 认证失败已经由上传循环记录了失败签名，不能在这里覆盖它。
-                if !is_ace_auth_failure_error(&error_message) {
-                    let should_record = jobs::get_job(&normalized_root_clone)
-                        .map(|job| job.status != JOB_PAUSED && job.status != JOB_COMPLETED)
-                        .unwrap_or(true);
-                    if should_record {
-                        let _ = jobs::update_job(
-                            &normalized_root_clone,
-                            "failed",
-                            Some(error_message.clone()),
-                            |job| {
-                                if job.status != JOB_COMPLETED {
-                                    // 网络/进程级失败保留为 paused，启动后可继续重试剩余批次。
-                                    job.status = JOB_PAUSED.to_string();
-                                    job.last_error = Some(error_message.clone());
-                                }
-                            },
-                        );
-                    }
-                    let _ = update_project_status(&project_root_clone, |status| {
-                        if status.status == IndexStatus::Indexing {
-                            let resumable = jobs::get_job(&normalized_root_clone)
-                                .map(|job| job.status == JOB_PAUSED)
-                                .unwrap_or(false);
-                            status.status = if resumable {
-                                IndexStatus::Paused
-                            } else {
-                                IndexStatus::Failed
-                            };
-                            status.last_error = Some(error_message.clone());
-                            status.last_failure_time = Some(chrono::Utc::now());
-                        }
-                    });
+        let task_succeeded =
+            match update_index_with_mode(&config_clone, &project_root_clone, mode).await {
+                Ok(_) => {
+                    log_important!(info, "后台索引成功: project_root={}", project_root_clone);
+                    true
                 }
-                false
-            }
-        };
+                Err(error) => {
+                    let error_message = error.to_string();
+                    log_important!(
+                        info,
+                        "后台索引失败: project_root={}, error={}",
+                        project_root_clone,
+                        error_message
+                    );
+                    // 认证失败已经由上传循环记录了失败签名，不能在这里覆盖它。
+                    if !is_ace_auth_failure_error(&error_message) {
+                        let should_record = jobs::get_job(&normalized_root_clone)
+                            .map(|job| job.status != JOB_PAUSED && job.status != JOB_COMPLETED)
+                            .unwrap_or(true);
+                        if should_record {
+                            let _ = jobs::update_job(
+                                &normalized_root_clone,
+                                "failed",
+                                Some(error_message.clone()),
+                                |job| {
+                                    if job.status != JOB_COMPLETED {
+                                        // 网络/进程级失败保留为 paused，启动后可继续重试剩余批次。
+                                        job.status = JOB_PAUSED.to_string();
+                                        job.last_error = Some(error_message.clone());
+                                    }
+                                },
+                            );
+                        }
+                        let _ = update_project_status(&project_root_clone, |status| {
+                            if status.status == IndexStatus::Indexing {
+                                let resumable = jobs::get_job(&normalized_root_clone)
+                                    .map(|job| job.status == JOB_PAUSED)
+                                    .unwrap_or(false);
+                                status.status = if resumable {
+                                    IndexStatus::Paused
+                                } else {
+                                    IndexStatus::Failed
+                                };
+                                status.last_error = Some(error_message.clone());
+                                status.last_failure_time = Some(chrono::Utc::now());
+                            }
+                        });
+                    }
+                    false
+                }
+            };
 
         {
             let mut inflight = auto_index_inflight().lock().unwrap();
@@ -1137,7 +1142,10 @@ pub async fn resume_index_jobs() -> anyhow::Result<()> {
     }
     let config = AcemcpTool::get_acemcp_config().await?;
     let Some(current_scope_hash) = build_index_scope_hash(&config) else {
-        log_important!(warn, "恢复 ACE 索引任务暂缓：当前配置缺少 base_url 或 token");
+        log_important!(
+            warn,
+            "恢复 ACE 索引任务暂缓：当前配置缺少 base_url 或 token"
+        );
         return Ok(());
     };
     for job in pending_jobs {
@@ -1439,7 +1447,10 @@ fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         }
     }
     if let Err(rename_error) = fs::rename(&tmp_path, path) {
-        log::warn!("原子替换 ACE 索引状态失败，将尝试恢复备份: {}", rename_error);
+        log::warn!(
+            "原子替换 ACE 索引状态失败，将尝试恢复备份: {}",
+            rename_error
+        );
         if had_original && backup_path.exists() {
             let _ = fs::rename(&backup_path, path);
         }
@@ -1731,11 +1742,7 @@ pub(crate) fn build_exclude_globset(exclude_patterns: &[String]) -> Result<GlobS
 /// 检查路径是否应该被排除
 /// 使用 globset 进行完整的 fnmatch 模式匹配（与 Python 版本保持一致）
 /// Python 版本使用 fnmatch.fnmatch 检查路径的各个部分和完整路径
-pub(crate) fn should_exclude(
-    path: &Path,
-    root: &Path,
-    exclude_globset: Option<&GlobSet>,
-) -> bool {
+pub(crate) fn should_exclude(path: &Path, root: &Path, exclude_globset: Option<&GlobSet>) -> bool {
     if exclude_globset.is_none() {
         return false;
     }
@@ -2066,12 +2073,7 @@ fn ensure_index_job(
             return Ok(job);
         }
     }
-    jobs::create_job(
-        normalized_root,
-        mode.as_str(),
-        scope_hash,
-        scope_hash,
-    )
+    jobs::create_job(normalized_root, mode.as_str(), scope_hash, scope_hash)
 }
 
 fn persist_confirmed_blob_names(
@@ -2105,7 +2107,11 @@ fn mark_index_job_error(
 ) {
     let error_message = message.to_string();
     let resumable_failure = failed_batch.is_some() && auth_scope_hash.is_none();
-    let event_type = if resumable_failure { "paused" } else { "failed" };
+    let event_type = if resumable_failure {
+        "paused"
+    } else {
+        "failed"
+    };
     let _ = jobs::update_job(
         normalized_root,
         event_type,
@@ -2216,26 +2222,12 @@ async fn update_index_with_mode(
         Ok(blobs) if !blobs.is_empty() => blobs,
         Ok(_) => {
             let message = "未在项目中找到可索引的文本文件";
-            mark_index_job_error(
-                project_root_path,
-                &normalized_root,
-                message,
-                None,
-                0,
-                None,
-            );
+            mark_index_job_error(project_root_path, &normalized_root, message, None, 0, None);
             anyhow::bail!(message);
         }
         Err(error) => {
             let message = format!("收集索引文件失败: {}", error);
-            mark_index_job_error(
-                project_root_path,
-                &normalized_root,
-                &message,
-                None,
-                0,
-                None,
-            );
+            mark_index_job_error(project_root_path, &normalized_root, &message, None, 0, None);
             return Err(error);
         }
     };
@@ -2534,8 +2526,7 @@ async fn update_index_with_mode(
     if final_job.completed_blobs != total_blobs {
         let message = format!(
             "索引检查点核对失败: 已确认 {} / 总计 {}",
-            final_job.completed_blobs,
-            total_blobs
+            final_job.completed_blobs, total_blobs
         );
         mark_index_job_error(
             project_root_path,
@@ -2555,14 +2546,7 @@ async fn update_index_with_mode(
     )?;
     if blob_names.is_empty() {
         let message = "索引后未找到 blobs";
-        mark_index_job_error(
-            project_root_path,
-            &normalized_root,
-            message,
-            None,
-            0,
-            None,
-        );
+        mark_index_job_error(project_root_path, &normalized_root, message, None, 0, None);
         anyhow::bail!(message);
     }
 

@@ -16,6 +16,7 @@ use crate::mcp::tools::AcemcpTool;
 
 pub(crate) mod fast_context;
 pub(crate) mod local;
+pub(crate) mod semantic;
 
 const BACKEND_ACE: &str = "ace";
 const BACKEND_FAST_CONTEXT: &str = "fast_context";
@@ -54,6 +55,7 @@ struct SouRuntimeConfig {
     include_backend_headers: bool,
     include_failed_backend_errors: bool,
     local_enabled: bool,
+    local_semantic: local::LocalSemanticSettings,
     fast_context: FastContextConfig,
 }
 
@@ -77,6 +79,12 @@ struct BackendRunResult {
     engine: Option<String>,
     index_state: Option<String>,
     fallback_reason: Option<String>,
+    semantic_state: Option<String>,
+    semantic_model: Option<String>,
+    semantic_indexed_chunks: Option<u64>,
+    semantic_pending_chunks: Option<u64>,
+    semantic_top_score: Option<f32>,
+    fusion: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -159,10 +167,9 @@ impl SouTool {
 
         log_important!(
             info,
-            "[sou] 搜索请求: backend={}, project_root_path={}, query={}",
+            "[sou] 搜索请求: backend={}, query_chars={}",
             strategy,
-            request.project_root_path,
-            request.query
+            request.query.chars().count()
         );
 
         match strategy.as_str() {
@@ -187,7 +194,7 @@ impl SouTool {
                 BACKEND_FAST_CONTEXT,
             ),
             BACKEND_LOCAL if config.local_enabled => result_to_call_tool(
-                run_local(&request, &config.fast_context)
+                run_local(&request, &config)
                     .await
                     .map_err(|e| BackendRunError {
                         backend: BACKEND_LOCAL.to_string(),
@@ -218,7 +225,7 @@ impl SouTool {
                 .await?,
             ],
             BACKEND_LOCAL if config.local_enabled => {
-                vec![run_local(&request, &config.fast_context).await?]
+                vec![run_local(&request, &config).await?]
             }
             BACKEND_LOCAL => return Err("Local搜索失败: 本地兜底已禁用".to_string()),
             BACKEND_AUTO => vec![run_auto_result(&request, &config).await.map_err(|errors| {
@@ -254,6 +261,13 @@ impl SouRuntimeConfig {
             load_standalone_config().map_err(|e| anyhow!("读取配置文件失败: {}", e))?;
         let mcp = app_config.mcp_config;
 
+        let local_semantic = local::LocalSemanticSettings {
+            enabled: mcp.sou_local_semantic_enabled.unwrap_or(false),
+            model_dir: crate::mcp::embedding::effective_model_dir(
+                mcp.local_embedding_model_dir.as_deref(),
+                mcp.uiux_model_dir.as_deref(),
+            ),
+        };
         Ok(Self {
             default_backend: normalize_backend(
                 mcp.sou_default_backend.as_deref().unwrap_or(BACKEND_AUTO),
@@ -263,6 +277,7 @@ impl SouRuntimeConfig {
             include_backend_headers: mcp.sou_include_backend_headers.unwrap_or(true),
             include_failed_backend_errors: mcp.sou_include_failed_backend_errors.unwrap_or(true),
             local_enabled: mcp.sou_local_enabled.unwrap_or(true),
+            local_semantic,
             fast_context: FastContextConfig {
                 api_key: mcp.fast_context_api_key.and_then(|s| {
                     if s.trim().is_empty() {
@@ -433,7 +448,7 @@ async fn run_auto_result(
                     )),
                 }
             }
-            BACKEND_LOCAL if config.local_enabled => run_local(request, &config.fast_context).await,
+            BACKEND_LOCAL if config.local_enabled => run_local(request, config).await,
             BACKEND_LOCAL => Err("本地兜底已禁用".to_string()),
             _ => continue,
         };
@@ -596,14 +611,21 @@ async fn run_ace(request: &SouRequest) -> Result<BackendRunResult, String> {
         engine: None,
         index_state: None,
         fallback_reason: None,
+        semantic_state: None,
+        semantic_model: None,
+        semantic_indexed_chunks: None,
+        semantic_pending_chunks: None,
+        semantic_top_score: None,
+        fusion: None,
         text,
     })
 }
 
 async fn run_local(
     request: &SouRequest,
-    defaults: &FastContextConfig,
+    config: &SouRuntimeConfig,
 ) -> Result<BackendRunResult, String> {
+    let defaults = &config.fast_context;
     let output = local::search(local::LocalSearchOptions {
         project_root: PathBuf::from(&request.project_root_path),
         query: request.query.clone(),
@@ -612,6 +634,7 @@ async fn run_local(
             .exclude_paths
             .clone()
             .unwrap_or_else(|| defaults.exclude_paths.clone()),
+        semantic: config.local_semantic.clone(),
     })
     .await
     .map_err(|error| error.to_string())?;
@@ -623,6 +646,12 @@ async fn run_local(
         engine: Some(output.engine),
         index_state: Some(output.index_state),
         fallback_reason: output.fallback_reason,
+        semantic_state: Some(output.semantic_state),
+        semantic_model: output.semantic_model,
+        semantic_indexed_chunks: Some(output.semantic_indexed_chunks),
+        semantic_pending_chunks: Some(output.semantic_pending_chunks),
+        semantic_top_score: output.semantic_top_score,
+        fusion: output.fusion,
     })
 }
 
@@ -762,6 +791,12 @@ async fn run_fast_context_once(
         engine: None,
         index_state: None,
         fallback_reason: None,
+        semantic_state: None,
+        semantic_model: None,
+        semantic_indexed_chunks: None,
+        semantic_pending_chunks: None,
+        semantic_top_score: None,
+        fusion: None,
         text,
     })
 }
@@ -1129,7 +1164,7 @@ fn backend_success_result(
     let degraded = result.fallback_reason.is_some();
     let mut text = result.text.clone();
     text.push_str(&format!(
-        "\n[sou metadata] requested_backend={}, actual_backend={}, degraded={}, hit_count={}, duration_ms={}{}{}",
+        "\n[sou metadata] requested_backend={}, actual_backend={}, degraded={}, hit_count={}, duration_ms={}{}{}{}{}{}{}{}{}",
         requested_backend,
         result.backend,
         degraded,
@@ -1144,6 +1179,33 @@ fn backend_success_result(
             .index_state
             .as_deref()
             .map(|value| format!(", index_state={}", value))
+            .unwrap_or_default(),
+        result
+            .semantic_state
+            .as_deref()
+            .map(|value| format!(", semantic_state={}", value))
+            .unwrap_or_default(),
+        result
+            .semantic_model
+            .as_deref()
+            .map(|value| format!(", semantic_model={}", value))
+            .unwrap_or_default(),
+        result
+            .semantic_indexed_chunks
+            .map(|value| format!(", semantic_indexed_chunks={}", value))
+            .unwrap_or_default(),
+        result
+            .semantic_pending_chunks
+            .map(|value| format!(", semantic_pending_chunks={}", value))
+            .unwrap_or_default(),
+        result
+            .semantic_top_score
+            .map(|value| format!(", semantic_top_score={:.4}", value))
+            .unwrap_or_default(),
+        result
+            .fusion
+            .as_deref()
+            .map(|value| format!(", fusion={}", value))
             .unwrap_or_default()
     ));
     if include_fallback_text {
@@ -1162,6 +1224,12 @@ fn backend_success_result(
             "engine": result.engine,
             "index_state": result.index_state,
             "fallback_reason": result.fallback_reason,
+            "semantic_state": result.semantic_state,
+            "semantic_model": result.semantic_model,
+            "semantic_indexed_chunks": result.semantic_indexed_chunks,
+            "semantic_pending_chunks": result.semantic_pending_chunks,
+            "semantic_top_score": result.semantic_top_score,
+            "fusion": result.fusion,
         }),
     )
 }
@@ -1417,6 +1485,10 @@ reqwest = { version = "0.11", features = ["socks"] }
                     .exclude_paths
                     .clone()
                     .unwrap_or_else(|| defaults.exclude_paths.clone()),
+                semantic: local::LocalSemanticSettings {
+                    enabled: false,
+                    model_dir: crate::mcp::embedding::default_model_dir(),
+                },
             },
             temp.path().join("route-index.sqlite3"),
         )
@@ -1430,6 +1502,12 @@ reqwest = { version = "0.11", features = ["socks"] }
             engine: Some(output.engine),
             index_state: Some(output.index_state),
             fallback_reason: output.fallback_reason,
+            semantic_state: Some(output.semantic_state),
+            semantic_model: output.semantic_model,
+            semantic_indexed_chunks: Some(output.semantic_indexed_chunks),
+            semantic_pending_chunks: Some(output.semantic_pending_chunks),
+            semantic_top_score: output.semantic_top_score,
+            fusion: output.fusion,
         };
         assert!(result.hit_count >= 1);
         let call_result = backend_success_result(result, BACKEND_LOCAL, true);
@@ -1438,6 +1516,8 @@ reqwest = { version = "0.11", features = ["socks"] }
             .expect("Local 路由应返回结构化元数据");
         assert_eq!(metadata["actual_backend"], BACKEND_LOCAL);
         assert!(metadata["hit_count"].as_u64().unwrap_or_default() >= 1);
+        assert_eq!(metadata["semantic_state"], "disabled");
+        assert_eq!(metadata["degraded"], false);
         assert_eq!(call_result.is_error, Some(false));
     }
 }
