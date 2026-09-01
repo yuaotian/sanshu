@@ -134,8 +134,14 @@ pub struct SaveAcemcpConfigArgs {
         alias = "sou_local_semantic_enabled"
     )]
     pub sou_local_semantic_enabled: Option<bool>,
+    #[serde(alias = "souLocalSemanticMode", alias = "sou_local_semantic_mode")]
+    pub sou_local_semantic_mode: Option<String>,
     #[serde(alias = "localEmbeddingModelDir", alias = "local_embedding_model_dir")]
     pub local_embedding_model_dir: Option<String>,
+    #[serde(alias = "souRerankerModelDir", alias = "sou_reranker_model_dir")]
+    pub sou_reranker_model_dir: Option<String>,
+    #[serde(alias = "souLocalIndexDir", alias = "sou_local_index_dir")]
+    pub sou_local_index_dir: Option<String>,
     #[serde(alias = "uiuxKnowledgeBackend", alias = "uiux_knowledge_backend")]
     pub uiux_knowledge_backend: Option<String>,
     #[serde(alias = "fastContextCommand", alias = "fast_context_command")]
@@ -327,12 +333,36 @@ pub async fn save_acemcp_config(
         if let Some(v) = args.sou_local_enabled {
             config.mcp_config.sou_local_enabled = Some(v);
         }
-        if let Some(v) = args.sou_local_semantic_enabled {
-            config.mcp_config.sou_local_semantic_enabled = Some(v);
+        if let Some(value) = args.sou_local_semantic_mode.as_deref() {
+            let normalized = value.trim().to_ascii_lowercase();
+            if !matches!(normalized.as_str(), "off" | "balanced" | "accurate") {
+                return Err(format!("未知的 Local 语义检索模式: {}", value));
+            }
+            config.mcp_config.sou_local_semantic_enabled = Some(normalized != "off");
+            config.mcp_config.sou_local_semantic_mode = Some(normalized);
+        } else if let Some(enabled) = args.sou_local_semantic_enabled {
+            // 中文说明：旧客户端只传布尔值时同步生成新模式，避免已有用户的开关失效。
+            config.mcp_config.sou_local_semantic_enabled = Some(enabled);
+            config.mcp_config.sou_local_semantic_mode =
+                Some(if enabled { "balanced" } else { "off" }.to_string());
         }
         if args.local_embedding_model_dir.is_some() {
             config.mcp_config.local_embedding_model_dir = args
                 .local_embedding_model_dir
+                .clone()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+        }
+        if args.sou_reranker_model_dir.is_some() {
+            config.mcp_config.sou_reranker_model_dir = args
+                .sou_reranker_model_dir
+                .clone()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+        }
+        if args.sou_local_index_dir.is_some() {
+            config.mcp_config.sou_local_index_dir = args
+                .sou_local_index_dir
                 .clone()
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
@@ -1196,8 +1226,13 @@ pub struct AcemcpConfigResponse {
     pub sou_include_failed_backend_errors: bool,
     pub sou_local_enabled: bool,
     pub sou_local_semantic_enabled: bool,
+    pub sou_local_semantic_mode: String,
     pub local_embedding_model_dir: Option<String>,
     pub effective_local_embedding_model_dir: String,
+    pub sou_reranker_model_dir: Option<String>,
+    pub effective_sou_reranker_model_dir: String,
+    pub sou_local_index_dir: Option<String>,
+    pub effective_sou_local_index_dir: String,
     pub uiux_knowledge_backend: String,
     pub fast_context_command: String,
     pub fast_context_script_path: Option<String>,
@@ -1216,6 +1251,10 @@ pub async fn get_acemcp_config(state: State<'_, AppState>) -> Result<AcemcpConfi
         .config
         .lock()
         .map_err(|e| format!("获取配置失败: {}", e))?;
+    let sou_local_semantic_mode = crate::config::effective_sou_semantic_mode(
+        config.mcp_config.sou_local_semantic_mode.as_deref(),
+        config.mcp_config.sou_local_semantic_enabled,
+    );
     Ok(AcemcpConfigResponse {
         base_url: config.mcp_config.acemcp_base_url.clone(),
         token: config.mcp_config.acemcp_token.clone(),
@@ -1354,14 +1393,24 @@ pub async fn get_acemcp_config(state: State<'_, AppState>) -> Result<AcemcpConfi
             .sou_include_failed_backend_errors
             .unwrap_or(true),
         sou_local_enabled: config.mcp_config.sou_local_enabled.unwrap_or(true),
-        sou_local_semantic_enabled: config
-            .mcp_config
-            .sou_local_semantic_enabled
-            .unwrap_or(false),
+        sou_local_semantic_enabled: sou_local_semantic_mode != "off",
+        sou_local_semantic_mode: sou_local_semantic_mode.to_string(),
         local_embedding_model_dir: config.mcp_config.local_embedding_model_dir.clone(),
         effective_local_embedding_model_dir: crate::mcp::embedding::effective_model_dir(
             config.mcp_config.local_embedding_model_dir.as_deref(),
             config.mcp_config.uiux_model_dir.as_deref(),
+        )
+        .to_string_lossy()
+        .to_string(),
+        sou_reranker_model_dir: config.mcp_config.sou_reranker_model_dir.clone(),
+        effective_sou_reranker_model_dir: crate::config::effective_sou_reranker_model_dir(
+            config.mcp_config.sou_reranker_model_dir.as_deref(),
+        )
+        .to_string_lossy()
+        .to_string(),
+        sou_local_index_dir: config.mcp_config.sou_local_index_dir.clone(),
+        effective_sou_local_index_dir: crate::config::effective_sou_local_index_dir(
+            config.mcp_config.sou_local_index_dir.as_deref(),
         )
         .to_string_lossy()
         .to_string(),
@@ -1438,6 +1487,16 @@ pub struct DebugSearchResult {
     pub semantic_pending_chunks: Option<u64>,
     /// 本次语义最高相似度
     pub semantic_top_score: Option<f32>,
+    /// 本次 Local 语义模式
+    pub semantic_mode: Option<String>,
+    /// reranker 运行状态
+    pub reranker_state: Option<String>,
+    /// 固定 reranker 模型标识
+    pub reranker_model: Option<String>,
+    /// 本次 reranker 推理耗时
+    pub reranker_duration_ms: Option<u64>,
+    /// 本次 reranker 最高分
+    pub reranker_top_score: Option<f32>,
     /// 混合排序算法标识
     pub fusion: Option<String>,
 }
@@ -1526,6 +1585,25 @@ pub async fn debug_acemcp_search(
                 .and_then(|value| value.get("semantic_top_score"))
                 .and_then(serde_json::Value::as_f64)
                 .map(|value| value as f32);
+            let semantic_mode = metadata
+                .and_then(|value| value.get("semantic_mode"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let reranker_state = metadata
+                .and_then(|value| value.get("reranker_state"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let reranker_model = metadata
+                .and_then(|value| value.get("reranker_model"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let reranker_duration_ms = metadata
+                .and_then(|value| value.get("reranker_duration_ms"))
+                .and_then(serde_json::Value::as_u64);
+            let reranker_top_score = metadata
+                .and_then(|value| value.get("reranker_top_score"))
+                .and_then(serde_json::Value::as_f64)
+                .map(|value| value as f32);
             let fusion = metadata
                 .and_then(|value| value.get("fusion"))
                 .and_then(serde_json::Value::as_str)
@@ -1565,6 +1643,11 @@ pub async fn debug_acemcp_search(
                 semantic_indexed_chunks,
                 semantic_pending_chunks,
                 semantic_top_score,
+                semantic_mode,
+                reranker_state,
+                reranker_model,
+                reranker_duration_ms,
+                reranker_top_score,
                 fusion,
             })
         }
@@ -1592,6 +1675,11 @@ pub async fn debug_acemcp_search(
                 semantic_indexed_chunks: None,
                 semantic_pending_chunks: None,
                 semantic_top_score: None,
+                semantic_mode: None,
+                reranker_state: None,
+                reranker_model: None,
+                reranker_duration_ms: None,
+                reranker_top_score: None,
                 fusion: None,
             })
         }
@@ -1603,23 +1691,33 @@ pub fn get_sou_local_index_status(
     project_root_path: String,
     state: State<'_, AppState>,
 ) -> Result<crate::mcp::tools::sou::local::LocalIndexStatus, String> {
-    let semantic_settings = {
+    let (index_dir, semantic_settings) = {
         let config = state
             .config
             .lock()
             .map_err(|error| format!("获取配置失败: {}", error))?;
-        crate::mcp::tools::sou::local::LocalSemanticSettings {
-            enabled: config
-                .mcp_config
-                .sou_local_semantic_enabled
-                .unwrap_or(false),
+        let mode = crate::config::effective_sou_semantic_mode(
+            config.mcp_config.sou_local_semantic_mode.as_deref(),
+            config.mcp_config.sou_local_semantic_enabled,
+        );
+        let semantic = crate::mcp::tools::sou::local::LocalSemanticSettings {
+            mode: crate::mcp::tools::sou::local::LocalSemanticMode::from_effective(mode),
             model_dir: crate::mcp::embedding::effective_model_dir(
                 config.mcp_config.local_embedding_model_dir.as_deref(),
                 config.mcp_config.uiux_model_dir.as_deref(),
             ),
-        }
+            reranker_model_dir: crate::config::effective_sou_reranker_model_dir(
+                config.mcp_config.sou_reranker_model_dir.as_deref(),
+            ),
+        };
+        (
+            crate::config::effective_sou_local_index_dir(
+                config.mcp_config.sou_local_index_dir.as_deref(),
+            ),
+            semantic,
+        )
     };
-    crate::mcp::tools::sou::local::status(&project_root_path, semantic_settings)
+    crate::mcp::tools::sou::local::status(&project_root_path, index_dir, semantic_settings)
         .map_err(|error| error.to_string())
 }
 
@@ -1685,11 +1783,92 @@ pub fn get_local_embedding_model_status(
 }
 
 #[tauri::command]
+pub fn get_sou_reranker_model_status(
+    state: State<'_, AppState>,
+) -> Result<crate::mcp::tools::sou::reranker::RerankerModelStatus, String> {
+    let directory = {
+        let config = state
+            .config
+            .lock()
+            .map_err(|error| format!("获取配置失败: {}", error))?;
+        crate::config::effective_sou_reranker_model_dir(
+            config.mcp_config.sou_reranker_model_dir.as_deref(),
+        )
+    };
+    Ok(crate::mcp::tools::sou::reranker::current_status(&directory))
+}
+
+#[tauri::command]
+pub async fn select_sou_storage_directory(
+    app_handle: AppHandle,
+    default_path: Option<String>,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let mut builder = app_handle.dialog().file();
+    if let Some(path) = default_path {
+        let path = std::path::PathBuf::from(path);
+        if path.exists() {
+            builder = builder.set_directory(path);
+        }
+    }
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    builder.pick_folder(move |path| {
+        let _ = sender.send(path);
+    });
+    receiver
+        .await
+        .map(|path| path.map(|value| value.to_string()))
+        .map_err(|_| "Sou 目录选择通道已关闭".to_string())
+}
+
+#[tauri::command]
+pub fn start_sou_reranker_model_download(
+    state: State<'_, AppState>,
+) -> Result<crate::mcp::tools::sou::reranker::RerankerModelStatus, String> {
+    let (directory, proxy_config) = {
+        let config = state
+            .config
+            .lock()
+            .map_err(|error| format!("获取配置失败: {}", error))?;
+        (
+            crate::config::effective_sou_reranker_model_dir(
+                config.mcp_config.sou_reranker_model_dir.as_deref(),
+            ),
+            config.proxy_config.clone(),
+        )
+    };
+    crate::mcp::tools::sou::reranker::start_download(directory, proxy_config)
+}
+
+#[tauri::command]
+pub fn cancel_sou_reranker_model_download() -> Result<(), String> {
+    crate::mcp::tools::sou::reranker::cancel_download();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn remove_sou_reranker_model(
+    state: State<'_, AppState>,
+) -> Result<crate::mcp::tools::sou::reranker::RerankerModelStatus, String> {
+    let directory = {
+        let config = state
+            .config
+            .lock()
+            .map_err(|error| format!("获取配置失败: {}", error))?;
+        crate::config::effective_sou_reranker_model_dir(
+            config.mcp_config.sou_reranker_model_dir.as_deref(),
+        )
+    };
+    crate::mcp::tools::sou::reranker::remove_assets(&directory)
+}
+
+#[tauri::command]
 pub async fn rebuild_sou_local_index(
     project_root_path: String,
     state: State<'_, AppState>,
 ) -> Result<crate::mcp::tools::sou::local::LocalIndexStatus, String> {
-    let (excludes, semantic_settings) = {
+    let (excludes, index_dir, semantic_settings) = {
         let config = state
             .config
             .lock()
@@ -1707,21 +1886,33 @@ pub async fn rebuild_sou_local_index(
                     "target".to_string(),
                 ]
             });
+        let mode = crate::config::effective_sou_semantic_mode(
+            config.mcp_config.sou_local_semantic_mode.as_deref(),
+            config.mcp_config.sou_local_semantic_enabled,
+        );
         let semantic_settings = crate::mcp::tools::sou::local::LocalSemanticSettings {
-            enabled: config
-                .mcp_config
-                .sou_local_semantic_enabled
-                .unwrap_or(false),
+            mode: crate::mcp::tools::sou::local::LocalSemanticMode::from_effective(mode),
             model_dir: crate::mcp::embedding::effective_model_dir(
                 config.mcp_config.local_embedding_model_dir.as_deref(),
                 config.mcp_config.uiux_model_dir.as_deref(),
             ),
+            reranker_model_dir: crate::config::effective_sou_reranker_model_dir(
+                config.mcp_config.sou_reranker_model_dir.as_deref(),
+            ),
         };
-        (excludes, semantic_settings)
+        let index_dir = crate::config::effective_sou_local_index_dir(
+            config.mcp_config.sou_local_index_dir.as_deref(),
+        );
+        (excludes, index_dir, semantic_settings)
     };
-    crate::mcp::tools::sou::local::rebuild(&project_root_path, excludes, semantic_settings)
-        .await
-        .map_err(|error| error.to_string())
+    crate::mcp::tools::sou::local::rebuild(
+        &project_root_path,
+        excludes,
+        index_dir,
+        semantic_settings,
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 /// 执行acemcp工具

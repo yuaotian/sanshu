@@ -231,8 +231,8 @@ pub async fn download_verified_with_strategy_with_progress_and_cancel<F, C>(
     target_path: &Path,
     proxy_config: &ProxyConfig,
     expected_sha256: Option<&str>,
-    mut on_progress: F,
-    mut should_cancel: C,
+    on_progress: F,
+    should_cancel: C,
 ) -> Result<GitHubRouteSummary, String>
 where
     F: FnMut(GitHubDownloadProgress) + Send,
@@ -240,6 +240,57 @@ where
 {
     // 代理站内容只有在调用方提供 SHA-256 时才进入候选，避免把可执行更新交给无信任根的中转站。
     let allow_mirrors = expected_sha256.is_some();
+    download_verified_with_strategy_inner(
+        url,
+        target_path,
+        proxy_config,
+        expected_sha256,
+        on_progress,
+        should_cancel,
+        allow_mirrors,
+    )
+    .await
+}
+
+/// 非 GitHub 固定资产只使用官方地址与本地代理，不拼接 GitHub 内容镜像。
+pub async fn download_verified_with_direct_or_local_proxy_with_progress_and_cancel<F, C>(
+    url: &str,
+    target_path: &Path,
+    proxy_config: &ProxyConfig,
+    expected_sha256: Option<&str>,
+    on_progress: F,
+    should_cancel: C,
+) -> Result<GitHubRouteSummary, String>
+where
+    F: FnMut(GitHubDownloadProgress) + Send,
+    C: FnMut() -> bool + Send,
+{
+    download_verified_with_strategy_inner(
+        url,
+        target_path,
+        proxy_config,
+        expected_sha256,
+        on_progress,
+        should_cancel,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn download_verified_with_strategy_inner<F, C>(
+    url: &str,
+    target_path: &Path,
+    proxy_config: &ProxyConfig,
+    expected_sha256: Option<&str>,
+    mut on_progress: F,
+    mut should_cancel: C,
+    allow_mirrors: bool,
+) -> Result<GitHubRouteSummary, String>
+where
+    F: FnMut(GitHubDownloadProgress) + Send,
+    C: FnMut() -> bool + Send,
+{
     let candidates = build_candidates(
         url,
         GitHubResourceKind::ReleaseAsset,

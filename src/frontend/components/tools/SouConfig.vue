@@ -4,8 +4,8 @@
  * 包含：基础配置、高级配置、日志调试、索引管理
  */
 import { invoke } from '@tauri-apps/api/core'
-import { useMessage } from 'naive-ui'
-import { computed, onMounted, ref, watch } from 'vue'
+import { useDialog, useMessage } from 'naive-ui'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useAcemcpSync } from '../../composables/useAcemcpSync'
 import ConfigSection from '../common/ConfigSection.vue'
 import ProjectIndexManager from '../settings/ProjectIndexManager.vue'
@@ -17,6 +17,7 @@ const props = defineProps<{
 }>()
 
 const message = useMessage()
+const dialog = useDialog()
 
 // Acemcp 同步状态
 const {
@@ -50,8 +51,10 @@ const config = ref({
   sou_include_backend_headers: true,
   sou_include_failed_backend_errors: true,
   sou_local_enabled: true,
-  sou_local_semantic_enabled: false,
+  sou_local_semantic_mode: 'off' as 'off' | 'balanced' | 'accurate',
   local_embedding_model_dir: '',
+  sou_reranker_model_dir: '',
+  sou_local_index_dir: '',
   // fast-context 配置
   fast_context_api_key: '',
   fast_context_tree_depth: 3,
@@ -106,6 +109,11 @@ interface DebugSearchResult {
   semantic_indexed_chunks?: number
   semantic_pending_chunks?: number
   semantic_top_score?: number
+  semantic_mode?: 'off' | 'balanced' | 'accurate'
+  reranker_state?: string
+  reranker_model?: string
+  reranker_duration_ms?: number
+  reranker_top_score?: number
   fusion?: string
 }
 
@@ -134,6 +142,24 @@ interface EmbeddingModelStatus {
   error?: string
 }
 
+interface RerankerModelStatus {
+  phase: 'missing' | 'downloading' | 'verifying' | 'loading' | 'ready' | 'error'
+  model_name: string
+  revision: string
+  model_dir: string
+  downloaded_bytes: number
+  total_bytes: number
+  completed_files: number
+  total_files: number
+  progress_percent: number
+  runtime_ready: boolean
+  runtime_threads: number
+  batch_size: number
+  route?: string
+  message: string
+  error?: string
+}
+
 interface FastContextApiKeyDetectionResult {
   found: boolean
   source?: string
@@ -152,8 +178,12 @@ const localIndexStatus = ref<LocalIndexStatus | null>(null)
 const localIndexLoading = ref(false)
 const localIndexSyncing = ref(false)
 const effectiveEmbeddingModelDir = ref('')
+const effectiveRerankerModelDir = ref('')
+const effectiveLocalIndexDir = ref('')
 const embeddingModelStatus = ref<EmbeddingModelStatus | null>(null)
 const embeddingModelOperating = ref(false)
+const rerankerModelStatus = ref<RerankerModelStatus | null>(null)
+const rerankerModelOperating = ref(false)
 
 interface ExtensionGroup {
   id: string
@@ -375,6 +405,12 @@ const backendNameMap: Record<string, string> = {
   both: '双后端',
 }
 
+const semanticModeOptions = [
+  { label: '关闭', value: 'off' },
+  { label: '均衡', value: 'balanced' },
+  { label: '准确', value: 'accurate' },
+]
+
 const selectedExtensionSet = computed(() => new Set(config.value.text_extensions || []))
 const selectedPresetCount = computed(() =>
   allPresetExtensions.filter(ext => selectedExtensionSet.value.has(ext)).length,
@@ -418,6 +454,19 @@ const localEnabledInStrategy = computed(() => {
     || (backend === 'auto' && config.value.sou_auto_order.includes('local'))
 })
 
+const semanticEnabled = computed(() => config.value.sou_local_semantic_mode !== 'off')
+const accurateModeActive = computed(() => config.value.sou_local_semantic_mode === 'accurate')
+const semanticModeDescription = computed(() => {
+  switch (config.value.sou_local_semantic_mode) {
+    case 'balanced':
+      return '均衡：FTS5 与 BGE-small-zh-v1.5 通过加权 RRF 融合，适合日常代码检索。'
+    case 'accurate':
+      return '准确：词法 Top10 与语义 Top50 去重后交给 BGE-reranker-base 重排，并保护精确词法 Top1。'
+    default:
+      return '关闭：仅使用 FTS5 热索引；索引待同步时使用即时文本检索。'
+  }
+})
+
 const localIndexStateLabel = computed(() => {
   if (!localIndexStatus.value)
     return '未读取'
@@ -439,7 +488,7 @@ const localIndexTagType = computed<'default' | 'info' | 'success' | 'error'>(() 
 })
 
 const semanticStateLabel = computed(() => {
-  if (!config.value.sou_local_semantic_enabled)
+  if (!semanticEnabled.value)
     return '已关闭'
   return {
     disabled: '已关闭',
@@ -450,6 +499,32 @@ const semanticStateLabel = computed(() => {
     error: '异常',
   }[localIndexStatus.value?.semantic_state || 'missing']
 })
+
+const rerankerPhaseLabel = computed(() => ({
+  missing: '未下载',
+  downloading: '下载中',
+  verifying: '校验中',
+  loading: '加载中',
+  ready: '已就绪',
+  error: '异常',
+}[rerankerModelStatus.value?.phase || 'missing']))
+
+const rerankerTagType = computed<'default' | 'info' | 'success' | 'error'>(() => {
+  switch (rerankerModelStatus.value?.phase) {
+    case 'ready': return 'success'
+    case 'downloading':
+    case 'verifying':
+    case 'loading': return 'info'
+    case 'error': return 'error'
+    default: return 'default'
+  }
+})
+
+const rerankerTaskActive = computed(() =>
+  rerankerModelOperating.value
+  || rerankerModelStatus.value?.phase === 'downloading'
+  || rerankerModelStatus.value?.phase === 'verifying',
+)
 
 const semanticTagType = computed<'default' | 'info' | 'success' | 'error'>(() => {
   switch (localIndexStatus.value?.semantic_state) {
@@ -564,9 +639,11 @@ const debugStatusItems = computed<DebugStatusItem[]>(() => {
       key: 'semantic-index',
       label: '语义检索',
       value: semanticStateLabel.value,
-      detail: lastResult?.semantic_top_score != null
-        ? `最高分 ${lastResult.semantic_top_score.toFixed(4)} · ${lastResult.fusion || '词法结果'}`
-        : `${localIndexStatus.value?.semantic_indexed_chunks || 0} 向量分块`,
+      detail: lastResult?.reranker_top_score != null
+        ? `重排 ${lastResult.reranker_top_score.toFixed(4)} · ${lastResult.reranker_duration_ms ?? '-'}ms`
+        : lastResult?.semantic_top_score != null
+          ? `召回 ${lastResult.semantic_top_score.toFixed(4)} · ${lastResult.fusion || '词法结果'}`
+          : `${localIndexStatus.value?.semantic_indexed_chunks || 0} 向量分块`,
       icon: 'i-carbon-ai-status',
       tone: localIndexStatus.value?.semantic_state === 'ready'
         ? 'success'
@@ -604,6 +681,9 @@ async function loadAcemcpConfig() {
   loadingConfig.value = true
   try {
     const res = await invoke('get_acemcp_config') as any
+    const semanticMode = ['off', 'balanced', 'accurate'].includes(res.sou_local_semantic_mode)
+      ? res.sou_local_semantic_mode
+      : (res.sou_local_semantic_enabled ? 'balanced' : 'off')
     const souAutoOrder = Array.isArray(res.sou_auto_order)
       ? [...res.sou_auto_order]
       : ['ace', 'fast_context', 'local']
@@ -633,8 +713,10 @@ async function loadAcemcpConfig() {
       sou_include_backend_headers: res.sou_include_backend_headers ?? true,
       sou_include_failed_backend_errors: res.sou_include_failed_backend_errors ?? true,
       sou_local_enabled: res.sou_local_enabled ?? true,
-      sou_local_semantic_enabled: res.sou_local_semantic_enabled ?? false,
+      sou_local_semantic_mode: semanticMode,
       local_embedding_model_dir: res.local_embedding_model_dir || '',
+      sou_reranker_model_dir: res.sou_reranker_model_dir || '',
+      sou_local_index_dir: res.sou_local_index_dir || '',
       // fast-context 配置
       fast_context_api_key: res.fast_context_api_key || '',
       fast_context_tree_depth: res.fast_context_tree_depth || 3,
@@ -645,6 +727,8 @@ async function loadAcemcpConfig() {
       fast_context_exclude_paths: res.fast_context_exclude_paths || ['node_modules', '.git', 'dist', 'build', 'target'],
     }
     effectiveEmbeddingModelDir.value = res.effective_local_embedding_model_dir || ''
+    effectiveRerankerModelDir.value = res.effective_sou_reranker_model_dir || ''
+    effectiveLocalIndexDir.value = res.effective_sou_local_index_dir || ''
     if (!config.value.fast_context_api_key) {
       // 中文说明：配置页首次加载时依次尝试 Devin 与 Windsurf 登录库，失败时保留手动填写入口。
       await detectFastContextApiKey(false)
@@ -775,8 +859,11 @@ async function saveConfig(): Promise<boolean> {
         souIncludeBackendHeaders: config.value.sou_include_backend_headers,
         souIncludeFailedBackendErrors: config.value.sou_include_failed_backend_errors,
         souLocalEnabled: config.value.sou_local_enabled,
-        souLocalSemanticEnabled: config.value.sou_local_semantic_enabled,
+        souLocalSemanticEnabled: config.value.sou_local_semantic_mode !== 'off',
+        souLocalSemanticMode: config.value.sou_local_semantic_mode,
         localEmbeddingModelDir: config.value.local_embedding_model_dir,
+        souRerankerModelDir: config.value.sou_reranker_model_dir,
+        souLocalIndexDir: config.value.sou_local_index_dir,
         // fast-context 配置
         fastContextApiKey: config.value.fast_context_api_key,
         fastContextTreeDepth: config.value.fast_context_tree_depth,
@@ -874,6 +961,21 @@ async function syncLocalIndex() {
   }
 }
 
+type SouDirectoryField = 'local_embedding_model_dir' | 'sou_reranker_model_dir' | 'sou_local_index_dir'
+
+async function selectSouStorageDirectory(field: SouDirectoryField, effectivePath: string) {
+  try {
+    const selected = await invoke<string | null>('select_sou_storage_directory', {
+      defaultPath: config.value[field] || effectivePath,
+    })
+    if (selected)
+      config.value[field] = selected
+  }
+  catch (error) {
+    message.error(`选择目录失败: ${error}`)
+  }
+}
+
 async function refreshEmbeddingModelStatus(showFeedback = false) {
   try {
     embeddingModelStatus.value = await invoke<EmbeddingModelStatus>('get_local_embedding_model_status')
@@ -882,6 +984,85 @@ async function refreshEmbeddingModelStatus(showFeedback = false) {
     if (showFeedback)
       message.error(`读取共享模型状态失败: ${error}`)
   }
+}
+
+let rerankerStatusTimer: ReturnType<typeof setInterval> | null = null
+
+function stopRerankerStatusPolling() {
+  if (rerankerStatusTimer) {
+    clearInterval(rerankerStatusTimer)
+    rerankerStatusTimer = null
+  }
+}
+
+function startRerankerStatusPolling() {
+  if (rerankerStatusTimer)
+    return
+  rerankerStatusTimer = setInterval(() => refreshRerankerModelStatus(false), 1000)
+}
+
+async function refreshRerankerModelStatus(showFeedback = false) {
+  try {
+    rerankerModelStatus.value = await invoke<RerankerModelStatus>('get_sou_reranker_model_status')
+    if (rerankerModelStatus.value.phase === 'downloading' || rerankerModelStatus.value.phase === 'verifying')
+      startRerankerStatusPolling()
+    else
+      stopRerankerStatusPolling()
+  }
+  catch (error) {
+    if (showFeedback)
+      message.error(`读取准确模式模型状态失败: ${error}`)
+  }
+}
+
+async function startRerankerDownload() {
+  rerankerModelOperating.value = true
+  try {
+    if (!await saveConfig())
+      return
+    rerankerModelStatus.value = await invoke<RerankerModelStatus>('start_sou_reranker_model_download')
+    startRerankerStatusPolling()
+    message.success('BGE reranker 下载任务已启动')
+  }
+  catch (error) {
+    message.error(`启动准确模式模型下载失败: ${error}`)
+  }
+  finally {
+    rerankerModelOperating.value = false
+  }
+}
+
+async function cancelRerankerDownload() {
+  try {
+    await invoke('cancel_sou_reranker_model_download')
+    message.info('已提交取消下载请求，现有分片将保留用于续传')
+    startRerankerStatusPolling()
+  }
+  catch (error) {
+    message.error(`取消准确模式模型下载失败: ${error}`)
+  }
+}
+
+function confirmRemoveReranker() {
+  dialog.warning({
+    title: '删除准确模式模型',
+    content: '将删除 BGE-reranker-base 模型及下载分片；均衡模式使用的共享 BGE 模型和本地索引会保留。',
+    positiveText: '删除',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      rerankerModelOperating.value = true
+      try {
+        rerankerModelStatus.value = await invoke<RerankerModelStatus>('remove_sou_reranker_model')
+        message.success('准确模式模型已删除')
+      }
+      catch (error) {
+        message.error(`删除准确模式模型失败: ${error}`)
+      }
+      finally {
+        rerankerModelOperating.value = false
+      }
+    },
+  })
 }
 
 async function installEmbeddingModel() {
@@ -986,6 +1167,14 @@ function formatDebugTime(isoTime: string): string {
   catch {
     return isoTime
   }
+}
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0)
+    return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1)
+  return `${(value / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`
 }
 
 /** 复制调试结果到剪贴板 */
@@ -1132,6 +1321,13 @@ watch(debugProjectRoot, () => {
   localStatusTimer = setTimeout(() => refreshLocalIndexStatus(false), 350)
 })
 
+watch(() => config.value.sou_local_semantic_mode, (mode) => {
+  if (mode === 'accurate')
+    refreshRerankerModelStatus(false)
+  else
+    stopRerankerStatusPolling()
+})
+
 // 组件挂载
 onMounted(async () => {
   if (props.active) {
@@ -1140,8 +1336,15 @@ onMounted(async () => {
       fetchAutoIndexEnabled(),
       fetchWatchingProjects(),
       refreshEmbeddingModelStatus(false),
+      refreshRerankerModelStatus(false),
     ])
   }
+})
+
+onBeforeUnmount(() => {
+  stopRerankerStatusPolling()
+  if (localStatusTimer)
+    clearTimeout(localStatusTimer)
 })
 
 defineExpose({ saveConfig })
@@ -1347,20 +1550,30 @@ defineExpose({ saveConfig })
                       <n-switch v-model:value="config.sou_local_enabled" />
                     </n-form-item>
                   </n-grid-item>
-                  <n-grid-item>
-                    <n-form-item label="Local 语义混合">
-                      <n-switch
-                        v-model:value="config.sou_local_semantic_enabled"
-                        :disabled="!config.sou_local_enabled"
-                      />
-                    </n-form-item>
-                  </n-grid-item>
                 </n-grid>
               </n-space>
             </ConfigSection>
 
-            <ConfigSection title="Local 索引" description="SQLite FTS5 热索引；未就绪或异常时即时退回 rg / Rust 扫描">
+            <ConfigSection title="Local 索引" description="SQLite FTS5、BGE 向量召回与可选交叉编码器重排">
               <n-space vertical size="medium">
+                <n-form-item label="本地语义模式">
+                  <n-radio-group
+                    v-model:value="config.sou_local_semantic_mode"
+                    :disabled="!config.sou_local_enabled"
+                    size="small"
+                  >
+                    <n-radio-button
+                      v-for="option in semanticModeOptions"
+                      :key="option.value"
+                      :value="option.value"
+                      :label="option.label"
+                    />
+                  </n-radio-group>
+                </n-form-item>
+                <n-alert :type="accurateModeActive ? 'warning' : 'info'" :bordered="false">
+                  {{ semanticModeDescription }}
+                </n-alert>
+
                 <n-grid :x-gap="24" :y-gap="16" :cols="2">
                   <n-grid-item>
                     <n-form-item label="索引状态">
@@ -1379,22 +1592,20 @@ defineExpose({ saveConfig })
                       <n-input v-model:value="debugProjectRoot" placeholder="选择已索引项目或填写绝对路径" clearable />
                     </n-form-item>
                   </n-grid-item>
-                </n-grid>
-                <n-grid :x-gap="24" :y-gap="16" :cols="2">
                   <n-grid-item>
                     <n-form-item label="语义状态">
                       <n-space align="center">
                         <n-tag :type="semanticTagType" :bordered="false">
                           {{ semanticStateLabel }}
                         </n-tag>
-                        <span v-if="localIndexStatus && config.sou_local_semantic_enabled" class="form-feedback">
+                        <span v-if="localIndexStatus && semanticEnabled" class="form-feedback">
                           {{ localIndexStatus.semantic_indexed_chunks }} 已索引 / {{ localIndexStatus.semantic_pending_chunks }} 待处理
                         </span>
                       </n-space>
                     </n-form-item>
                   </n-grid-item>
                   <n-grid-item>
-                    <n-form-item label="共享模型">
+                    <n-form-item label="共享嵌入模型">
                       <n-space align="center">
                         <n-tag :type="embeddingModelStatus?.phase === 'ready' ? 'success' : 'default'" :bordered="false">
                           {{ embeddingModelStatus?.phase || '未读取' }}
@@ -1404,15 +1615,84 @@ defineExpose({ saveConfig })
                     </n-form-item>
                   </n-grid-item>
                   <n-grid-item :span="2">
-                    <n-form-item label="模型目录">
-                      <n-input
-                        v-model:value="config.local_embedding_model_dir"
-                        :placeholder="effectiveEmbeddingModelDir || '使用系统默认目录'"
-                        clearable
-                      />
+                    <n-form-item label="嵌入模型目录">
+                      <n-input-group>
+                        <n-input
+                          v-model:value="config.local_embedding_model_dir"
+                          :placeholder="effectiveEmbeddingModelDir || '使用系统默认目录'"
+                          clearable
+                        />
+                        <n-tooltip trigger="hover">
+                          <template #trigger>
+                            <n-button aria-label="选择嵌入模型目录" @click="selectSouStorageDirectory('local_embedding_model_dir', effectiveEmbeddingModelDir)">
+                              <template #icon>
+                                <div class="i-carbon-folder" />
+                              </template>
+                            </n-button>
+                          </template>
+                          选择嵌入模型目录
+                        </n-tooltip>
+                      </n-input-group>
+                      <template #feedback>
+                        <span class="form-feedback">{{ config.local_embedding_model_dir || effectiveEmbeddingModelDir }}</span>
+                      </template>
+                    </n-form-item>
+                  </n-grid-item>
+                  <n-grid-item :span="2">
+                    <n-form-item label="本地索引目录">
+                      <n-input-group>
+                        <n-input
+                          v-model:value="config.sou_local_index_dir"
+                          :placeholder="effectiveLocalIndexDir || '使用系统默认目录'"
+                          clearable
+                        />
+                        <n-tooltip trigger="hover">
+                          <template #trigger>
+                            <n-button aria-label="选择本地索引目录" @click="selectSouStorageDirectory('sou_local_index_dir', effectiveLocalIndexDir)">
+                              <template #icon>
+                                <div class="i-carbon-folder" />
+                              </template>
+                            </n-button>
+                          </template>
+                          选择本地索引目录
+                        </n-tooltip>
+                      </n-input-group>
+                      <template #feedback>
+                        <span class="form-feedback">建议放在 SSD/NVMe；目录切换后，新查询会使用独立索引库。当前：{{ config.sou_local_index_dir || effectiveLocalIndexDir }}</span>
+                      </template>
+                    </n-form-item>
+                  </n-grid-item>
+                  <n-grid-item v-if="accurateModeActive" :span="2">
+                    <n-form-item label="重排模型目录">
+                      <n-input-group>
+                        <n-input
+                          v-model:value="config.sou_reranker_model_dir"
+                          :placeholder="effectiveRerankerModelDir || '使用系统默认目录'"
+                          :disabled="rerankerTaskActive"
+                          clearable
+                        />
+                        <n-tooltip trigger="hover">
+                          <template #trigger>
+                            <n-button
+                              :disabled="rerankerTaskActive"
+                              aria-label="选择重排模型目录"
+                              @click="selectSouStorageDirectory('sou_reranker_model_dir', effectiveRerankerModelDir)"
+                            >
+                              <template #icon>
+                                <div class="i-carbon-folder" />
+                              </template>
+                            </n-button>
+                          </template>
+                          选择重排模型目录
+                        </n-tooltip>
+                      </n-input-group>
+                      <template #feedback>
+                        <span class="form-feedback">{{ config.sou_reranker_model_dir || effectiveRerankerModelDir }}</span>
+                      </template>
                     </n-form-item>
                   </n-grid-item>
                 </n-grid>
+
                 <n-alert v-if="localIndexStatus?.last_error" type="error" :bordered="false">
                   {{ localIndexStatus.last_error }}
                 </n-alert>
@@ -1422,6 +1702,98 @@ defineExpose({ saveConfig })
                 <n-alert v-if="embeddingModelStatus?.error" type="error" :bordered="false">
                   {{ embeddingModelStatus.error }}
                 </n-alert>
+
+                <div v-if="accurateModeActive" class="reranker-panel">
+                  <div class="reranker-header">
+                    <div class="min-w-0">
+                      <div class="font-medium">
+                        {{ rerankerModelStatus?.model_name || 'BAAI/bge-reranker-base' }}
+                      </div>
+                      <div class="form-feedback">
+                        {{ rerankerModelStatus?.message || '正在读取准确模式模型状态' }}
+                      </div>
+                    </div>
+                    <n-space align="center" :wrap="false">
+                      <n-tag :type="rerankerModelStatus?.runtime_ready ? 'success' : 'warning'" :bordered="false">
+                        ORT {{ rerankerModelStatus?.runtime_ready ? '就绪' : '待加载' }}
+                      </n-tag>
+                      <n-tag :type="rerankerTagType" :bordered="false">
+                        {{ rerankerPhaseLabel }}
+                      </n-tag>
+                    </n-space>
+                  </div>
+                  <n-progress
+                    type="line"
+                    :percentage="Math.max(0, Math.min(100, rerankerModelStatus?.progress_percent || 0))"
+                    :status="rerankerModelStatus?.phase === 'error' ? 'error' : rerankerModelStatus?.phase === 'ready' ? 'success' : 'default'"
+                    :height="8"
+                    :border-radius="4"
+                  />
+                  <div class="reranker-metrics">
+                    <span>{{ formatBytes(rerankerModelStatus?.downloaded_bytes || 0) }} / {{ formatBytes(rerankerModelStatus?.total_bytes || 0) }}</span>
+                    <span>文件 {{ rerankerModelStatus?.completed_files || 0 }} / {{ rerankerModelStatus?.total_files || 0 }}</span>
+                    <span>{{ rerankerModelStatus?.runtime_threads || 8 }} 线程</span>
+                    <span>批量 {{ rerankerModelStatus?.batch_size || 8 }}</span>
+                    <span>候选 Top50 + Top10</span>
+                  </div>
+                  <div v-if="rerankerModelStatus?.route" class="form-feedback">
+                    下载路由：{{ rerankerModelStatus.route }}
+                  </div>
+                  <n-alert v-if="rerankerModelStatus?.error" type="error" :bordered="false">
+                    {{ rerankerModelStatus.error }}
+                  </n-alert>
+                  <div class="flex justify-end gap-2">
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <n-button quaternary circle :loading="rerankerModelOperating" @click="refreshRerankerModelStatus(true)">
+                          <template #icon>
+                            <div class="i-carbon-renew" />
+                          </template>
+                        </n-button>
+                      </template>
+                      刷新重排模型状态
+                    </n-tooltip>
+                    <n-button
+                      v-if="rerankerModelStatus?.phase === 'downloading' || rerankerModelStatus?.phase === 'verifying'"
+                      secondary
+                      type="warning"
+                      @click="cancelRerankerDownload"
+                    >
+                      <template #icon>
+                        <div class="i-carbon-stop-filled" />
+                      </template>
+                      取消下载
+                    </n-button>
+                    <n-button
+                      v-else
+                      secondary
+                      :loading="rerankerModelOperating"
+                      @click="startRerankerDownload"
+                    >
+                      <template #icon>
+                        <div class="i-carbon-download" />
+                      </template>
+                      {{ rerankerModelStatus?.phase === 'ready' ? '重新校验' : '下载约 1.13 GB 模型' }}
+                    </n-button>
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <n-button
+                          tertiary
+                          type="error"
+                          :disabled="rerankerTaskActive || !(rerankerModelStatus?.downloaded_bytes || 0)"
+                          aria-label="删除重排模型"
+                          @click="confirmRemoveReranker"
+                        >
+                          <template #icon>
+                            <div class="i-carbon-trash-can" />
+                          </template>
+                        </n-button>
+                      </template>
+                      删除重排模型
+                    </n-tooltip>
+                  </div>
+                </div>
+
                 <div class="flex justify-end gap-2">
                   <n-tooltip trigger="hover">
                     <template #trigger>
@@ -1434,7 +1806,7 @@ defineExpose({ saveConfig })
                     刷新共享模型状态
                   </n-tooltip>
                   <n-button
-                    v-if="embeddingModelStatus?.phase !== 'ready'"
+                    v-if="semanticEnabled && embeddingModelStatus?.phase !== 'ready'"
                     secondary
                     :loading="embeddingModelOperating"
                     @click="installEmbeddingModel"
@@ -1442,7 +1814,7 @@ defineExpose({ saveConfig })
                     <template #icon>
                       <div class="i-carbon-download" />
                     </template>
-                    下载模型
+                    下载共享模型
                   </n-button>
                   <n-button secondary :loading="localIndexLoading" :disabled="!debugProjectRoot" @click="refreshLocalIndexStatus(true)">
                     <template #icon>
@@ -1957,6 +2329,22 @@ defineExpose({ saveConfig })
                         <span class="info-label">Local 引擎</span>
                         <span class="info-value">{{ debugResultData.engine }} / {{ debugResultData.index_state || '-' }}</span>
                       </div>
+                      <div v-if="debugResultData.semantic_mode" class="info-row">
+                        <span class="info-label">语义模式</span>
+                        <span class="info-value">{{ debugResultData.semantic_mode }} / {{ debugResultData.semantic_state || '-' }}</span>
+                      </div>
+                      <div v-if="debugResultData.semantic_model" class="info-row">
+                        <span class="info-label">语义召回</span>
+                        <span class="info-value">
+                          {{ debugResultData.semantic_model }} · top {{ debugResultData.semantic_top_score?.toFixed(4) || '-' }} · {{ debugResultData.fusion || '-' }}
+                        </span>
+                      </div>
+                      <div v-if="debugResultData.reranker_state" class="info-row">
+                        <span class="info-label">重排诊断</span>
+                        <span class="info-value">
+                          {{ debugResultData.reranker_state }} · {{ debugResultData.reranker_model || '-' }} · {{ debugResultData.reranker_duration_ms ?? '-' }}ms · top {{ debugResultData.reranker_top_score?.toFixed(4) || '-' }}
+                        </span>
+                      </div>
                     </div>
                   </div>
 
@@ -2128,6 +2516,31 @@ defineExpose({ saveConfig })
 
 /* 表单反馈文字 */
 .form-feedback {
+  font-size: 11px;
+  color: var(--color-on-surface-muted, #9ca3af);
+}
+
+.reranker-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--color-border, rgba(128, 128, 128, 0.2));
+  border-radius: 8px;
+  background: rgba(14, 116, 144, 0.04);
+}
+
+.reranker-header,
+.reranker-metrics {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.reranker-metrics {
+  justify-content: flex-start;
+  flex-wrap: wrap;
   font-size: 11px;
   color: var(--color-on-surface-muted, #9ca3af);
 }

@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 
-use super::semantic;
+use super::{reranker, semantic};
 
 const INDEX_MISSING: u8 = 0;
 const INDEX_BUILDING: u8 = 1;
@@ -31,6 +31,11 @@ const CHUNK_LINES: usize = 80;
 const CHUNK_OVERLAP: usize = 20;
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_QUERY_TERMS: usize = 24;
+const ACCURATE_LEXICAL_LIMIT: usize = 10;
+const ACCURATE_SEMANTIC_LIMIT: usize = 50;
+const ACCURATE_CANDIDATE_LIMIT: usize = 60;
+const ACCURATE_QUERY_BUDGET: Duration = Duration::from_secs(3);
+const ACCURATE_FUSION_NAME: &str = "bge_reranker_base_top50_top10";
 
 static PROJECT_INDEXES: Lazy<Mutex<HashMap<PathBuf, Arc<ProjectIndex>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -41,13 +46,54 @@ pub(super) struct LocalSearchOptions {
     pub query: String,
     pub max_results: usize,
     pub exclude_paths: Vec<String>,
+    pub index_dir: PathBuf,
     pub semantic: LocalSemanticSettings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalSemanticMode {
+    Off,
+    Balanced,
+    Accurate,
+}
+
+impl LocalSemanticMode {
+    pub(crate) fn from_effective(value: &str) -> Self {
+        match value {
+            crate::config::SOU_SEMANTIC_MODE_ACCURATE => Self::Accurate,
+            crate::config::SOU_SEMANTIC_MODE_BALANCED => Self::Balanced,
+            _ => Self::Off,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => crate::config::SOU_SEMANTIC_MODE_OFF,
+            Self::Balanced => crate::config::SOU_SEMANTIC_MODE_BALANCED,
+            Self::Accurate => crate::config::SOU_SEMANTIC_MODE_ACCURATE,
+        }
+    }
+
+    fn enabled(self) -> bool {
+        self != Self::Off
+    }
+
+    pub(crate) fn accurate(self) -> bool {
+        self == Self::Accurate
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct LocalSemanticSettings {
-    pub enabled: bool,
+    pub mode: LocalSemanticMode,
     pub model_dir: PathBuf,
+    pub reranker_model_dir: PathBuf,
+}
+
+impl LocalSemanticSettings {
+    fn enabled(&self) -> bool {
+        self.mode.enabled()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +109,11 @@ pub(super) struct LocalSearchOutput {
     pub semantic_indexed_chunks: u64,
     pub semantic_pending_chunks: u64,
     pub semantic_top_score: Option<f32>,
+    pub semantic_mode: String,
+    pub reranker_state: Option<String>,
+    pub reranker_model: Option<String>,
+    pub reranker_duration_ms: Option<u64>,
+    pub reranker_top_score: Option<f32>,
     pub fusion: Option<String>,
 }
 
@@ -207,9 +258,9 @@ impl ProjectIndex {
             pending_changes: self.dirty.load(Ordering::Acquire),
             last_error: self.last_error.lock().ok().and_then(|value| value.clone()),
             semantic_state: self
-                .semantic_state_name(semantic_settings.enabled)
+                .semantic_state_name(semantic_settings.enabled())
                 .to_string(),
-            semantic_model: semantic_settings.enabled.then(|| semantic::model_key()),
+            semantic_model: semantic_settings.enabled().then(|| semantic::model_key()),
             semantic_indexed_chunks: self.semantic_indexed_chunks.load(Ordering::Acquire),
             semantic_pending_chunks: self.semantic_pending_chunks.load(Ordering::Acquire),
             semantic_last_error: self
@@ -230,7 +281,7 @@ pub(super) async fn search(options: LocalSearchOptions) -> Result<LocalSearchOut
         return Err(anyhow!("本地搜索项目路径不是目录: {}", root.display()));
     }
 
-    let index = project_index(&root)?;
+    let index = project_index(&root, &options.index_dir)?;
     search_with_index(options, root, index, true).await
 }
 
@@ -265,6 +316,10 @@ async fn search_with_index(
     enable_watcher: bool,
 ) -> Result<LocalSearchOutput> {
     let started_at = Instant::now();
+    let semantic_mode = options.semantic.mode;
+    if !semantic_mode.accurate() {
+        reranker::release();
+    }
     let terms = extract_query_terms(&options.query);
     if terms.is_empty() {
         return Err(anyhow!("本地搜索未提取到有效关键词"));
@@ -294,7 +349,9 @@ async fn search_with_index(
             let db_path = index.db_path.clone();
             let query = options.query.clone();
             let query_terms = terms.clone();
-            let max_results = if options.semantic.enabled {
+            let max_results = if semantic_mode.accurate() {
+                ACCURATE_LEXICAL_LIMIT
+            } else if options.semantic.enabled() {
                 options.max_results.saturating_mul(5).min(150)
             } else {
                 options.max_results
@@ -331,9 +388,19 @@ async fn search_with_index(
     };
 
     let mut semantic_top_score = None;
+    let mut reranker_state = semantic_mode.accurate().then(|| "skipped".to_string());
+    let reranker_model = semantic_mode
+        .accurate()
+        .then(|| reranker::MODEL_NAME.to_string());
+    let mut reranker_duration_ms = None;
+    let mut reranker_top_score = None;
     let mut fusion = None;
-    if options.semantic.enabled && engine == "fts5" {
-        let semantic_deadline = Instant::now() + Duration::from_secs(2);
+    if options.semantic.enabled() && engine == "fts5" {
+        let semantic_deadline = if semantic_mode.accurate() {
+            started_at + ACCURATE_QUERY_BUDGET
+        } else {
+            Instant::now() + Duration::from_secs(2)
+        };
         if !crate::mcp::embedding::assets_have_expected_sizes(&options.semantic.model_dir) {
             index
                 .semantic_state
@@ -359,7 +426,11 @@ async fn search_with_index(
             }
 
             if index.semantic_state.load(Ordering::Acquire) == SEMANTIC_READY {
-                let semantic_limit = options.max_results.saturating_mul(5).min(150);
+                let semantic_limit = if semantic_mode.accurate() {
+                    ACCURATE_SEMANTIC_LIMIT
+                } else {
+                    options.max_results.saturating_mul(5).min(150)
+                };
                 let remaining_budget = semantic_deadline.saturating_duration_since(Instant::now());
                 let semantic_result = if remaining_budget.is_zero() {
                     Err("loading: 语义查询等待预算已用尽".to_string())
@@ -376,15 +447,119 @@ async fn search_with_index(
                 match semantic_result {
                     Ok(semantic_hits) => {
                         semantic_top_score = semantic_hits.first().map(|hit| hit.score);
-                        hits = fuse_hits(
-                            hits,
-                            semantic_hits,
+                        let balanced_hits = fuse_hits(
+                            hits.clone(),
+                            semantic_hits.clone(),
                             &options.query,
                             &terms,
                             options.max_results,
                         );
                         engine = "fts5+bge".to_string();
                         fusion = Some(semantic::FUSION_NAME.to_string());
+                        if semantic_mode.accurate() {
+                            let protected_exact =
+                                hits.first().filter(|hit| hit.exact_match).cloned();
+                            let candidates = merge_accurate_candidates(
+                                hits,
+                                semantic_hits,
+                                &options.query,
+                                &terms,
+                            );
+                            hits = balanced_hits;
+                            if !reranker::assets_have_expected_sizes(
+                                &options.semantic.reranker_model_dir,
+                            ) {
+                                reranker_state = Some("missing".to_string());
+                                append_fallback(
+                                    &mut fallback_reason,
+                                    "准确模式模型资产未就绪，本次返回均衡模式结果",
+                                );
+                            } else {
+                                reranker::ensure_started(&options.semantic.reranker_model_dir);
+                                match reranker::runtime_snapshot(
+                                    &options.semantic.reranker_model_dir,
+                                ) {
+                                    reranker::RuntimeSnapshot {
+                                        phase: reranker::RuntimePhase::Ready,
+                                        ..
+                                    } => {
+                                        let remaining_budget = semantic_deadline
+                                            .saturating_duration_since(Instant::now());
+                                        if remaining_budget.is_zero() {
+                                            reranker_state = Some("timeout".to_string());
+                                            append_fallback(
+                                                &mut fallback_reason,
+                                                "准确模式查询预算已用尽，本次返回均衡模式结果",
+                                            );
+                                        } else {
+                                            let documents = candidates
+                                                .iter()
+                                                .map(|hit| {
+                                                    format!(
+                                                        "{}\n{}",
+                                                        hit.relative_path, hit.excerpt
+                                                    )
+                                                })
+                                                .collect::<Vec<_>>();
+                                            let rerank_started = Instant::now();
+                                            match reranker::rerank(
+                                                &options.semantic.reranker_model_dir,
+                                                &options.query,
+                                                documents,
+                                                remaining_budget,
+                                            )
+                                            .await
+                                            {
+                                                Ok(ranking) => {
+                                                    reranker_duration_ms =
+                                                        Some(rerank_started.elapsed().as_millis()
+                                                            as u64);
+                                                    reranker_top_score =
+                                                        ranking.first().map(|item| item.score);
+                                                    hits = apply_reranker_ranking(
+                                                        candidates,
+                                                        ranking,
+                                                        protected_exact,
+                                                        options.max_results,
+                                                    );
+                                                    engine = "fts5+bge+reranker".to_string();
+                                                    fusion = Some(ACCURATE_FUSION_NAME.to_string());
+                                                    reranker_state = Some("ready".to_string());
+                                                }
+                                                Err(error) => {
+                                                    reranker_duration_ms =
+                                                        Some(rerank_started.elapsed().as_millis()
+                                                            as u64);
+                                                    reranker_state = Some(error.state);
+                                                    append_fallback(
+                                                        &mut fallback_reason,
+                                                        &format!(
+                                                            "准确模式重排失败，本次返回均衡模式结果: {}",
+                                                            error.message
+                                                        ),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    reranker::RuntimeSnapshot { phase, error } => {
+                                        reranker_state = Some(phase.as_str().to_string());
+                                        append_fallback(
+                                            &mut fallback_reason,
+                                            &format!(
+                                                "准确模式模型状态为 {}，本次返回均衡模式结果{}",
+                                                phase.as_str(),
+                                                error
+                                                    .map(|value| format!(": {}", value))
+                                                    .unwrap_or_default()
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                        } else {
+                            hits = balanced_hits;
+                        }
                     }
                     Err(error) => {
                         let failure_state = if error.starts_with("loading:") {
@@ -415,14 +590,14 @@ async fn search_with_index(
             }
         }
     }
-    if engine != "fts5+bge" {
+    if !matches!(engine.as_str(), "fts5+bge" | "fts5+bge+reranker") {
         hits.truncate(options.max_results.max(1));
     }
 
     let duration_ms = started_at.elapsed().as_millis() as u64;
     let state = index.state_name().to_string();
     let semantic_state = index
-        .semantic_state_name(options.semantic.enabled)
+        .semantic_state_name(options.semantic.enabled())
         .to_string();
     let semantic_indexed_chunks = index.semantic_indexed_chunks.load(Ordering::Acquire);
     let semantic_pending_chunks = index.semantic_pending_chunks.load(Ordering::Acquire);
@@ -437,6 +612,11 @@ async fn search_with_index(
         semantic_indexed_chunks,
         semantic_pending_chunks,
         semantic_top_score,
+        semantic_mode.as_str(),
+        reranker_state.as_deref(),
+        reranker_model.as_deref(),
+        reranker_duration_ms,
+        reranker_top_score,
         fusion.as_deref(),
     );
     Ok(LocalSearchOutput {
@@ -447,10 +627,15 @@ async fn search_with_index(
         fallback_reason,
         duration_ms,
         semantic_state,
-        semantic_model: options.semantic.enabled.then(|| semantic::model_key()),
+        semantic_model: options.semantic.enabled().then(|| semantic::model_key()),
         semantic_indexed_chunks,
         semantic_pending_chunks,
         semantic_top_score,
+        semantic_mode: semantic_mode.as_str().to_string(),
+        reranker_state,
+        reranker_model,
+        reranker_duration_ms,
+        reranker_top_score,
         fusion,
     })
 }
@@ -458,12 +643,13 @@ async fn search_with_index(
 pub async fn rebuild(
     project_root: &str,
     exclude_paths: Vec<String>,
+    index_dir: PathBuf,
     semantic_settings: LocalSemanticSettings,
 ) -> Result<LocalIndexStatus> {
     let root = PathBuf::from(project_root)
         .canonicalize()
         .with_context(|| format!("本地索引项目路径无效: {}", project_root))?;
-    let index = project_index(&root)?;
+    let index = project_index(&root, &index_dir)?;
     refresh_profile(&index, &exclude_paths);
     sync_now(Arc::clone(&index), exclude_paths, semantic_settings.clone()).await?;
     Ok(index.status(&semantic_settings))
@@ -471,26 +657,28 @@ pub async fn rebuild(
 
 pub fn status(
     project_root: &str,
+    index_dir: PathBuf,
     semantic_settings: LocalSemanticSettings,
 ) -> Result<LocalIndexStatus> {
     let root = PathBuf::from(project_root)
         .canonicalize()
         .with_context(|| format!("本地索引项目路径无效: {}", project_root))?;
-    Ok(project_index(&root)?.status(&semantic_settings))
+    Ok(project_index(&root, &index_dir)?.status(&semantic_settings))
 }
 
-fn project_index(root: &Path) -> Result<Arc<ProjectIndex>> {
+fn project_index(root: &Path, index_dir: &Path) -> Result<Arc<ProjectIndex>> {
     let mut indexes = PROJECT_INDEXES
         .lock()
         .map_err(|_| anyhow!("本地索引管理器锁已损坏"))?;
-    if let Some(index) = indexes.get(root) {
-        return Ok(Arc::clone(index));
-    }
-
-    let config_dir = dirs::config_dir().ok_or_else(|| anyhow!("无法定位系统配置目录"))?;
-    let index_dir = config_dir.join("sanshu").join("sou-index");
     fs::create_dir_all(&index_dir).context("创建 sou 本地索引目录失败")?;
     let db_path = index_dir.join(format!("{}.sqlite3", project_hash(root)));
+    if let Some(index) = indexes.get(root) {
+        if index.db_path == db_path {
+            return Ok(Arc::clone(index));
+        }
+    }
+
+    // 中文说明：目录切换时替换当前项目实例，旧数据库文件保持原样，便于用户随时切回。
     let index = Arc::new(ProjectIndex::new(root.to_path_buf(), db_path));
     indexes.insert(root.to_path_buf(), Arc::clone(&index));
     Ok(index)
@@ -536,7 +724,7 @@ fn schedule_sync(
     if index.state.load(Ordering::Acquire) != INDEX_READY {
         index.state.store(INDEX_BUILDING, Ordering::Release);
     }
-    if semantic_settings.enabled {
+    if semantic_settings.enabled() {
         let next_state = if index.semantic_state.load(Ordering::Acquire) == SEMANTIC_READY {
             SEMANTIC_SYNCING
         } else {
@@ -572,7 +760,7 @@ async fn sync_now(
     // 当前同步任务消费既有 dirty；同步期间的新文件事件仍会再次置位。
     index.dirty.store(false, Ordering::Release);
     index.state.store(INDEX_BUILDING, Ordering::Release);
-    if semantic_settings.enabled {
+    if semantic_settings.enabled() {
         let next_state = if index.semantic_state.load(Ordering::Acquire) == SEMANTIC_READY {
             SEMANTIC_SYNCING
         } else {
@@ -606,7 +794,7 @@ fn sync_all(
     semantic_settings: &LocalSemanticSettings,
 ) -> Result<SyncOutcome> {
     let (files, chunks) = sync_index(index, exclude_paths)?;
-    let semantic = if !semantic_settings.enabled {
+    let semantic = if !semantic_settings.enabled() {
         index
             .semantic_state
             .store(SEMANTIC_DISABLED, Ordering::Release);
@@ -1166,6 +1354,91 @@ fn fuse_hits(
     hits
 }
 
+fn merge_accurate_candidates(
+    lexical_hits: Vec<SearchHit>,
+    semantic_hits: Vec<semantic::SemanticHit>,
+    query: &str,
+    terms: &[String],
+) -> Vec<SearchHit> {
+    let mut candidates = Vec::with_capacity(ACCURATE_CANDIDATE_LIMIT);
+    let mut positions = HashMap::<(String, usize, usize), usize>::new();
+    for hit in lexical_hits.into_iter().take(ACCURATE_LEXICAL_LIMIT) {
+        let key = (hit.relative_path.clone(), hit.start_line, hit.end_line);
+        positions.insert(key, candidates.len());
+        candidates.push(hit);
+    }
+    for semantic_hit in semantic_hits.into_iter().take(ACCURATE_SEMANTIC_LIMIT) {
+        let key = (
+            semantic_hit.relative_path.clone(),
+            semantic_hit.start_line,
+            semantic_hit.end_line,
+        );
+        if let Some(position) = positions.get(&key).copied() {
+            candidates[position].semantic_score = Some(semantic_hit.score);
+            continue;
+        }
+        if candidates.len() == ACCURATE_CANDIDATE_LIMIT {
+            break;
+        }
+        let mut hit = score_hit(
+            semantic_hit.relative_path,
+            semantic_hit.start_line,
+            semantic_hit.end_line,
+            semantic_hit.excerpt,
+            0.0,
+            query,
+            terms,
+        );
+        hit.semantic_score = Some(semantic_hit.score);
+        positions.insert(key, candidates.len());
+        candidates.push(hit);
+    }
+    candidates
+}
+
+fn apply_reranker_ranking(
+    candidates: Vec<SearchHit>,
+    ranking: Vec<reranker::RerankMatch>,
+    protected_exact: Option<SearchHit>,
+    max_results: usize,
+) -> Vec<SearchHit> {
+    let mut seen = HashSet::new();
+    let mut ranked = Vec::with_capacity(candidates.len());
+    for item in ranking {
+        if !seen.insert(item.index) {
+            continue;
+        }
+        if let Some(candidate) = candidates.get(item.index) {
+            let mut hit = candidate.clone();
+            hit.fusion_score = item.score as f64;
+            ranked.push(hit);
+        }
+    }
+    for (index, candidate) in candidates.into_iter().enumerate() {
+        if seen.insert(index) {
+            ranked.push(candidate);
+        }
+    }
+
+    if let Some(protected) = protected_exact {
+        let protected_key = (
+            protected.relative_path.as_str(),
+            protected.start_line,
+            protected.end_line,
+        );
+        let protected = ranked
+            .iter()
+            .position(|hit| {
+                (hit.relative_path.as_str(), hit.start_line, hit.end_line) == protected_key
+            })
+            .map(|position| ranked.remove(position))
+            .unwrap_or(protected);
+        ranked.insert(0, protected);
+    }
+    ranked.truncate(max_results.max(1));
+    ranked
+}
+
 fn append_fallback(target: &mut Option<String>, reason: &str) {
     match target {
         Some(current) => {
@@ -1187,6 +1460,11 @@ fn format_hits(
     semantic_indexed_chunks: u64,
     semantic_pending_chunks: u64,
     semantic_top_score: Option<f32>,
+    semantic_mode: &str,
+    reranker_state: Option<&str>,
+    reranker_model: Option<&str>,
+    reranker_duration_ms: Option<u64>,
+    reranker_top_score: Option<f32>,
     fusion: Option<&str>,
 ) -> String {
     let mut parts = vec![
@@ -1208,16 +1486,29 @@ fn format_hits(
         parts.push("No relevant files found.".to_string());
     }
     parts.push(format!(
-        "[sou-local] engine={}, index_state={}, hits={}, duration_ms={}, semantic_state={}, semantic_indexed_chunks={}, semantic_pending_chunks={}{}{}",
+        "[sou-local] engine={}, index_state={}, hits={}, duration_ms={}, semantic_mode={}, semantic_state={}, semantic_indexed_chunks={}, semantic_pending_chunks={}{}{}{}{}{}{}",
         engine,
         state,
         hits.len(),
         duration_ms,
+        semantic_mode,
         semantic_state,
         semantic_indexed_chunks,
         semantic_pending_chunks,
         semantic_top_score
             .map(|score| format!(", semantic_top_score={:.4}", score))
+            .unwrap_or_default(),
+        reranker_state
+            .map(|value| format!(", reranker_state={}", value))
+            .unwrap_or_default(),
+        reranker_model
+            .map(|value| format!(", reranker_model={}", value))
+            .unwrap_or_default(),
+        reranker_duration_ms
+            .map(|value| format!(", reranker_duration_ms={}", value))
+            .unwrap_or_default(),
+        reranker_top_score
+            .map(|score| format!(", reranker_top_score={:.4}", score))
             .unwrap_or_default(),
         fusion
             .map(|value| format!(", fusion={}", value))
@@ -1574,7 +1865,209 @@ fn exclude_glob(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
     use tempfile::tempdir;
+
+    #[derive(Debug, Deserialize)]
+    struct RealProjectGateSuite {
+        projects: Vec<RealProjectGateProject>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct RealProjectGateProject {
+        name: String,
+        language: String,
+        root: String,
+        queries: Vec<RealProjectGateQuery>,
+        #[serde(default)]
+        exclude_paths: Vec<String>,
+        #[serde(alias = "min_hybrid_recall_at_5")]
+        min_accurate_recall_at_5: f64,
+        #[serde(alias = "max_query_p95_ms")]
+        max_balanced_query_p95_ms: u64,
+        #[serde(default = "default_accurate_query_p95_ms")]
+        max_accurate_query_p95_ms: u64,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct RealProjectGateQuery {
+        id: String,
+        kind: String,
+        query: String,
+        expected_paths: Vec<String>,
+    }
+
+    fn default_accurate_query_p95_ms() -> u64 {
+        3_000
+    }
+
+    async fn wait_for_reranker_ready(directory: &Path) {
+        reranker::ensure_started(directory);
+        let deadline = Instant::now() + Duration::from_secs(180);
+        loop {
+            let snapshot = reranker::runtime_snapshot(directory);
+            match snapshot.phase {
+                reranker::RuntimePhase::Ready => return,
+                reranker::RuntimePhase::Error => {
+                    panic!(
+                        "准确模式模型预热失败: {}",
+                        snapshot.error.unwrap_or_else(|| "未知错误".to_string())
+                    );
+                }
+                reranker::RuntimePhase::Missing => {
+                    panic!("准确模式模型资产或共享 ONNX Runtime 尚未就绪");
+                }
+                reranker::RuntimePhase::Loading => {}
+            }
+            assert!(Instant::now() < deadline, "准确模式模型预热超过 180 秒");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    fn result_paths(text: &str) -> Vec<String> {
+        text.lines()
+            .filter_map(|line| line.strip_prefix("Path: "))
+            .map(|path| path.replace('\\', "/").to_ascii_lowercase())
+            .collect()
+    }
+
+    fn paths_contain_expected(paths: &[String], expected_paths: &[String]) -> bool {
+        expected_paths.iter().any(|expected| {
+            let expected = expected.replace('\\', "/").to_ascii_lowercase();
+            paths.iter().any(|path| path.ends_with(&expected))
+        })
+    }
+
+    fn percentile(values: &[u64], percent: usize) -> u64 {
+        if values.is_empty() {
+            return 0;
+        }
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        let index = ((sorted.len() - 1) * percent).div_ceil(100);
+        sorted[index.min(sorted.len() - 1)]
+    }
+
+    fn sqlite_storage_bytes(path: &Path) -> u64 {
+        let wal_path = PathBuf::from(format!("{}-wal", path.display()));
+        [path, wal_path.as_path()]
+            .iter()
+            .filter_map(|value| fs::metadata(value).ok())
+            .map(|metadata| metadata.len())
+            .sum()
+    }
+
+    fn fuse_with_test_weights(
+        lexical_hits: Vec<SearchHit>,
+        semantic_hits: Vec<semantic::SemanticHit>,
+        query: &str,
+        terms: &[String],
+        max_results: usize,
+        lexical_weight: f64,
+        semantic_weight: f64,
+    ) -> Vec<SearchHit> {
+        const RRF_K: f64 = 60.0;
+        let mut merged: HashMap<(String, usize, usize), SearchHit> = HashMap::new();
+        for (rank, mut hit) in lexical_hits.into_iter().enumerate() {
+            hit.fusion_score = lexical_weight / (RRF_K + rank as f64 + 1.0);
+            merged.insert(
+                (hit.relative_path.clone(), hit.start_line, hit.end_line),
+                hit,
+            );
+        }
+        for (rank, semantic_hit) in semantic_hits.into_iter().enumerate() {
+            let key = (
+                semantic_hit.relative_path.clone(),
+                semantic_hit.start_line,
+                semantic_hit.end_line,
+            );
+            let hit = merged.entry(key).or_insert_with(|| {
+                score_hit(
+                    semantic_hit.relative_path.clone(),
+                    semantic_hit.start_line,
+                    semantic_hit.end_line,
+                    semantic_hit.excerpt.clone(),
+                    0.0,
+                    query,
+                    terms,
+                )
+            });
+            hit.semantic_score = Some(semantic_hit.score);
+            hit.fusion_score += semantic_weight / (RRF_K + rank as f64 + 1.0);
+        }
+        let mut hits = merged.into_values().collect::<Vec<_>>();
+        hits.sort_by(|left, right| {
+            right
+                .fusion_score
+                .total_cmp(&left.fusion_score)
+                .then_with(|| right.exact_match.cmp(&left.exact_match))
+                .then_with(|| right.coverage.cmp(&left.coverage))
+                .then_with(|| left.relative_path.cmp(&right.relative_path))
+                .then_with(|| left.start_line.cmp(&right.start_line))
+        });
+        hits.truncate(max_results.max(1));
+        hits
+    }
+
+    fn fuse_paths_with_test_weights(
+        lexical_hits: &[SearchHit],
+        semantic_ranking: &[(String, f32)],
+        candidate_limit: usize,
+        max_results: usize,
+        lexical_weight: f64,
+        semantic_weight: f64,
+    ) -> Vec<String> {
+        const RRF_K: f64 = 60.0;
+        let mut scores = HashMap::<String, f64>::new();
+        let mut lexical_paths = HashSet::new();
+        for (rank, hit) in lexical_hits.iter().take(candidate_limit).enumerate() {
+            let path = hit.relative_path.replace('\\', "/").to_ascii_lowercase();
+            if lexical_paths.insert(path.clone()) {
+                *scores.entry(path).or_default() += lexical_weight / (RRF_K + rank as f64 + 1.0);
+            }
+        }
+        let mut semantic_paths = HashSet::new();
+        for (rank, (path, _)) in semantic_ranking.iter().take(candidate_limit).enumerate() {
+            let path = path.replace('\\', "/").to_ascii_lowercase();
+            if semantic_paths.insert(path.clone()) {
+                *scores.entry(path).or_default() += semantic_weight / (RRF_K + rank as f64 + 1.0);
+            }
+        }
+        let mut ranked = scores.into_iter().collect::<Vec<_>>();
+        ranked.sort_by(|left, right| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        ranked
+            .into_iter()
+            .take(max_results.max(1))
+            .map(|(path, _)| path)
+            .collect()
+    }
+
+    #[test]
+    fn changing_index_directory_replaces_cached_project_instance() {
+        let temp = tempdir().expect("索引目录切换测试环境应创建成功");
+        let root = temp.path().join("project");
+        let first_dir = temp.path().join("first-index");
+        let second_dir = temp.path().join("second-index");
+        fs::create_dir_all(&root).expect("索引目录切换测试项目应创建成功");
+
+        let first = project_index(&root, &first_dir).expect("首个索引实例应创建成功");
+        fs::write(&first.db_path, b"keep-old-index").expect("旧索引占位文件应写入成功");
+        let first_again = project_index(&root, &first_dir).expect("同目录索引实例应复用");
+        assert!(Arc::ptr_eq(&first, &first_again));
+
+        let second = project_index(&root, &second_dir).expect("新目录索引实例应创建成功");
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(second.db_path.parent(), Some(second_dir.as_path()));
+        assert_eq!(
+            fs::read(&first.db_path).expect("切换后旧索引文件应保留"),
+            b"keep-old-index"
+        );
+    }
 
     #[test]
     fn query_terms_cover_identifiers_and_chinese_bigrams() {
@@ -1664,6 +2157,88 @@ mod tests {
     }
 
     #[test]
+    fn accurate_candidates_merge_top_ten_and_top_fifty_with_deduplication() {
+        let lexical = (0..ACCURATE_LEXICAL_LIMIT)
+            .map(|index| {
+                score_hit(
+                    format!("src/lexical_{index}.rs"),
+                    1,
+                    10,
+                    format!("fn lexical_{index}() {{}}"),
+                    index as f64,
+                    "intent",
+                    &[],
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut semantic = vec![semantic::SemanticHit {
+            relative_path: "src/lexical_0.rs".to_string(),
+            start_line: 1,
+            end_line: 10,
+            excerpt: "fn lexical_0() {}".to_string(),
+            score: 0.99,
+        }];
+        semantic.extend(
+            (0..ACCURATE_SEMANTIC_LIMIT).map(|index| semantic::SemanticHit {
+                relative_path: format!("src/semantic_{index}.rs"),
+                start_line: 1,
+                end_line: 10,
+                excerpt: format!("fn semantic_{index}() {{}}"),
+                score: 0.9 - index as f32 * 0.001,
+            }),
+        );
+
+        let candidates = merge_accurate_candidates(lexical, semantic, "intent", &[]);
+        assert_eq!(candidates.len(), ACCURATE_CANDIDATE_LIMIT - 1);
+        let unique = candidates
+            .iter()
+            .map(|hit| (&hit.relative_path, hit.start_line, hit.end_line))
+            .collect::<HashSet<_>>();
+        assert_eq!(unique.len(), candidates.len());
+        assert_eq!(candidates[0].semantic_score, Some(0.99));
+    }
+
+    #[test]
+    fn accurate_ranking_keeps_exact_lexical_top_one() {
+        let exact = score_hit(
+            "src/exact.rs".to_string(),
+            1,
+            10,
+            "fn ExactHandler() {}".to_string(),
+            -10.0,
+            "ExactHandler",
+            &["exacthandler".to_string()],
+        );
+        assert!(exact.exact_match);
+        let other = score_hit(
+            "src/semantic.rs".to_string(),
+            1,
+            10,
+            "fn inferred_intent() {}".to_string(),
+            0.0,
+            "ExactHandler",
+            &[],
+        );
+        let ranked = apply_reranker_ranking(
+            vec![exact.clone(), other],
+            vec![
+                reranker::RerankMatch {
+                    index: 1,
+                    score: 0.9,
+                },
+                reranker::RerankMatch {
+                    index: 0,
+                    score: 0.1,
+                },
+            ],
+            Some(exact),
+            2,
+        );
+        assert_eq!(ranked[0].relative_path, "src/exact.rs");
+        assert_eq!(ranked[1].relative_path, "src/semantic.rs");
+    }
+
+    #[test]
     fn fts5_index_supports_warm_multi_keyword_search_and_incremental_update() {
         let temp = tempdir().expect("临时项目应创建成功");
         let root = temp.path().join("project");
@@ -1712,8 +2287,9 @@ mod tests {
             Arc::clone(&index),
             Vec::new(),
             LocalSemanticSettings {
-                enabled: false,
+                mode: LocalSemanticMode::Off,
                 model_dir: crate::mcp::embedding::default_model_dir(),
+                reranker_model_dir: crate::config::default_sou_reranker_model_dir(),
             },
         )
         .await
@@ -1729,9 +2305,11 @@ mod tests {
                 query: "CurrentFileValue".to_string(),
                 max_results: 5,
                 exclude_paths: Vec::new(),
+                index_dir: temp.path().join("indexes"),
                 semantic: LocalSemanticSettings {
-                    enabled: false,
+                    mode: LocalSemanticMode::Off,
                     model_dir: crate::mcp::embedding::default_model_dir(),
+                    reranker_model_dir: crate::config::default_sou_reranker_model_dir(),
                 },
             },
             root,
@@ -1745,6 +2323,496 @@ mod tests {
         assert_ne!(output.engine, "fts5");
         assert_eq!(output.hit_count, 1);
         assert!(output.text.contains("CurrentFileValue"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "由 phase2 门禁脚本传入已批准的真实项目与脱敏查询"]
+    async fn phase2_gate_real_projects_from_env() {
+        let suite_json = std::env::var("SANSHU_SOU_REAL_GATE_JSON")
+            .expect("门禁脚本应提供 SANSHU_SOU_REAL_GATE_JSON");
+        let suite = serde_json::from_str::<RealProjectGateSuite>(&suite_json)
+            .expect("真实项目门禁配置应为有效 JSON");
+        assert!(!suite.projects.is_empty());
+
+        let model_dir = std::env::var_os("SANSHU_SOU_GATE_MODEL_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(crate::mcp::embedding::default_model_dir);
+        assert!(
+            crate::mcp::embedding::assets_have_expected_sizes(&model_dir),
+            "真实项目门禁需要本机固定 BGE 与 ONNX Runtime 资产"
+        );
+        let reranker_dir = std::env::var_os("SANSHU_SOU_GATE_RERANKER_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(crate::config::default_sou_reranker_model_dir);
+        assert!(
+            reranker::assets_have_expected_sizes(&reranker_dir),
+            "准确模式门禁需要本机固定 BGE-reranker-base 资产"
+        );
+
+        let mut gate_failures = Vec::new();
+        let mut release_probe = None;
+        for project in suite.projects {
+            assert!(!project.queries.is_empty());
+            let root = PathBuf::from(&project.root)
+                .canonicalize()
+                .expect("真实项目路径应存在");
+            let index_dir = std::env::var_os("SANSHU_SOU_GATE_INDEX_DIR")
+                .map(PathBuf::from)
+                .expect("门禁脚本应提供 SANSHU_SOU_GATE_INDEX_DIR");
+            fs::create_dir_all(&index_dir).expect("应创建真实项目门禁索引目录");
+            let db_path = index_dir.join(format!("{}.sqlite3", project.name));
+            let index = Arc::new(ProjectIndex::new(root.clone(), db_path));
+            let semantic_settings = LocalSemanticSettings {
+                mode: LocalSemanticMode::Balanced,
+                model_dir: model_dir.clone(),
+                reranker_model_dir: reranker_dir.clone(),
+            };
+            refresh_profile(&index, &project.exclude_paths);
+
+            println!(
+                "SOU_PHASE2_GATE_PROGRESS project={} stage=indexing",
+                project.name
+            );
+            let index_started = Instant::now();
+            sync_now(
+                Arc::clone(&index),
+                project.exclude_paths.clone(),
+                semantic_settings.clone(),
+            )
+            .await
+            .expect("真实项目 lexical/semantic 索引应建立成功");
+            let index_duration_ms = index_started.elapsed().as_millis() as u64;
+            let status = index.status(&semantic_settings);
+            assert_eq!(status.state, "ready");
+            assert_eq!(status.semantic_state, "ready");
+            assert_eq!(status.semantic_pending_chunks, 0);
+            assert_eq!(status.semantic_indexed_chunks, status.indexed_chunks);
+            assert!(status.indexed_chunks > 0);
+
+            let mut lexical_hits = 0usize;
+            let mut hybrid_hits = 0usize;
+            let mut exact_total = 0usize;
+            let mut lexical_exact_top_one = 0usize;
+            let mut hybrid_exact_top_one = 0usize;
+            let mut hybrid_durations = Vec::new();
+            let mut query_results = Vec::new();
+            let mut equal_rrf_hits = 0usize;
+            for query in &project.queries {
+                let lexical = search_with_index(
+                    LocalSearchOptions {
+                        project_root: root.clone(),
+                        query: query.query.clone(),
+                        max_results: 5,
+                        exclude_paths: project.exclude_paths.clone(),
+                        index_dir: index_dir.clone(),
+                        semantic: LocalSemanticSettings {
+                            mode: LocalSemanticMode::Off,
+                            model_dir: model_dir.clone(),
+                            reranker_model_dir: reranker_dir.clone(),
+                        },
+                    },
+                    root.clone(),
+                    Arc::clone(&index),
+                    false,
+                )
+                .await
+                .expect("真实项目 lexical 查询应成功");
+                let hybrid = search_with_index(
+                    LocalSearchOptions {
+                        project_root: root.clone(),
+                        query: query.query.clone(),
+                        max_results: 5,
+                        exclude_paths: project.exclude_paths.clone(),
+                        index_dir: index_dir.clone(),
+                        semantic: semantic_settings.clone(),
+                    },
+                    root.clone(),
+                    Arc::clone(&index),
+                    false,
+                )
+                .await
+                .expect("真实项目 hybrid 查询应成功");
+
+                assert_eq!(lexical.engine, "fts5");
+                assert_eq!(hybrid.engine, "fts5+bge");
+                assert_eq!(hybrid.semantic_state, "ready");
+                assert!(hybrid.fallback_reason.is_none());
+                let lexical_paths = result_paths(&lexical.text);
+                let hybrid_paths = result_paths(&hybrid.text);
+                let root_prefix = normalize_path(&root).to_ascii_lowercase();
+                let lexical_relative_paths = lexical_paths
+                    .iter()
+                    .map(|path| {
+                        path.strip_prefix(&root_prefix)
+                            .unwrap_or(path)
+                            .trim_start_matches('/')
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>();
+                let hybrid_relative_paths = hybrid_paths
+                    .iter()
+                    .map(|path| {
+                        path.strip_prefix(&root_prefix)
+                            .unwrap_or(path)
+                            .trim_start_matches('/')
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>();
+                let lexical_hit = paths_contain_expected(&lexical_paths, &query.expected_paths);
+                let hybrid_hit = paths_contain_expected(&hybrid_paths, &query.expected_paths);
+                lexical_hits += usize::from(lexical_hit);
+                hybrid_hits += usize::from(hybrid_hit);
+                hybrid_durations.push(hybrid.duration_ms);
+
+                let terms = extract_query_terms(&query.query);
+                let lexical_candidates = query_index(&index.db_path, &query.query, &terms, 50)
+                    .expect("真实项目 lexical 诊断候选应读取成功");
+                let (semantic_candidates, embedding_ms, scan_ms) =
+                    semantic::search_timed_for_test(&index.db_path, &model_dir, &query.query, 25)
+                        .await
+                        .expect("真实项目 semantic 分段诊断应成功");
+                let semantic_relative_paths = semantic_candidates
+                    .iter()
+                    .map(|hit| hit.relative_path.replace('\\', "/").to_ascii_lowercase())
+                    .collect::<Vec<_>>();
+                let semantic_expected_rank = semantic_relative_paths
+                    .iter()
+                    .position(|path| {
+                        paths_contain_expected(std::slice::from_ref(path), &query.expected_paths)
+                    })
+                    .map(|rank| rank + 1);
+                let full_semantic_ranking =
+                    semantic::rank_paths_for_test(&index.db_path, &model_dir, &query.query)
+                        .await
+                        .expect("真实项目 semantic 全量排名诊断应成功");
+                let full_semantic_expected =
+                    full_semantic_ranking
+                        .iter()
+                        .enumerate()
+                        .find(|(_, (path, _))| {
+                            let path = path.replace('\\', "/").to_ascii_lowercase();
+                            paths_contain_expected(
+                                std::slice::from_ref(&path),
+                                &query.expected_paths,
+                            )
+                        });
+                let full_semantic_expected_rank = full_semantic_expected.map(|(rank, _)| rank + 1);
+                let full_semantic_expected_score =
+                    full_semantic_expected.map(|(_, (_, score))| *score);
+                let lexical_candidate_paths = lexical_candidates
+                    .iter()
+                    .map(|hit| hit.relative_path.replace('\\', "/").to_ascii_lowercase())
+                    .collect::<Vec<_>>();
+                let lexical_expected_rank = lexical_candidate_paths
+                    .iter()
+                    .position(|path| {
+                        paths_contain_expected(std::slice::from_ref(path), &query.expected_paths)
+                    })
+                    .map(|rank| rank + 1);
+                let path_rrf_65_35 = fuse_paths_with_test_weights(
+                    &lexical_candidates,
+                    &full_semantic_ranking,
+                    50,
+                    5,
+                    0.65,
+                    0.35,
+                );
+                let path_rrf_50_50 = fuse_paths_with_test_weights(
+                    &lexical_candidates,
+                    &full_semantic_ranking,
+                    50,
+                    5,
+                    0.5,
+                    0.5,
+                );
+                let equal_rrf = fuse_with_test_weights(
+                    lexical_candidates.iter().take(25).cloned().collect(),
+                    semantic_candidates,
+                    &query.query,
+                    &terms,
+                    5,
+                    0.5,
+                    0.5,
+                );
+                let equal_rrf_paths = equal_rrf
+                    .iter()
+                    .map(|hit| hit.relative_path.replace('\\', "/").to_ascii_lowercase())
+                    .collect::<Vec<_>>();
+                let equal_rrf_hit = paths_contain_expected(&equal_rrf_paths, &query.expected_paths);
+                equal_rrf_hits += usize::from(equal_rrf_hit);
+
+                let mut lexical_top_one = false;
+                let mut hybrid_top_one = false;
+                if query.kind == "exact_identifier" {
+                    exact_total += 1;
+                    lexical_top_one = lexical_paths.first().is_some_and(|path| {
+                        paths_contain_expected(std::slice::from_ref(path), &query.expected_paths)
+                    });
+                    hybrid_top_one = hybrid_paths.first().is_some_and(|path| {
+                        paths_contain_expected(std::slice::from_ref(path), &query.expected_paths)
+                    });
+                    lexical_exact_top_one += usize::from(lexical_top_one);
+                    hybrid_exact_top_one += usize::from(hybrid_top_one);
+                }
+
+                query_results.push(serde_json::json!({
+                    "id": query.id,
+                    "kind": query.kind,
+                    "lexical_hit_at_5": lexical_hit,
+                    "hybrid_hit_at_5": hybrid_hit,
+                    "lexical_top_one": lexical_top_one,
+                    "hybrid_top_one": hybrid_top_one,
+                    "lexical_duration_ms": lexical.duration_ms,
+                    "hybrid_duration_ms": hybrid.duration_ms,
+                    "semantic_top_score": hybrid.semantic_top_score,
+                    "semantic_embedding_ms": embedding_ms,
+                    "semantic_scan_ms": scan_ms,
+                    "semantic_expected_rank": semantic_expected_rank,
+                    "semantic_full_expected_rank": full_semantic_expected_rank,
+                    "semantic_full_expected_score": full_semantic_expected_score,
+                    "semantic_total_candidates": full_semantic_ranking.len(),
+                    "lexical_expected_rank_at_50": lexical_expected_rank,
+                    "path_rrf_65_35_hit_at_5": paths_contain_expected(&path_rrf_65_35, &query.expected_paths),
+                    "path_rrf_65_35_top_paths": path_rrf_65_35,
+                    "path_rrf_50_50_hit_at_5": paths_contain_expected(&path_rrf_50_50, &query.expected_paths),
+                    "path_rrf_50_50_top_paths": path_rrf_50_50,
+                    "semantic_top_paths": semantic_relative_paths.iter().take(10).collect::<Vec<_>>(),
+                    "equal_rrf_hit_at_5": equal_rrf_hit,
+                    "equal_rrf_top_paths": equal_rrf_paths,
+                    "lexical_top_paths": lexical_relative_paths,
+                    "hybrid_top_paths": hybrid_relative_paths,
+                }));
+            }
+
+            println!(
+                "SOU_PHASE2_GATE_PROGRESS project={} stage=reranker_warmup",
+                project.name
+            );
+            wait_for_reranker_ready(&reranker_dir).await;
+            let accurate_settings = LocalSemanticSettings {
+                mode: LocalSemanticMode::Accurate,
+                model_dir: model_dir.clone(),
+                reranker_model_dir: reranker_dir.clone(),
+            };
+            let warmup = search_with_index(
+                LocalSearchOptions {
+                    project_root: root.clone(),
+                    query: project.queries[0].query.clone(),
+                    max_results: 5,
+                    exclude_paths: project.exclude_paths.clone(),
+                    index_dir: index_dir.clone(),
+                    semantic: accurate_settings.clone(),
+                },
+                root.clone(),
+                Arc::clone(&index),
+                false,
+            )
+            .await
+            .expect("真实项目 accurate 预热查询应成功");
+            assert_eq!(warmup.engine, "fts5+bge+reranker");
+            assert_eq!(warmup.reranker_state.as_deref(), Some("ready"));
+
+            let mut accurate_hits = 0usize;
+            let mut accurate_exact_top_one = 0usize;
+            let mut accurate_durations = Vec::new();
+            let mut reranker_durations = Vec::new();
+            let mut accurate_query_results = Vec::new();
+            for query in &project.queries {
+                let accurate = search_with_index(
+                    LocalSearchOptions {
+                        project_root: root.clone(),
+                        query: query.query.clone(),
+                        max_results: 5,
+                        exclude_paths: project.exclude_paths.clone(),
+                        index_dir: index_dir.clone(),
+                        semantic: accurate_settings.clone(),
+                    },
+                    root.clone(),
+                    Arc::clone(&index),
+                    false,
+                )
+                .await
+                .expect("真实项目 accurate 查询应成功");
+                assert_eq!(accurate.engine, "fts5+bge+reranker");
+                assert_eq!(accurate.semantic_mode, "accurate");
+                assert_eq!(accurate.reranker_state.as_deref(), Some("ready"));
+                assert_eq!(accurate.fusion.as_deref(), Some(ACCURATE_FUSION_NAME));
+                assert!(accurate.fallback_reason.is_none());
+
+                let accurate_paths = result_paths(&accurate.text);
+                let accurate_hit = paths_contain_expected(&accurate_paths, &query.expected_paths);
+                accurate_hits += usize::from(accurate_hit);
+                accurate_durations.push(accurate.duration_ms);
+                if let Some(duration) = accurate.reranker_duration_ms {
+                    reranker_durations.push(duration);
+                }
+                let accurate_top_one = query.kind == "exact_identifier"
+                    && accurate_paths.first().is_some_and(|path| {
+                        paths_contain_expected(std::slice::from_ref(path), &query.expected_paths)
+                    });
+                accurate_exact_top_one += usize::from(accurate_top_one);
+                let root_prefix = normalize_path(&root).to_ascii_lowercase();
+                let accurate_relative_paths = accurate_paths
+                    .iter()
+                    .map(|path| {
+                        path.strip_prefix(&root_prefix)
+                            .unwrap_or(path)
+                            .trim_start_matches('/')
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>();
+                accurate_query_results.push(serde_json::json!({
+                    "id": query.id,
+                    "kind": query.kind,
+                    "hit_at_5": accurate_hit,
+                    "top_one": accurate_top_one,
+                    "duration_ms": accurate.duration_ms,
+                    "semantic_top_score": accurate.semantic_top_score,
+                    "reranker_duration_ms": accurate.reranker_duration_ms,
+                    "reranker_top_score": accurate.reranker_top_score,
+                    "top_paths": accurate_relative_paths,
+                }));
+            }
+
+            let query_count = project.queries.len();
+            let lexical_recall = lexical_hits as f64 / query_count as f64;
+            let hybrid_recall = hybrid_hits as f64 / query_count as f64;
+            let accurate_recall = accurate_hits as f64 / query_count as f64;
+            let equal_rrf_recall = equal_rrf_hits as f64 / query_count as f64;
+            let p50_ms = percentile(&hybrid_durations, 50);
+            let p95_ms = percentile(&hybrid_durations, 95);
+            let accurate_p50_ms = percentile(&accurate_durations, 50);
+            let accurate_p95_ms = percentile(&accurate_durations, 95);
+            let reranker_p95_ms = percentile(&reranker_durations, 95);
+            let result = serde_json::json!({
+                "type": "real_project",
+                "project": project.name,
+                "language": project.language,
+                "indexed_files": status.indexed_files,
+                "indexed_chunks": status.indexed_chunks,
+                "index_duration_ms": index_duration_ms,
+                "index_chunks_per_second": status.indexed_chunks as f64 / (index_duration_ms.max(1) as f64 / 1000.0),
+                "sqlite_bytes": sqlite_storage_bytes(&index.db_path),
+                "query_count": query_count,
+                "lexical_recall_at_5": lexical_recall,
+                "hybrid_recall_at_5": hybrid_recall,
+                "accurate_recall_at_5": accurate_recall,
+                "equal_rrf_recall_at_5": equal_rrf_recall,
+                "recall_delta": hybrid_recall - lexical_recall,
+                "accurate_recall_delta": accurate_recall - hybrid_recall,
+                "exact_identifier_count": exact_total,
+                "lexical_exact_top_one": lexical_exact_top_one,
+                "hybrid_exact_top_one": hybrid_exact_top_one,
+                "accurate_exact_top_one": accurate_exact_top_one,
+                "hybrid_query_p50_ms": p50_ms,
+                "hybrid_query_p95_ms": p95_ms,
+                "accurate_query_p50_ms": accurate_p50_ms,
+                "accurate_query_p95_ms": accurate_p95_ms,
+                "reranker_p95_ms": reranker_p95_ms,
+                "queries": query_results,
+                "accurate_queries": accurate_query_results,
+            });
+            println!("SOU_PHASE2_GATE_RESULT={result}");
+
+            if accurate_recall < project.min_accurate_recall_at_5 {
+                gate_failures.push(format!(
+                    "{} accurate Recall@5 {:.3} 低于门槛 {:.3}",
+                    project.name, accurate_recall, project.min_accurate_recall_at_5
+                ));
+            }
+            if hybrid_recall + f64::EPSILON < lexical_recall {
+                gate_failures.push(format!(
+                    "{} hybrid Recall@5 {:.3} 低于 lexical {:.3}",
+                    project.name, hybrid_recall, lexical_recall
+                ));
+            }
+            if accurate_recall + f64::EPSILON < hybrid_recall {
+                gate_failures.push(format!(
+                    "{} accurate Recall@5 {:.3} 低于 hybrid {:.3}",
+                    project.name, accurate_recall, hybrid_recall
+                ));
+            }
+            if p95_ms > project.max_balanced_query_p95_ms {
+                gate_failures.push(format!(
+                    "{} hybrid p95 {}ms 超过门槛 {}ms",
+                    project.name, p95_ms, project.max_balanced_query_p95_ms
+                ));
+            }
+            if accurate_p95_ms > project.max_accurate_query_p95_ms {
+                gate_failures.push(format!(
+                    "{} accurate p95 {}ms 超过门槛 {}ms",
+                    project.name, accurate_p95_ms, project.max_accurate_query_p95_ms
+                ));
+            }
+            if exact_total > 0 && hybrid_exact_top_one < lexical_exact_top_one {
+                gate_failures.push(format!(
+                    "{} hybrid 精确标识符 Top1 {} 低于 lexical {}",
+                    project.name, hybrid_exact_top_one, lexical_exact_top_one
+                ));
+            }
+            if exact_total > 0 && accurate_exact_top_one < lexical_exact_top_one {
+                gate_failures.push(format!(
+                    "{} accurate 精确标识符 Top1 {} 低于 lexical {}",
+                    project.name, accurate_exact_top_one, lexical_exact_top_one
+                ));
+            }
+            release_probe = Some((
+                root,
+                index,
+                project.exclude_paths,
+                index_dir,
+                project.queries[0].query.clone(),
+            ));
+        }
+
+        let (root, index, exclude_paths, index_dir, query) =
+            release_probe.expect("真实项目门禁应保留 Balanced 切换探针");
+        let release_result = search_with_index(
+            LocalSearchOptions {
+                project_root: root.clone(),
+                query,
+                max_results: 5,
+                exclude_paths,
+                index_dir,
+                semantic: LocalSemanticSettings {
+                    mode: LocalSemanticMode::Balanced,
+                    model_dir,
+                    reranker_model_dir: reranker_dir.clone(),
+                },
+            },
+            root,
+            index,
+            false,
+        )
+        .await
+        .expect("切回 Balanced 的释放探针查询应成功");
+        assert_eq!(release_result.engine, "fts5+bge");
+        assert_eq!(
+            reranker::runtime_snapshot(&reranker_dir).phase,
+            reranker::RuntimePhase::Missing
+        );
+        let marker_path = std::env::var_os("SANSHU_SOU_GATE_RELEASE_MARKER")
+            .map(PathBuf::from)
+            .expect("门禁脚本应提供运行时释放标记路径");
+        fs::write(&marker_path, b"balanced").expect("应写入运行时释放标记");
+        let release_wait_seconds = std::env::var("SANSHU_SOU_GATE_RELEASE_WAIT_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(30);
+        tokio::time::sleep(Duration::from_secs(release_wait_seconds)).await;
+        println!(
+            "SOU_PHASE2_RELEASE_RESULT={}",
+            serde_json::json!({
+                "type": "balanced_release",
+                "wait_seconds": release_wait_seconds,
+                "runtime_state": reranker::runtime_snapshot(&reranker_dir).phase.as_str(),
+            })
+        );
+        assert!(
+            gate_failures.is_empty(),
+            "真实项目门禁未通过: {}",
+            gate_failures.join("；")
+        );
     }
 
     #[test]

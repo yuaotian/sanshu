@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use once_cell::sync::Lazy;
 use ring::digest::{Context as ShaContext, SHA256};
 use rusqlite::{params, Connection, OpenFlags};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -42,6 +42,7 @@ pub(super) struct SemanticSyncStats {
 struct SourceChunk {
     key: Vec<u8>,
     content_hash: Vec<u8>,
+    rowid: i64,
     relative_path: String,
     start_line: usize,
     end_line: usize,
@@ -50,6 +51,7 @@ struct SourceChunk {
 
 struct CachedVector {
     key: Vec<u8>,
+    chunk_rowid: i64,
     relative_path: String,
     start_line: usize,
     end_line: usize,
@@ -92,7 +94,8 @@ pub(super) fn inspect(db_path: &Path) -> Result<SemanticIndexStats> {
         row.get::<_, u64>(0)
     })?;
     let indexed = connection.query_row(
-        "SELECT COUNT(*) FROM chunk_vectors WHERE model_key = ?1 AND dimension = ?2",
+        "SELECT COUNT(*) FROM chunk_vectors
+         WHERE model_key = ?1 AND dimension = ?2 AND chunk_rowid IS NOT NULL",
         params![model_key(), embedding::MODEL_DIMENSION as i64],
         |row| row.get::<_, u64>(0),
     )?;
@@ -117,11 +120,14 @@ where
         .map(|chunk| chunk.key.clone())
         .collect::<HashSet<_>>();
     let key = model_key();
-    let existing = load_existing_keys(&connection, &key)?;
+    let existing = load_existing_rows(&connection, &key)?;
 
     {
         let transaction = connection.transaction()?;
-        for stale in existing.difference(&current_keys) {
+        for stale in existing
+            .keys()
+            .filter(|value| !current_keys.contains(*value))
+        {
             transaction.execute(
                 "DELETE FROM chunk_vectors WHERE chunk_key = ?1 AND model_key = ?2",
                 params![stale, key],
@@ -131,12 +137,24 @@ where
             "DELETE FROM chunk_vectors WHERE model_key = ?1 AND dimension != ?2",
             params![key, embedding::MODEL_DIMENSION as i64],
         )?;
+        for chunk in &chunks {
+            if existing
+                .get(&chunk.key)
+                .is_some_and(|rowid| *rowid != Some(chunk.rowid))
+            {
+                transaction.execute(
+                    "UPDATE chunk_vectors SET chunk_rowid = ?1
+                     WHERE chunk_key = ?2 AND model_key = ?3",
+                    params![chunk.rowid, chunk.key, key],
+                )?;
+            }
+        }
         transaction.commit()?;
     }
 
     let mut pending = chunks
         .iter()
-        .filter(|chunk| !existing.contains(&chunk.key))
+        .filter(|chunk| !existing.contains_key(&chunk.key))
         .cloned()
         .collect::<Vec<_>>();
     let total = chunks.len() as u64;
@@ -155,15 +173,16 @@ where
         for (chunk, vector) in batch.iter().zip(embeddings) {
             transaction.execute(
                 "INSERT OR REPLACE INTO chunk_vectors(
-                    chunk_key, path, start_line, end_line, content_hash,
+                    chunk_key, path, start_line, end_line, content_hash, chunk_rowid,
                     model_key, dimension, embedding
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     chunk.key,
                     chunk.relative_path,
                     chunk.start_line as i64,
                     chunk.end_line as i64,
                     chunk.content_hash,
+                    chunk.rowid,
                     key,
                     embedding::MODEL_DIMENSION as i64,
                     encode_vector(&vector),
@@ -210,6 +229,64 @@ pub(super) async fn search(
     .map_err(|error| error.to_string())
 }
 
+#[cfg(test)]
+pub(super) async fn search_timed_for_test(
+    db_path: &Path,
+    model_dir: &Path,
+    query: &str,
+    fetch_limit: usize,
+) -> Result<(Vec<SemanticHit>, u64, u64), String> {
+    let embedding_started = std::time::Instant::now();
+    let query_embedding = embedding::embed_query(model_dir, query, Duration::from_secs(2))
+        .await
+        .map_err(|error| format!("{}: {}", error.state, error.message))?;
+    let embedding_ms = embedding_started.elapsed().as_millis() as u64;
+    let db_path = db_path.to_path_buf();
+    let scan_started = std::time::Instant::now();
+    let hits = tokio::task::spawn_blocking(move || {
+        search_blocking(&db_path, &query_embedding, fetch_limit.max(1))
+    })
+    .await
+    .map_err(|error| format!("等待语义精确扫描任务失败: {}", error))?
+    .map_err(|error| error.to_string())?;
+    let scan_ms = scan_started.elapsed().as_millis() as u64;
+    Ok((hits, embedding_ms, scan_ms))
+}
+
+#[cfg(test)]
+pub(super) async fn rank_paths_for_test(
+    db_path: &Path,
+    model_dir: &Path,
+    query: &str,
+) -> Result<Vec<(String, f32)>, String> {
+    let query_embedding = embedding::embed_query(model_dir, query, Duration::from_secs(2))
+        .await
+        .map_err(|error| format!("{}: {}", error.state, error.message))?;
+    let db_path = db_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let vectors = cached_vectors(&db_path)?;
+        let mut ranked = vectors
+            .iter()
+            .map(|vector| {
+                (
+                    vector.relative_path.clone(),
+                    embedding::cosine_similarity(&query_embedding, &vector.embedding),
+                )
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_by(|left, right| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        Ok::<_, anyhow::Error>(ranked)
+    })
+    .await
+    .map_err(|error| format!("等待语义全量排名诊断失败: {}", error))?
+    .map_err(|error| error.to_string())
+}
+
 fn search_blocking(
     db_path: &Path,
     query_embedding: &[f32],
@@ -238,14 +315,8 @@ fn search_blocking(
     let mut hits = Vec::with_capacity(ranked.len());
     for (vector, score) in ranked {
         let excerpt = connection.query_row(
-            "SELECT content FROM chunks
-             WHERE path = ?1 AND start_line = ?2 AND end_line = ?3
-             LIMIT 1",
-            params![
-                vector.relative_path,
-                vector.start_line as i64,
-                vector.end_line as i64
-            ],
+            "SELECT content FROM chunks WHERE rowid = ?1",
+            params![vector.chunk_rowid],
             |row| row.get::<_, String>(0),
         )?;
         hits.push(SemanticHit {
@@ -283,16 +354,17 @@ fn cached_vectors(db_path: &Path) -> Result<Arc<Vec<CachedVector>>> {
     }
 
     let mut statement = connection.prepare(
-        "SELECT chunk_key, path, start_line, end_line, embedding
+        "SELECT chunk_key, path, start_line, end_line, chunk_rowid, embedding
          FROM chunk_vectors
-         WHERE model_key = ?1 AND dimension = ?2",
+         WHERE model_key = ?1 AND dimension = ?2 AND chunk_rowid IS NOT NULL",
     )?;
     let rows = statement.query_map(
         params![model_key(), embedding::MODEL_DIMENSION as i64],
         |row| {
-            let blob = row.get::<_, Vec<u8>>(4)?;
+            let blob = row.get::<_, Vec<u8>>(5)?;
             Ok(CachedVector {
                 key: row.get(0)?,
+                chunk_rowid: row.get(4)?,
                 relative_path: row.get(1)?,
                 start_line: row.get::<_, i64>(2)? as usize,
                 end_line: row.get::<_, i64>(3)? as usize,
@@ -314,6 +386,7 @@ fn cached_vectors(db_path: &Path) -> Result<Arc<Vec<CachedVector>>> {
                 + value.relative_path.len()
                 + value.embedding.len() * std::mem::size_of::<f32>()
                 + 2 * std::mem::size_of::<usize>()
+                + std::mem::size_of::<i64>()
         })
         .sum();
     let values = Arc::new(values);
@@ -380,6 +453,7 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<()> {
              start_line INTEGER NOT NULL,
              end_line INTEGER NOT NULL,
              content_hash BLOB NOT NULL,
+             chunk_rowid INTEGER,
              model_key TEXT NOT NULL,
              dimension INTEGER NOT NULL,
              embedding BLOB NOT NULL,
@@ -388,24 +462,44 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS idx_chunk_vectors_model
              ON chunk_vectors(model_key);",
     )?;
+    let has_chunk_rowid = {
+        let mut statement = connection.prepare("PRAGMA table_info(chunk_vectors)")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+        let mut found = false;
+        for row in rows {
+            if row? == "chunk_rowid" {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    if !has_chunk_rowid {
+        connection.execute(
+            "ALTER TABLE chunk_vectors ADD COLUMN chunk_rowid INTEGER",
+            [],
+        )?;
+    }
     Ok(())
 }
 
 fn load_source_chunks(connection: &Connection) -> Result<Vec<SourceChunk>> {
     let mut statement = connection.prepare(
-        "SELECT path, start_line, end_line, content
+        "SELECT rowid, path, start_line, end_line, content
          FROM chunks ORDER BY path, start_line, end_line",
     )?;
     let rows = statement.query_map([], |row| {
-        let relative_path = row.get::<_, String>(0)?;
-        let start_line = row.get::<_, i64>(1)? as usize;
-        let end_line = row.get::<_, i64>(2)? as usize;
-        let excerpt = row.get::<_, String>(3)?;
+        let rowid = row.get::<_, i64>(0)?;
+        let relative_path = row.get::<_, String>(1)?;
+        let start_line = row.get::<_, i64>(2)? as usize;
+        let end_line = row.get::<_, i64>(3)? as usize;
+        let excerpt = row.get::<_, String>(4)?;
         let content_hash = digest(excerpt.as_bytes());
         let key = chunk_key(&relative_path, start_line, end_line, &content_hash);
         Ok(SourceChunk {
             key,
             content_hash,
+            rowid,
             relative_path,
             start_line,
             end_line,
@@ -419,17 +513,20 @@ fn load_source_chunks(connection: &Connection) -> Result<Vec<SourceChunk>> {
     Ok(chunks)
 }
 
-fn load_existing_keys(connection: &Connection, key: &str) -> Result<HashSet<Vec<u8>>> {
-    let mut statement = connection
-        .prepare("SELECT chunk_key FROM chunk_vectors WHERE model_key = ?1 AND dimension = ?2")?;
+fn load_existing_rows(connection: &Connection, key: &str) -> Result<HashMap<Vec<u8>, Option<i64>>> {
+    let mut statement = connection.prepare(
+        "SELECT chunk_key, chunk_rowid FROM chunk_vectors
+         WHERE model_key = ?1 AND dimension = ?2",
+    )?;
     let rows = statement.query_map(params![key, embedding::MODEL_DIMENSION as i64], |row| {
-        row.get::<_, Vec<u8>>(0)
+        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<i64>>(1)?))
     })?;
-    let mut keys = HashSet::new();
+    let mut values = HashMap::new();
     for row in rows {
-        keys.insert(row?);
+        let (key, rowid) = row?;
+        values.insert(key, rowid);
     }
-    Ok(keys)
+    Ok(values)
 }
 
 fn chunk_key(path: &str, start_line: usize, end_line: usize, content_hash: &[u8]) -> Vec<u8> {
@@ -468,6 +565,7 @@ mod tests {
     use super::*;
     use serde::Deserialize;
     use std::collections::{HashMap, HashSet};
+    use std::time::Instant;
     use tempfile::tempdir;
 
     const GOLDEN_FIXTURE: &str = include_str!("fixtures/semantic_golden.json");
@@ -525,6 +623,34 @@ mod tests {
         (temp, db_path)
     }
 
+    fn synthetic_gate_vector(seed: usize) -> Vec<f32> {
+        let mut state = seed as u64 ^ 0x9e37_79b9_7f4a_7c15;
+        (0..embedding::MODEL_DIMENSION)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                ((state >> 40) as f32 / ((1u32 << 24) - 1) as f32) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    fn gate_percentile(values: &[u64], percent: usize) -> u64 {
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        let index = ((sorted.len() - 1) * percent).div_ceil(100);
+        sorted[index.min(sorted.len() - 1)]
+    }
+
+    fn sqlite_gate_bytes(path: &Path) -> u64 {
+        let wal_path = PathBuf::from(format!("{}-wal", path.display()));
+        [path, wal_path.as_path()]
+            .iter()
+            .filter_map(|value| std::fs::metadata(value).ok())
+            .map(|metadata| metadata.len())
+            .sum()
+    }
+
     #[test]
     fn golden_fixture_has_layered_stable_contract() {
         let fixture = load_golden_fixture();
@@ -573,6 +699,86 @@ mod tests {
     fn vector_blob_round_trip_preserves_values() {
         let vector = vec![0.25, -0.5, 1.0];
         assert_eq!(decode_vector(&encode_vector(&vector)), vector);
+    }
+
+    #[test]
+    fn sync_refreshes_rowid_without_reembedding_unchanged_chunk() {
+        let temp = tempdir().expect("应创建 rowid 迁移测试目录");
+        let db_path = temp.path().join("rowid-refresh.sqlite3");
+        let connection = Connection::open(&db_path).expect("应创建 rowid 迁移数据库");
+        connection
+            .execute_batch(
+                "CREATE VIRTUAL TABLE chunks USING fts5(
+                    path UNINDEXED,
+                    start_line UNINDEXED,
+                    end_line UNINDEXED,
+                    search_text,
+                    content UNINDEXED
+                 );",
+            )
+            .expect("应创建 rowid 迁移切片表");
+        ensure_schema(&connection).expect("应创建 rowid 迁移 semantic schema");
+        let path = "src/rowid.rs";
+        let content = "fn stable_chunk() { preserve_embedding(); }";
+        connection
+            .execute(
+                "INSERT INTO chunks(rowid, path, start_line, end_line, search_text, content)
+                 VALUES (1, ?1, 1, 20, ?2, ?2)",
+                params![path, content],
+            )
+            .expect("应写入初始 rowid chunk");
+        let content_hash = digest(content.as_bytes());
+        let identity = chunk_key(path, 1, 20, &content_hash);
+        let mut vector = vec![0.0; embedding::MODEL_DIMENSION];
+        vector[0] = 1.0;
+        connection
+            .execute(
+                "INSERT INTO chunk_vectors(
+                    chunk_key, path, start_line, end_line, content_hash, chunk_rowid,
+                    model_key, dimension, embedding
+                 ) VALUES (?1, ?2, 1, 20, ?3, 1, ?4, ?5, ?6)",
+                params![
+                    identity,
+                    path,
+                    content_hash,
+                    model_key(),
+                    embedding::MODEL_DIMENSION as i64,
+                    encode_vector(&vector)
+                ],
+            )
+            .expect("应写入初始 rowid vector");
+        connection
+            .execute("DELETE FROM chunks WHERE rowid = 1", [])
+            .expect("应删除旧 rowid chunk");
+        connection
+            .execute(
+                "INSERT INTO chunks(rowid, path, start_line, end_line, search_text, content)
+                 VALUES (99, ?1, 1, 20, ?2, ?2)",
+                params![path, content],
+            )
+            .expect("应使用新 rowid 重建相同 chunk");
+        drop(connection);
+
+        let mut progress = Vec::new();
+        sync_vectors(&db_path, Path::new("unused-model"), |indexed, pending| {
+            progress.push((indexed, pending));
+        })
+        .expect("相同 chunk 应只刷新 rowid");
+        assert_eq!(progress.first(), Some(&(1, 0)));
+
+        let connection = Connection::open(&db_path).expect("应重新打开 rowid 迁移数据库");
+        let refreshed = connection
+            .query_row(
+                "SELECT chunk_rowid FROM chunk_vectors WHERE chunk_key = ?1 AND model_key = ?2",
+                params![identity, model_key()],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("应读取刷新后的 rowid");
+        assert_eq!(refreshed, 99);
+        drop(connection);
+        invalidate_cache(&db_path);
+        let hits = search_blocking(&db_path, &vector, 1).expect("应按新 rowid 读取片段");
+        assert_eq!(hits[0].excerpt, content);
     }
 
     #[test]
@@ -777,5 +983,149 @@ mod tests {
         let exact_hits = kind_top_five.get("exact_identifier").copied().unwrap_or(0);
         assert!(exact_total > 0);
         assert!(exact_hits as f32 / exact_total as f32 >= 0.75);
+    }
+
+    #[test]
+    #[ignore = "由 phase2 门禁脚本在 release 测试二进制中执行 20k exact scan"]
+    fn phase2_gate_20k_exact_scan_from_env() {
+        let chunk_count = std::env::var("SANSHU_SOU_20K_CHUNKS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(20_000);
+        let max_p95_ms = std::env::var("SANSHU_SOU_20K_MAX_P95_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(120);
+        assert!(chunk_count >= 20_000);
+
+        let temp = tempdir().expect("应创建 20k exact scan 门禁目录");
+        let db_path = temp.path().join("semantic-20k.sqlite3");
+        let mut connection = Connection::open(&db_path).expect("应创建 20k 门禁数据库");
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA synchronous=NORMAL;
+                 CREATE VIRTUAL TABLE chunks USING fts5(
+                    path UNINDEXED,
+                    start_line UNINDEXED,
+                    end_line UNINDEXED,
+                    search_text,
+                    content UNINDEXED
+                 );",
+            )
+            .expect("应创建 20k 门禁切片表");
+        ensure_schema(&connection).expect("应创建 20k semantic schema");
+
+        let query_vector = (0..embedding::MODEL_DIMENSION)
+            .map(|index| if index % 17 == 0 { 1.0 } else { 0.0 })
+            .collect::<Vec<_>>();
+        let target_index = chunk_count / 2;
+        let target_path = "src/generated/semantic_target.rs";
+        let transaction = connection.transaction().expect("应开启 20k 写事务");
+        {
+            let mut chunk_statement = transaction
+                .prepare(
+                    "INSERT INTO chunks(path, start_line, end_line, search_text, content)
+                     VALUES (?1, 1, 20, ?2, ?2)",
+                )
+                .expect("应准备 20k chunk 写入");
+            let mut vector_statement = transaction
+                .prepare(
+                    "INSERT INTO chunk_vectors(
+                            chunk_key, path, start_line, end_line, content_hash, chunk_rowid,
+                            model_key, dimension, embedding
+                         ) VALUES (?1, ?2, 1, 20, ?3, ?4, ?5, ?6, ?7)",
+                )
+                .expect("应准备 20k vector 写入");
+            let key = model_key();
+            for index in 0..chunk_count {
+                let path = if index == target_index {
+                    target_path.to_string()
+                } else {
+                    format!("src/generated/module_{index:05}.rs")
+                };
+                let content = if index == target_index {
+                    "fn locate_semantic_target() { return_exact_match(); }".to_string()
+                } else {
+                    format!("fn generated_module_{index:05}() {{ process_fixture(); }}")
+                };
+                let content_hash = digest(content.as_bytes());
+                let identity = chunk_key(&path, 1, 20, &content_hash);
+                let vector = if index == target_index {
+                    query_vector.clone()
+                } else {
+                    synthetic_gate_vector(index)
+                };
+                chunk_statement
+                    .execute(params![path, content])
+                    .expect("应写入 20k chunk");
+                let chunk_rowid = transaction.last_insert_rowid();
+                vector_statement
+                    .execute(params![
+                        identity,
+                        path,
+                        content_hash,
+                        chunk_rowid,
+                        key,
+                        embedding::MODEL_DIMENSION as i64,
+                        encode_vector(&vector)
+                    ])
+                    .expect("应写入 20k vector");
+                if (index + 1) % 5_000 == 0 {
+                    println!(
+                        "SOU_PHASE2_GATE_PROGRESS synthetic_indexed={}/{}",
+                        index + 1,
+                        chunk_count
+                    );
+                }
+            }
+        }
+        transaction.commit().expect("应提交 20k 写事务");
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO semantic_index_meta(key, value) VALUES ('generation', 'phase2-20k')",
+                [],
+            )
+            .expect("应写入 20k 缓存代次");
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO semantic_index_meta(key, value) VALUES ('model_key', ?1)",
+                params![model_key()],
+            )
+            .expect("应写入 20k 模型身份");
+        drop(connection);
+        invalidate_cache(&db_path);
+
+        let cold_started = Instant::now();
+        let cold_hits =
+            search_blocking(&db_path, &query_vector, 20).expect("20k exact scan 冷缓存查询应成功");
+        let cold_ms = cold_started.elapsed().as_millis() as u64;
+        assert_eq!(cold_hits[0].relative_path, target_path);
+
+        let mut durations = Vec::new();
+        for _ in 0..40 {
+            let started = Instant::now();
+            let hits = search_blocking(&db_path, &query_vector, 20)
+                .expect("20k exact scan warm 查询应成功");
+            assert_eq!(hits[0].relative_path, target_path);
+            durations.push(started.elapsed().as_millis() as u64);
+        }
+        let p50_ms = gate_percentile(&durations, 50);
+        let p95_ms = gate_percentile(&durations, 95);
+        let result = serde_json::json!({
+            "type": "synthetic_20k",
+            "chunks": chunk_count,
+            "dimension": embedding::MODEL_DIMENSION,
+            "cold_cache_ms": cold_ms,
+            "warm_query_count": durations.len(),
+            "warm_p50_ms": p50_ms,
+            "warm_p95_ms": p95_ms,
+            "max_p95_ms": max_p95_ms,
+            "sqlite_bytes": sqlite_gate_bytes(&db_path),
+            "estimated_vector_bytes": chunk_count * embedding::MODEL_DIMENSION * std::mem::size_of::<f32>(),
+            "top_one_path": target_path,
+        });
+        println!("SOU_PHASE2_20K_RESULT={result}");
+        assert!(p95_ms <= max_p95_ms);
     }
 }

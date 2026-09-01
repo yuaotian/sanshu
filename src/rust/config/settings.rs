@@ -1,6 +1,7 @@
 use crate::constants::{audio, font, mcp, telegram, theme, window};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -149,8 +150,14 @@ pub struct McpConfig {
     pub sou_include_backend_headers: Option<bool>, // 是否在结果中标注后端来源
     pub sou_include_failed_backend_errors: Option<bool>, // 部分成功时是否附加失败后端诊断
     pub sou_local_enabled: Option<bool>,     // 是否启用 SQLite FTS5 / rg 本地兜底
-    pub sou_local_semantic_enabled: Option<bool>, // 是否在 Local 后端启用 BGE 混合检索，默认关闭
+    pub sou_local_semantic_enabled: Option<bool>, // 兼容旧配置；新配置由 sou_local_semantic_mode 决定
+    /// Local 检索模式：off | balanced | accurate。
+    pub sou_local_semantic_mode: Option<String>,
     pub local_embedding_model_dir: Option<String>, // UIUX 与 sou 共享的 BGE 模型目录
+    /// Accurate 模式使用的 BGE reranker 模型目录。
+    pub sou_reranker_model_dir: Option<String>,
+    /// Local FTS5 与向量索引目录。
+    pub sou_local_index_dir: Option<String>,
     // Fast Context 配置
     pub fast_context_command: Option<String>, // 兼容旧配置：Rust 原生 fast-context 已不再使用
     pub fast_context_script_path: Option<String>, // 兼容旧配置：Rust 原生 fast-context 已不再使用
@@ -371,6 +378,94 @@ pub fn default_audio_config() -> AudioConfig {
     }
 }
 
+pub const SOU_SEMANTIC_MODE_OFF: &str = "off";
+pub const SOU_SEMANTIC_MODE_BALANCED: &str = "balanced";
+pub const SOU_SEMANTIC_MODE_ACCURATE: &str = "accurate";
+
+/// 新模式字段优先；缺失或取值异常时按旧布尔字段迁移，确保历史配置行为稳定。
+pub fn effective_sou_semantic_mode(
+    configured: Option<&str>,
+    legacy_enabled: Option<bool>,
+) -> &'static str {
+    match configured
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some(SOU_SEMANTIC_MODE_OFF) => SOU_SEMANTIC_MODE_OFF,
+        Some(SOU_SEMANTIC_MODE_BALANCED) => SOU_SEMANTIC_MODE_BALANCED,
+        Some(SOU_SEMANTIC_MODE_ACCURATE) => SOU_SEMANTIC_MODE_ACCURATE,
+        _ if legacy_enabled.unwrap_or(false) => SOU_SEMANTIC_MODE_BALANCED,
+        _ => SOU_SEMANTIC_MODE_OFF,
+    }
+}
+
+pub fn effective_sou_reranker_model_dir(configured: Option<&str>) -> PathBuf {
+    configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(default_sou_reranker_model_dir)
+}
+
+pub fn default_sou_reranker_model_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .or_else(dirs::config_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("sanshu")
+        .join("models")
+        .join("bge-reranker-base")
+}
+
+pub fn effective_sou_local_index_dir(configured: Option<&str>) -> PathBuf {
+    configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(default_sou_local_index_dir)
+}
+
+pub fn default_sou_local_index_dir() -> PathBuf {
+    dirs::config_dir()
+        .or_else(dirs::data_local_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("sanshu")
+        .join("sou-index")
+}
+
+#[cfg(test)]
+mod sou_semantic_settings_tests {
+    use super::*;
+
+    #[test]
+    fn new_mode_takes_precedence_over_legacy_boolean() {
+        assert_eq!(
+            effective_sou_semantic_mode(Some("accurate"), Some(false)),
+            SOU_SEMANTIC_MODE_ACCURATE
+        );
+        assert_eq!(
+            effective_sou_semantic_mode(Some("off"), Some(true)),
+            SOU_SEMANTIC_MODE_OFF
+        );
+    }
+
+    #[test]
+    fn missing_or_invalid_mode_migrates_legacy_boolean() {
+        assert_eq!(
+            effective_sou_semantic_mode(None, Some(true)),
+            SOU_SEMANTIC_MODE_BALANCED
+        );
+        assert_eq!(
+            effective_sou_semantic_mode(Some("future"), Some(false)),
+            SOU_SEMANTIC_MODE_OFF
+        );
+        assert_eq!(
+            effective_sou_semantic_mode(None, None),
+            SOU_SEMANTIC_MODE_OFF
+        );
+    }
+}
+
 pub fn default_mcp_config() -> McpConfig {
     McpConfig {
         tools: default_mcp_tools(),
@@ -404,7 +499,10 @@ pub fn default_mcp_config() -> McpConfig {
         sou_include_failed_backend_errors: Some(true),
         sou_local_enabled: Some(true),
         sou_local_semantic_enabled: Some(false),
+        sou_local_semantic_mode: Some(SOU_SEMANTIC_MODE_OFF.to_string()),
         local_embedding_model_dir: None,
+        sou_reranker_model_dir: None,
+        sou_local_index_dir: None,
         // Fast Context 默认配置：协议与本地命令执行已迁移为 Rust 原生实现
         fast_context_command: Some("node".to_string()),
         fast_context_script_path: None,

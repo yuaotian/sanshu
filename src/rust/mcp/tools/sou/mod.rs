@@ -16,6 +16,7 @@ use crate::mcp::tools::AcemcpTool;
 
 pub(crate) mod fast_context;
 pub(crate) mod local;
+pub(crate) mod reranker;
 pub(crate) mod semantic;
 
 const BACKEND_ACE: &str = "ace";
@@ -55,6 +56,7 @@ struct SouRuntimeConfig {
     include_backend_headers: bool,
     include_failed_backend_errors: bool,
     local_enabled: bool,
+    local_index_dir: PathBuf,
     local_semantic: local::LocalSemanticSettings,
     fast_context: FastContextConfig,
 }
@@ -84,6 +86,11 @@ struct BackendRunResult {
     semantic_indexed_chunks: Option<u64>,
     semantic_pending_chunks: Option<u64>,
     semantic_top_score: Option<f32>,
+    semantic_mode: Option<String>,
+    reranker_state: Option<String>,
+    reranker_model: Option<String>,
+    reranker_duration_ms: Option<u64>,
+    reranker_top_score: Option<f32>,
     fusion: Option<String>,
 }
 
@@ -261,11 +268,18 @@ impl SouRuntimeConfig {
             load_standalone_config().map_err(|e| anyhow!("读取配置文件失败: {}", e))?;
         let mcp = app_config.mcp_config;
 
+        let semantic_mode = crate::config::effective_sou_semantic_mode(
+            mcp.sou_local_semantic_mode.as_deref(),
+            mcp.sou_local_semantic_enabled,
+        );
         let local_semantic = local::LocalSemanticSettings {
-            enabled: mcp.sou_local_semantic_enabled.unwrap_or(false),
+            mode: local::LocalSemanticMode::from_effective(semantic_mode),
             model_dir: crate::mcp::embedding::effective_model_dir(
                 mcp.local_embedding_model_dir.as_deref(),
                 mcp.uiux_model_dir.as_deref(),
+            ),
+            reranker_model_dir: crate::config::effective_sou_reranker_model_dir(
+                mcp.sou_reranker_model_dir.as_deref(),
             ),
         };
         Ok(Self {
@@ -277,6 +291,9 @@ impl SouRuntimeConfig {
             include_backend_headers: mcp.sou_include_backend_headers.unwrap_or(true),
             include_failed_backend_errors: mcp.sou_include_failed_backend_errors.unwrap_or(true),
             local_enabled: mcp.sou_local_enabled.unwrap_or(true),
+            local_index_dir: crate::config::effective_sou_local_index_dir(
+                mcp.sou_local_index_dir.as_deref(),
+            ),
             local_semantic,
             fast_context: FastContextConfig {
                 api_key: mcp.fast_context_api_key.and_then(|s| {
@@ -616,6 +633,11 @@ async fn run_ace(request: &SouRequest) -> Result<BackendRunResult, String> {
         semantic_indexed_chunks: None,
         semantic_pending_chunks: None,
         semantic_top_score: None,
+        semantic_mode: None,
+        reranker_state: None,
+        reranker_model: None,
+        reranker_duration_ms: None,
+        reranker_top_score: None,
         fusion: None,
         text,
     })
@@ -634,6 +656,7 @@ async fn run_local(
             .exclude_paths
             .clone()
             .unwrap_or_else(|| defaults.exclude_paths.clone()),
+        index_dir: config.local_index_dir.clone(),
         semantic: config.local_semantic.clone(),
     })
     .await
@@ -651,6 +674,11 @@ async fn run_local(
         semantic_indexed_chunks: Some(output.semantic_indexed_chunks),
         semantic_pending_chunks: Some(output.semantic_pending_chunks),
         semantic_top_score: output.semantic_top_score,
+        semantic_mode: Some(output.semantic_mode),
+        reranker_state: output.reranker_state,
+        reranker_model: output.reranker_model,
+        reranker_duration_ms: output.reranker_duration_ms,
+        reranker_top_score: output.reranker_top_score,
         fusion: output.fusion,
     })
 }
@@ -796,6 +824,11 @@ async fn run_fast_context_once(
         semantic_indexed_chunks: None,
         semantic_pending_chunks: None,
         semantic_top_score: None,
+        semantic_mode: None,
+        reranker_state: None,
+        reranker_model: None,
+        reranker_duration_ms: None,
+        reranker_top_score: None,
         fusion: None,
         text,
     })
@@ -1163,50 +1196,66 @@ fn backend_success_result(
 ) -> CallToolResult {
     let degraded = result.fallback_reason.is_some();
     let mut text = result.text.clone();
+    let diagnostics = [
+        result
+            .engine
+            .as_deref()
+            .map(|value| format!(", engine={}", value)),
+        result
+            .index_state
+            .as_deref()
+            .map(|value| format!(", index_state={}", value)),
+        result
+            .semantic_mode
+            .as_deref()
+            .map(|value| format!(", semantic_mode={}", value)),
+        result
+            .semantic_state
+            .as_deref()
+            .map(|value| format!(", semantic_state={}", value)),
+        result
+            .semantic_model
+            .as_deref()
+            .map(|value| format!(", semantic_model={}", value)),
+        result
+            .semantic_indexed_chunks
+            .map(|value| format!(", semantic_indexed_chunks={}", value)),
+        result
+            .semantic_pending_chunks
+            .map(|value| format!(", semantic_pending_chunks={}", value)),
+        result
+            .semantic_top_score
+            .map(|value| format!(", semantic_top_score={:.4}", value)),
+        result
+            .reranker_state
+            .as_deref()
+            .map(|value| format!(", reranker_state={}", value)),
+        result
+            .reranker_model
+            .as_deref()
+            .map(|value| format!(", reranker_model={}", value)),
+        result
+            .reranker_duration_ms
+            .map(|value| format!(", reranker_duration_ms={}", value)),
+        result
+            .reranker_top_score
+            .map(|value| format!(", reranker_top_score={:.4}", value)),
+        result
+            .fusion
+            .as_deref()
+            .map(|value| format!(", fusion={}", value)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<String>();
     text.push_str(&format!(
-        "\n[sou metadata] requested_backend={}, actual_backend={}, degraded={}, hit_count={}, duration_ms={}{}{}{}{}{}{}{}{}",
+        "\n[sou metadata] requested_backend={}, actual_backend={}, degraded={}, hit_count={}, duration_ms={}{}",
         requested_backend,
         result.backend,
         degraded,
         result.hit_count,
         result.duration_ms,
-        result
-            .engine
-            .as_deref()
-            .map(|value| format!(", engine={}", value))
-            .unwrap_or_default(),
-        result
-            .index_state
-            .as_deref()
-            .map(|value| format!(", index_state={}", value))
-            .unwrap_or_default(),
-        result
-            .semantic_state
-            .as_deref()
-            .map(|value| format!(", semantic_state={}", value))
-            .unwrap_or_default(),
-        result
-            .semantic_model
-            .as_deref()
-            .map(|value| format!(", semantic_model={}", value))
-            .unwrap_or_default(),
-        result
-            .semantic_indexed_chunks
-            .map(|value| format!(", semantic_indexed_chunks={}", value))
-            .unwrap_or_default(),
-        result
-            .semantic_pending_chunks
-            .map(|value| format!(", semantic_pending_chunks={}", value))
-            .unwrap_or_default(),
-        result
-            .semantic_top_score
-            .map(|value| format!(", semantic_top_score={:.4}", value))
-            .unwrap_or_default(),
-        result
-            .fusion
-            .as_deref()
-            .map(|value| format!(", fusion={}", value))
-            .unwrap_or_default()
+        diagnostics,
     ));
     if include_fallback_text {
         if let Some(reason) = result.fallback_reason.as_deref() {
@@ -1229,6 +1278,11 @@ fn backend_success_result(
             "semantic_indexed_chunks": result.semantic_indexed_chunks,
             "semantic_pending_chunks": result.semantic_pending_chunks,
             "semantic_top_score": result.semantic_top_score,
+            "semantic_mode": result.semantic_mode,
+            "reranker_state": result.reranker_state,
+            "reranker_model": result.reranker_model,
+            "reranker_duration_ms": result.reranker_duration_ms,
+            "reranker_top_score": result.reranker_top_score,
             "fusion": result.fusion,
         }),
     )
@@ -1485,9 +1539,11 @@ reqwest = { version = "0.11", features = ["socks"] }
                     .exclude_paths
                     .clone()
                     .unwrap_or_else(|| defaults.exclude_paths.clone()),
+                index_dir: temp.path().join("indexes"),
                 semantic: local::LocalSemanticSettings {
-                    enabled: false,
+                    mode: local::LocalSemanticMode::Off,
                     model_dir: crate::mcp::embedding::default_model_dir(),
+                    reranker_model_dir: crate::config::default_sou_reranker_model_dir(),
                 },
             },
             temp.path().join("route-index.sqlite3"),
@@ -1507,6 +1563,11 @@ reqwest = { version = "0.11", features = ["socks"] }
             semantic_indexed_chunks: Some(output.semantic_indexed_chunks),
             semantic_pending_chunks: Some(output.semantic_pending_chunks),
             semantic_top_score: output.semantic_top_score,
+            semantic_mode: Some(output.semantic_mode),
+            reranker_state: output.reranker_state,
+            reranker_model: output.reranker_model,
+            reranker_duration_ms: output.reranker_duration_ms,
+            reranker_top_score: output.reranker_top_score,
             fusion: output.fusion,
         };
         assert!(result.hit_count >= 1);
@@ -1517,6 +1578,9 @@ reqwest = { version = "0.11", features = ["socks"] }
         assert_eq!(metadata["actual_backend"], BACKEND_LOCAL);
         assert!(metadata["hit_count"].as_u64().unwrap_or_default() >= 1);
         assert_eq!(metadata["semantic_state"], "disabled");
+        assert_eq!(metadata["semantic_mode"], "off");
+        assert!(metadata["reranker_state"].is_null());
+        assert!(metadata["reranker_model"].is_null());
         assert_eq!(metadata["degraded"], false);
         assert_eq!(call_result.is_error, Some(false));
     }
