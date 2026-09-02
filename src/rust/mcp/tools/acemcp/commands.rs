@@ -1916,10 +1916,18 @@ pub async fn select_sou_storage_directory(
 }
 
 #[tauri::command]
+pub async fn probe_sou_reranker_download_routes(
+    proxy: Option<crate::mcp::tools::sou::reranker::RerankerProxySettings>,
+) -> Result<crate::mcp::tools::sou::reranker::RerankerDownloadProbeResult, String> {
+    crate::mcp::tools::sou::reranker::probe_download_routes(proxy).await
+}
+
+#[tauri::command]
 pub async fn start_sou_reranker_model_download(
     state: State<'_, AppState>,
+    network: Option<crate::mcp::tools::sou::reranker::RerankerDownloadNetwork>,
 ) -> Result<crate::mcp::tools::sou::reranker::RerankerModelStatus, String> {
-    let (directory, proxy_config) = {
+    let (directory, global_proxy_config) = {
         let config = state
             .config
             .lock()
@@ -1930,6 +1938,10 @@ pub async fn start_sou_reranker_model_download(
             ),
             config.proxy_config.clone(),
         )
+    };
+    let proxy_config = match network {
+        Some(network) => network.apply_to(global_proxy_config)?,
+        None => global_proxy_config,
     };
     crate::mcp::tools::sou::reranker::start_download(directory, proxy_config)
 }

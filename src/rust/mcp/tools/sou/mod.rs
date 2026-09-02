@@ -24,6 +24,7 @@ const BACKEND_ACE: &str = "ace";
 const BACKEND_FAST_CONTEXT: &str = "fast_context";
 const BACKEND_LOCAL: &str = "local";
 const BACKEND_AUTO: &str = "auto";
+// `both` 是兼容既有配置和 MCP 调用的协议值，当前语义为合并三个后端。
 const BACKEND_BOTH: &str = "both";
 const BACKEND_DEFAULT: &str = "default";
 const FAST_CONTEXT_FALLBACK_RETRY_DELAY_MS: u64 = 700;
@@ -119,7 +120,7 @@ impl SouTool {
                 "backend": {
                     "type": "string",
                     "enum": ["default", "auto", "ace", "fast_context", "local", "both"],
-                    "description": "可选搜索后端。default 使用配置；auto 按优先级自动回退；local 使用本地 FTS5/rg；both 同时返回 ACE 与 fast-context。"
+                    "description": "可选搜索后端。default 使用配置；auto 按优先级自动回退；local 使用本地 FTS5/rg；both 同时返回 ACE、fast-context 与 Local。"
                 },
                 "tree_depth": {
                     "type": "number",
@@ -154,7 +155,7 @@ impl SouTool {
             Tool {
                 name: Cow::Borrowed("sou"),
                 description: Some(Cow::Borrowed(
-                    "代码上下文检索工具。支持 ACE、fast-context、本地 FTS5/rg 兜底、自动回退与双后端合并返回。\n\n查询建议：\n- 代码标识符通常为英文，使用中文时建议混入英文类名/函数名/文件名（如 GestureRecognizer、ImageCodec、ClipboardService）。\n- 长中文描述容易让模型空 answer；如果第一次返回 0 结果，请拆成更具体的子问题或显式给出英文关键词重试。\n- 给出模块/目录提示（如 'gesture 模块' / 'src/capture/'）有助于快速定位。",
+                    "代码上下文检索工具。支持 ACE、fast-context、本地 FTS5/rg 兜底、自动回退与三后端合并返回。\n\n查询建议：\n- 代码标识符通常为英文，使用中文时建议混入英文类名/函数名/文件名（如 GestureRecognizer、ImageCodec、ClipboardService）。\n- 长中文描述容易让模型空 answer；如果第一次返回 0 结果，请拆成更具体的子问题或显式给出英文关键词重试。\n- 给出模块/目录提示（如 'gesture 模块' / 'src/capture/'）有助于快速定位。",
                 )),
                 input_schema: Arc::new(schema_map),
                 annotations: None,
@@ -553,13 +554,22 @@ async fn run_both_results(
     request: &SouRequest,
     config: &SouRuntimeConfig,
 ) -> (Vec<BackendRunResult>, Vec<BackendRunError>) {
-    let (ace, fast) = tokio::join!(
+    // 三后端并发执行；Local 关闭时沿用部分失败诊断，避免静默省略 Local。
+    let local = async {
+        if config.local_enabled {
+            run_local(request, config).await
+        } else {
+            Err("本地兜底已禁用".to_string())
+        }
+    };
+    let (ace, fast, local) = tokio::join!(
         run_ace(request),
         run_fast_context(
             request,
             &config.fast_context,
             config.include_backend_headers
         ),
+        local,
     );
 
     let mut outputs = Vec::new();
@@ -586,6 +596,19 @@ async fn run_both_results(
             log_important!(warn, "[sou] both 后端失败: fast_context, error={}", message);
             errors.push(BackendRunError {
                 backend: BACKEND_FAST_CONTEXT.to_string(),
+                message,
+            });
+        }
+    }
+    match local {
+        Ok(result) => {
+            log_important!(info, "[sou] both 后端成功: local");
+            outputs.push(result);
+        }
+        Err(message) => {
+            log_important!(warn, "[sou] both 后端失败: local, error={}", message);
+            errors.push(BackendRunError {
+                backend: BACKEND_LOCAL.to_string(),
                 message,
             });
         }

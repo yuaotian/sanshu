@@ -15,7 +15,7 @@
 - `auto`：默认推荐策略，按配置优先级尝试后端，默认先 ACE，失败后自动切换到 fast-context。
 - `ace`：强制使用 ACE / Augment 后端，保持原有索引式搜索行为。
 - `fast_context`：强制使用 fast-context 后端，适合 ACE token 失效或不想等待 ACE 索引时使用。
-- `both`：同时调用 ACE 与 fast-context，并合并返回结果；部分后端失败时会附带诊断信息。
+- `both`：同时调用 ACE、fast-context 与 Local，并合并返回结果；部分后端失败或 Local 被关闭时会附带诊断信息。
 
 ### 2. 增量索引
 - 自动检测项目中的新文件和修改过的文件
@@ -54,7 +54,7 @@
    - **默认策略**：推荐保持 `auto`，当 ACE 不可用时自动回退到 fast-context。
    - **自动模式优先级**：默认 `ACE -> fast-context`，也可以调整为优先 fast-context。
    - **主动切换调试**：可在页面中临时选择 `default`、`auto`、`ace`、`fast_context` 或 `both` 验证效果。
-   - **双后端合并**：选择 `both` 后会一起返回 ACE 与 fast-context 的结果。
+   - **三后端合并**：选择 `both` 后会一起返回 ACE、fast-context 与 Local 的结果。
    - **Fast Context 参数**：Rust 原生执行，可配置 Windsurf API Key、`tree_depth`、`max_turns`、`max_results`、超时时间和排除路径。
    - 如果只使用 fast-context，ACE 的 API 端点与认证令牌可以留空。
 

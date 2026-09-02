@@ -4,6 +4,8 @@
  * 包含：基础配置、高级配置、日志调试、索引管理
  */
 import type { IndexStatus, ProjectIndexStatus, ProjectsIndexStatus } from '../../types/tauri'
+import type { ProxyConfig } from '../../composables/useProxyConfig'
+import type { RerankerDownloadSelection } from '../../types/rerankerDownload'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useDialog, useMessage } from 'naive-ui'
@@ -11,6 +13,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useAcemcpSync } from '../../composables/useAcemcpSync'
 import ConfigSection from '../common/ConfigSection.vue'
 import ProjectIndexManager from '../settings/ProjectIndexManager.vue'
+import RerankerDownloadPreflightModal from './RerankerDownloadPreflightModal.vue'
 import ProxySettingsModal from './SouProxySettingsModal.vue'
 
 // Props
@@ -232,6 +235,7 @@ const embeddingModelStatus = ref<EmbeddingModelStatus | null>(null)
 const embeddingModelOperating = ref(false)
 const rerankerModelStatus = ref<RerankerModelStatus | null>(null)
 const rerankerModelOperating = ref(false)
+const rerankerPreflightVisible = ref(false)
 const resourceUsage = ref<ResourceUsageSnapshot | null>(null)
 const localIndexReadError = ref('')
 const embeddingStatusReadError = ref('')
@@ -495,7 +499,7 @@ const backendOptions = [
   { label: '仅 ACE / Augment', value: 'ace' },
   { label: '仅 fast-context', value: 'fast_context' },
   { label: '仅 Local（FTS5 / rg）', value: 'local' },
-  { label: '双后端合并', value: 'both' },
+  { label: '三后端合并', value: 'both' },
 ]
 
 const autoOrderOptions = [
@@ -510,7 +514,7 @@ const backendNameMap: Record<string, string> = {
   fast_context: 'Fast Context',
   local: 'Local',
   auto: '自动',
-  both: '双后端',
+  both: '三后端',
 }
 
 const semanticModeOptions = [
@@ -559,6 +563,7 @@ const localEnabledInStrategy = computed(() => {
     return false
   const backend = config.value.sou_default_backend
   return backend === 'local'
+    || backend === 'both'
     || (backend === 'auto' && config.value.sou_auto_order.includes('local'))
 })
 
@@ -890,7 +895,7 @@ const backendStrategySummary = computed(() => {
     case 'local':
       return '当前默认仅使用 Local；热索引走 FTS5，索引未就绪时即时使用 rg。'
     case 'both':
-      return '当前默认同时返回 ACE 与 fast-context 的合并结果。'
+      return '当前默认同时返回 ACE、fast-context 与 Local 的合并结果；Local 关闭或任一后端失败时将降级返回其余可用结果。'
     default:
       return `当前自动顺序：${config.value.sou_auto_order.map(value => backendNameMap[value] || value).join(' → ')}。`
   }
@@ -1334,6 +1339,17 @@ function rememberStorageConfig() {
   }
 }
 
+// 中文说明：保留真实进度控制填充宽度，仅将可见百分比统一为固定两位小数。
+function normalizeProgressPercent(value?: number | null): number {
+  if (value == null || !Number.isFinite(value))
+    return 0
+  return Math.max(0, Math.min(100, value))
+}
+
+function formatProgressPercent(value?: number | null): string {
+  return `${normalizeProgressPercent(value).toFixed(2)}%`
+}
+
 function formatRate(value?: number | null): string {
   if (!value || !Number.isFinite(value) || value <= 0)
     return '等待采样'
@@ -1621,19 +1637,45 @@ function startResourceUsagePolling() {
   resourceUsageTimer = setInterval(() => refreshResourceUsage(false), 2000)
 }
 
-async function startRerankerDownload() {
+function startRerankerDownload() {
   if (!accurateModeActive.value) {
     message.warning('请先启用准确（实验）模式，再下载重排模型')
     return
   }
+  rerankerPreflightVisible.value = true
+}
+
+async function confirmRerankerDownload(selection: RerankerDownloadSelection) {
   rerankerModelOperating.value = true
   try {
     if (!await saveConfig())
       return
-    rerankerModelStatus.value = await invoke<RerankerModelStatus>('start_sou_reranker_model_download')
+    rerankerModelStatus.value = await invoke<RerankerModelStatus>('start_sou_reranker_model_download', {
+      network: selection.network,
+    })
+    if (selection.remember_proxy && selection.network.mode === 'proxy') {
+      try {
+        const current = await invoke<ProxyConfig>('get_proxy_config')
+        await invoke('set_proxy_config', {
+          proxyConfig: {
+            ...current,
+            auto_detect: false,
+            enabled: true,
+            proxy_type: selection.network.proxy.proxy_type,
+            host: selection.network.proxy.host,
+            port: selection.network.proxy.port,
+            only_for_cn: false,
+          },
+        })
+      }
+      catch (error) {
+        message.warning(`下载已启动，但保存全局代理失败：${String(error)}`)
+      }
+    }
     resetRerankerRate()
     rerankerRateSample = updateRate(null, rerankerModelStatus.value.downloaded_bytes || 0).sample
     startRerankerStatusPolling()
+    rerankerPreflightVisible.value = false
     message.success('BGE reranker 下载任务已启动')
   }
   catch (error) {
@@ -2291,7 +2333,7 @@ defineExpose({ saveConfig })
       <n-tab-pane name="backend" tab="后端切换">
         <n-scrollbar class="tab-scrollbar">
           <n-space vertical size="large" class="tab-content">
-            <ConfigSection title="切换策略" description="配置默认后端、主动切换入口和双后端合并返回">
+            <ConfigSection title="切换策略" description="配置默认后端、主动切换入口和三后端合并返回">
               <n-space vertical size="medium">
                 <n-alert type="success" :bordered="false">
                   推荐默认策略：ACE → Fast Context → Local。远端失败或返回零片段时继续回退，Local 零命中作为最终结果。
@@ -2492,15 +2534,17 @@ defineExpose({ saveConfig })
                         {{ localIndexTaskActive ? '正在构建，状态每秒刷新' : (localIndexStatus.semantic_last_error || '已持久化向量分块') }}
                       </div>
                     </div>
-                    <strong class="sou-panel-value">{{ localIndexProgressPercent.toFixed(1) }}%</strong>
+                    <strong class="sou-panel-value tabular-nums">{{ formatProgressPercent(localIndexProgressPercent) }}</strong>
                   </div>
                   <n-progress
                     type="line"
-                    :percentage="localIndexProgressPercent"
+                    :percentage="normalizeProgressPercent(localIndexProgressPercent)"
                     :status="localIndexStatus.semantic_state === 'error' ? 'error' : localIndexStatus.semantic_state === 'ready' ? 'success' : 'default'"
                     :height="8"
                     :border-radius="4"
-                  />
+                  >
+                    <span class="whitespace-nowrap tabular-nums">{{ formatProgressPercent(localIndexProgressPercent) }}</span>
+                  </n-progress>
                   <div class="sou-metrics">
                     <span>{{ localIndexStatus.semantic_indexed_chunks }} 已索引</span>
                     <span>{{ localIndexStatus.semantic_pending_chunks }} 待处理</span>
@@ -2541,13 +2585,15 @@ defineExpose({ saveConfig })
                   </div>
                   <n-progress
                     type="line"
-                    :percentage="Math.max(0, Math.min(100, embeddingModelStatus?.progress_percent || 0))"
+                    :percentage="normalizeProgressPercent(embeddingModelStatus?.progress_percent)"
                     :status="embeddingModelStatus?.phase === 'error' ? 'error' : embeddingModelStatus?.phase === 'ready' ? 'success' : 'default'"
                     :height="8"
                     :border-radius="4"
-                  />
+                  >
+                    <span class="whitespace-nowrap tabular-nums">{{ formatProgressPercent(embeddingModelStatus?.progress_percent) }}</span>
+                  </n-progress>
                   <div class="sou-metrics">
-                    <span>进度 {{ Math.max(0, Math.min(100, embeddingModelStatus?.progress_percent || 0)).toFixed(1) }}%</span>
+                    <span class="tabular-nums">进度 {{ formatProgressPercent(embeddingModelStatus?.progress_percent) }}</span>
                     <span>总计 {{ formatBytes(embeddingModelStatus?.downloaded_bytes || 0) }} / {{ formatBytes(embeddingModelStatus?.total_bytes || 0) }}</span>
                     <span>BGE {{ formatBytes(embeddingModelStatus?.model_downloaded_bytes || 0) }} / {{ formatBytes(embeddingModelStatus?.model_total_bytes || 0) }}</span>
                     <span>ORT {{ formatBytes(embeddingModelStatus?.runtime_downloaded_bytes || 0) }} / {{ formatBytes(embeddingModelStatus?.runtime_total_bytes || 0) }}</span>
@@ -2849,6 +2895,7 @@ defineExpose({ saveConfig })
                   <n-progress
                     type="line"
                     :percentage="Math.max(0, Math.min(100, rerankerModelStatus?.progress_percent || 0))"
+                    :show-indicator="false"
                     :status="rerankerModelStatus?.phase === 'error' ? 'error' : rerankerModelStatus?.phase === 'ready' ? 'success' : 'default'"
                     :height="8"
                     :border-radius="4"
@@ -3619,6 +3666,12 @@ defineExpose({ saveConfig })
         </n-scrollbar>
       </n-tab-pane>
     </n-tabs>
+
+    <RerankerDownloadPreflightModal
+      v-model:show="rerankerPreflightVisible"
+      :operating="rerankerModelOperating"
+      @confirm="confirmRerankerDownload"
+    />
 
     <ProxySettingsModal
       v-model:show="showProxyModal"

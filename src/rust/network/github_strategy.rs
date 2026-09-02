@@ -153,7 +153,8 @@ pub async fn fetch_json_with_strategy(
     proxy_config: &ProxyConfig,
 ) -> Result<GitHubJsonResult, String> {
     // JSON 会直接影响版本判断与公告渲染，只走官方域名直连或本地代理。
-    let candidates = build_candidates(url, kind, proxy_config, DIRECT_TIMEOUT_SECS, false).await;
+    let candidates =
+        build_candidates(url, kind, proxy_config, DIRECT_TIMEOUT_SECS, false, false).await;
     let mut errors = Vec::new();
 
     for candidate in candidates {
@@ -240,19 +241,21 @@ where
 {
     // 代理站内容只有在调用方提供 SHA-256 时才进入候选，避免把可执行更新交给无信任根的中转站。
     let allow_mirrors = expected_sha256.is_some();
+    let mut on_progress = on_progress;
     download_verified_with_strategy_inner(
         url,
         target_path,
         proxy_config,
         expected_sha256,
-        on_progress,
+        move |progress, _route| on_progress(progress),
         should_cancel,
         allow_mirrors,
+        false,
     )
     .await
 }
 
-/// 非 GitHub 固定资产只使用官方地址与本地代理，不拼接 GitHub 内容镜像。
+/// 非 GitHub 固定资产只使用官方地址与本地代理，并把本地代理作为首选路线。
 pub async fn download_verified_with_direct_or_local_proxy_with_progress_and_cancel<F, C>(
     url: &str,
     target_path: &Path,
@@ -262,7 +265,7 @@ pub async fn download_verified_with_direct_or_local_proxy_with_progress_and_canc
     should_cancel: C,
 ) -> Result<GitHubRouteSummary, String>
 where
-    F: FnMut(GitHubDownloadProgress) + Send,
+    F: FnMut(GitHubDownloadProgress, &GitHubRouteSummary) + Send,
     C: FnMut() -> bool + Send,
 {
     download_verified_with_strategy_inner(
@@ -273,6 +276,7 @@ where
         on_progress,
         should_cancel,
         false,
+        true,
     )
     .await
 }
@@ -286,9 +290,10 @@ async fn download_verified_with_strategy_inner<F, C>(
     mut on_progress: F,
     mut should_cancel: C,
     allow_mirrors: bool,
+    prefer_local_proxy: bool,
 ) -> Result<GitHubRouteSummary, String>
 where
-    F: FnMut(GitHubDownloadProgress) + Send,
+    F: FnMut(GitHubDownloadProgress, &GitHubRouteSummary) + Send,
     C: FnMut() -> bool + Send,
 {
     let candidates = build_candidates(
@@ -297,6 +302,7 @@ where
         proxy_config,
         DOWNLOAD_TIMEOUT_SECS,
         allow_mirrors,
+        prefer_local_proxy,
     )
     .await;
     let mut errors = Vec::new();
@@ -308,10 +314,12 @@ where
         }
         match send_download_get(&candidate, &part_path).await {
             Ok(response) => {
+                let route = candidate.route_summary();
+                let mut route_progress = |progress| on_progress(progress, &route);
                 if let Err(e) = stream_response_to_file(
                     response,
                     &part_path,
-                    &mut on_progress,
+                    &mut route_progress,
                     &mut should_cancel,
                 )
                 .await
@@ -355,7 +363,7 @@ where
                     candidate.label,
                     target_path.display()
                 );
-                return Ok(candidate.route_summary());
+                return Ok(route);
             }
             Err(e) => errors.push(format!("{} 下载失败: {}", candidate.label, e)),
         }
@@ -435,6 +443,7 @@ async fn build_candidates(
     proxy_config: &ProxyConfig,
     timeout_secs: u64,
     allow_mirrors: bool,
+    prefer_local_proxy: bool,
 ) -> Vec<RequestCandidate> {
     let country = detect_geo_location().await;
     let direct_timeout = if country == "CN" || country == "UNKNOWN" {
@@ -443,19 +452,18 @@ async fn build_candidates(
         timeout_secs
     };
 
-    let mut candidates = Vec::new();
-    candidates.push(RequestCandidate {
+    let direct = RequestCandidate {
         label: format!("github-direct-{}", country),
         url: original_url.to_string(),
         proxy: None,
         used_mirror: false,
         connect_timeout_secs: CONNECT_TIMEOUT_SECS,
         timeout_secs: direct_timeout,
-    });
+    };
 
-    // 本地代理仍访问 GitHub 官方域名，优先于内容中转站。
-    if let Some(proxy) = detect_local_proxy(proxy_config).await {
-        candidates.push(RequestCandidate {
+    let local_proxy = detect_local_proxy(proxy_config)
+        .await
+        .map(|proxy| RequestCandidate {
             label: format!("local-proxy:{}", proxy.to_url()),
             url: original_url.to_string(),
             proxy: Some(proxy),
@@ -463,7 +471,8 @@ async fn build_candidates(
             connect_timeout_secs: CONNECT_TIMEOUT_SECS,
             timeout_secs,
         });
-    }
+
+    let mut candidates = order_primary_candidates(direct, local_proxy, prefer_local_proxy);
 
     if allow_mirrors {
         for prefix in sorted_proxy_prefixes(kind) {
@@ -483,6 +492,26 @@ async fn build_candidates(
         kind.label(),
         candidates.len()
     );
+    candidates
+}
+
+fn order_primary_candidates(
+    direct: RequestCandidate,
+    local_proxy: Option<RequestCandidate>,
+    prefer_local_proxy: bool,
+) -> Vec<RequestCandidate> {
+    let mut candidates = Vec::with_capacity(1 + if local_proxy.is_some() { 1 } else { 0 });
+    if prefer_local_proxy {
+        if let Some(proxy) = local_proxy {
+            candidates.push(proxy);
+        }
+        candidates.push(direct);
+    } else {
+        candidates.push(direct);
+        if let Some(proxy) = local_proxy {
+            candidates.push(proxy);
+        }
+    }
     candidates
 }
 
@@ -810,6 +839,37 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::thread;
+
+    fn test_candidate(label: &str, proxy: Option<ProxyInfo>) -> RequestCandidate {
+        RequestCandidate {
+            label: label.to_string(),
+            url: "https://example.invalid/model.onnx".to_string(),
+            proxy,
+            used_mirror: false,
+            connect_timeout_secs: 1,
+            timeout_secs: 1,
+        }
+    }
+
+    #[test]
+    fn primary_candidate_order_respects_local_proxy_preference() {
+        let proxy = ProxyInfo::new(ProxyType::Http, "127.0.0.1".to_string(), 7890);
+        let preferred = order_primary_candidates(
+            test_candidate("direct", None),
+            Some(test_candidate("proxy", Some(proxy.clone()))),
+            true,
+        );
+        assert_eq!(preferred[0].label, "proxy");
+        assert_eq!(preferred[1].label, "direct");
+
+        let fallback = order_primary_candidates(
+            test_candidate("direct", None),
+            Some(test_candidate("proxy", Some(proxy))),
+            false,
+        );
+        assert_eq!(fallback[0].label, "direct");
+        assert_eq!(fallback[1].label, "proxy");
+    }
 
     #[test]
     fn partial_download_uses_sibling_part_file() {

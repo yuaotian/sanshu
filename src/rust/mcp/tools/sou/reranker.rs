@@ -3,9 +3,10 @@
 use fastembed::{
     RerankInitOptionsUserDefined, TextRerank, TokenizerFiles, UserDefinedRerankingModel,
 };
+use futures_util::StreamExt;
 use once_cell::sync::Lazy;
 use ring::digest::{Context as ShaContext, SHA256};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::ProxyConfig;
 use crate::network::download_verified_with_direct_or_local_proxy_with_progress_and_cancel;
+use crate::network::github_strategy::GitHubRouteSummary;
 
 pub const MODEL_NAME: &str = "BAAI/bge-reranker-base";
 pub const MODEL_REVISION: &str = "580465186bcc87f862a9b2f9003d720af2377980";
@@ -26,6 +28,11 @@ const MODEL_TOTAL_BYTES: u64 = 1_134_628_267;
 const LOCK_FILE_NAME: &str = ".sou-reranker.lock";
 const ORT_DLL_FILE_NAME: &str = "onnxruntime.dll";
 const ORT_DLL_BYTES: u64 = 15_809_848;
+const PROBE_SAMPLE_BYTES: u64 = 512 * 1024;
+const PROBE_SAMPLE_OFFSETS: [u64; 3] = [0, 384 * 1024 * 1024, 768 * 1024 * 1024];
+const PROBE_CONNECT_TIMEOUT_SECS: u64 = 8;
+const PROBE_SAMPLE_TIMEOUT_SECS: u64 = 20;
+const PROBE_USER_AGENT: &str = concat!("sanshu/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Clone, Copy)]
 struct ModelFileSpec {
@@ -109,6 +116,92 @@ pub struct RerankerModelStatus {
     pub route: Option<String>,
     pub message: String,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RerankerProxySettings {
+    pub proxy_type: String,
+    pub host: String,
+    pub port: u16,
+}
+
+impl RerankerProxySettings {
+    fn normalized(&self) -> Result<Self, String> {
+        let proxy_type = self.proxy_type.trim().to_ascii_lowercase();
+        if !matches!(proxy_type.as_str(), "http" | "socks5") {
+            return Err("代理类型仅支持 http 或 socks5".to_string());
+        }
+        let host = self.host.trim();
+        if host.is_empty() {
+            return Err("代理地址不能为空".to_string());
+        }
+        if self.port == 0 {
+            return Err("代理端口必须在 1-65535 之间".to_string());
+        }
+        Ok(Self {
+            proxy_type,
+            host: host.to_string(),
+            port: self.port,
+        })
+    }
+
+    fn url(&self) -> String {
+        format!("{}://{}:{}", self.proxy_type, self.host, self.port)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum RerankerDownloadNetwork {
+    Direct,
+    Proxy { proxy: RerankerProxySettings },
+}
+
+impl RerankerDownloadNetwork {
+    pub fn apply_to(&self, mut config: ProxyConfig) -> Result<ProxyConfig, String> {
+        config.auto_detect = false;
+        match self {
+            Self::Direct => config.enabled = false,
+            Self::Proxy { proxy } => {
+                let proxy = proxy.normalized()?;
+                config.enabled = true;
+                config.proxy_type = proxy.proxy_type;
+                config.host = proxy.host;
+                config.port = proxy.port;
+                config.only_for_cn = false;
+            }
+        }
+        Ok(config)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RerankerRouteProbe {
+    pub mode: String,
+    pub label: String,
+    pub available: bool,
+    pub supports_ranges: bool,
+    pub completed_samples: usize,
+    pub total_samples: usize,
+    pub median_bytes_per_second: Option<f64>,
+    pub min_bytes_per_second: Option<f64>,
+    pub max_bytes_per_second: Option<f64>,
+    pub variation_percent: Option<f64>,
+    pub median_ttfb_ms: Option<u64>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RerankerDownloadProbeResult {
+    pub direct: RerankerRouteProbe,
+    pub proxy: Option<RerankerRouteProbe>,
+}
+
+#[derive(Debug, Clone)]
+struct ProbeSample {
+    bytes_per_second: f64,
+    ttfb_ms: u64,
+    supports_ranges: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -297,6 +390,188 @@ pub fn start_download(
 
 pub fn cancel_download() {
     CANCEL_DOWNLOAD.store(true, Ordering::SeqCst);
+}
+
+pub async fn probe_download_routes(
+    proxy: Option<RerankerProxySettings>,
+) -> Result<RerankerDownloadProbeResult, String> {
+    let proxy = proxy.map(|value| value.normalized()).transpose()?;
+    let direct = probe_route("direct", "Hugging Face · 直连", None).await;
+    let proxy_result = match proxy.as_ref() {
+        Some(proxy) => {
+            let label = format!(
+                "Hugging Face · 本地代理 {} {}:{}",
+                proxy.proxy_type.to_ascii_uppercase(),
+                proxy.host,
+                proxy.port
+            );
+            Some(probe_route("proxy", &label, Some(proxy)).await)
+        }
+        None => None,
+    };
+    Ok(RerankerDownloadProbeResult {
+        direct,
+        proxy: proxy_result,
+    })
+}
+
+async fn probe_route(
+    mode: &str,
+    label: &str,
+    proxy: Option<&RerankerProxySettings>,
+) -> RerankerRouteProbe {
+    let client = match build_probe_client(proxy) {
+        Ok(client) => client,
+        Err(error) => {
+            return summarize_probe_samples(mode, label, Vec::new(), vec![error]);
+        }
+    };
+    let url = format!(
+        "https://huggingface.co/{}/resolve/{}/onnx/model.onnx",
+        MODEL_NAME, MODEL_REVISION
+    );
+    let mut samples = Vec::new();
+    let mut errors = Vec::new();
+
+    for offset in PROBE_SAMPLE_OFFSETS {
+        match probe_range_sample(&client, &url, offset).await {
+            Ok(sample) => samples.push(sample),
+            Err(error) => {
+                errors.push(error);
+                // 首个样本完全失败时，该路线没有继续消耗流量的价值。
+                if samples.is_empty() {
+                    break;
+                }
+            }
+        }
+    }
+
+    summarize_probe_samples(mode, label, samples, errors)
+}
+
+fn build_probe_client(proxy: Option<&RerankerProxySettings>) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(PROBE_CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(PROBE_SAMPLE_TIMEOUT_SECS))
+        .redirect(reqwest::redirect::Policy::limited(10));
+    if let Some(proxy) = proxy {
+        let proxy_url = proxy.url();
+        let reqwest_proxy = reqwest::Proxy::all(&proxy_url)
+            .map_err(|error| format!("创建模型测速代理失败 {}: {}", proxy_url, error))?;
+        builder = builder.proxy(reqwest_proxy);
+    }
+    builder
+        .build()
+        .map_err(|error| format!("构建模型测速客户端失败: {}", error))
+}
+
+async fn probe_range_sample(
+    client: &reqwest::Client,
+    url: &str,
+    offset: u64,
+) -> Result<ProbeSample, String> {
+    let end = offset + PROBE_SAMPLE_BYTES - 1;
+    let started = Instant::now();
+    let response = client
+        .get(url)
+        .header("User-Agent", PROBE_USER_AGENT)
+        .header("Accept", "application/octet-stream")
+        .header("Range", format!("bytes={}-{}", offset, end))
+        .send()
+        .await
+        .map_err(|error| format!("Range 样本请求失败: {}", error))?;
+    let ttfb_ms = started.elapsed().as_millis() as u64;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("Range 样本返回 HTTP {}", status));
+    }
+    let supports_ranges = status == reqwest::StatusCode::PARTIAL_CONTENT;
+    let mut stream = response.bytes_stream();
+    let mut downloaded = 0u64;
+    while downloaded < PROBE_SAMPLE_BYTES {
+        let Some(chunk) = stream.next().await else {
+            break;
+        };
+        let chunk = chunk.map_err(|error| format!("读取 Range 样本失败: {}", error))?;
+        downloaded += (chunk.len() as u64).min(PROBE_SAMPLE_BYTES - downloaded);
+    }
+    if downloaded < PROBE_SAMPLE_BYTES {
+        return Err(format!(
+            "Range 样本不完整: expected={}, actual={}",
+            PROBE_SAMPLE_BYTES, downloaded
+        ));
+    }
+    let elapsed = started.elapsed().as_secs_f64().max(0.001);
+    Ok(ProbeSample {
+        bytes_per_second: downloaded as f64 / elapsed,
+        ttfb_ms,
+        supports_ranges,
+    })
+}
+
+fn summarize_probe_samples(
+    mode: &str,
+    label: &str,
+    samples: Vec<ProbeSample>,
+    errors: Vec<String>,
+) -> RerankerRouteProbe {
+    let mut speeds = samples
+        .iter()
+        .map(|sample| sample.bytes_per_second)
+        .collect::<Vec<_>>();
+    speeds.sort_by(f64::total_cmp);
+    let mut ttfb_values = samples
+        .iter()
+        .map(|sample| sample.ttfb_ms)
+        .collect::<Vec<_>>();
+    ttfb_values.sort_unstable();
+    let median = median_f64(&speeds);
+    let min = speeds.first().copied();
+    let max = speeds.last().copied();
+    let variation_percent = match (min, max, median) {
+        (Some(min), Some(max), Some(median)) if median > 0.0 => Some((max - min) / median * 100.0),
+        _ => None,
+    };
+
+    RerankerRouteProbe {
+        mode: mode.to_string(),
+        label: label.to_string(),
+        available: !samples.is_empty(),
+        supports_ranges: !samples.is_empty() && samples.iter().all(|sample| sample.supports_ranges),
+        completed_samples: samples.len(),
+        total_samples: PROBE_SAMPLE_OFFSETS.len(),
+        median_bytes_per_second: median,
+        min_bytes_per_second: min,
+        max_bytes_per_second: max,
+        variation_percent,
+        median_ttfb_ms: median_u64(&ttfb_values),
+        error: (!errors.is_empty()).then(|| errors.join(" | ")),
+    }
+}
+
+fn median_f64(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let middle = values.len() / 2;
+    Some(if values.len() % 2 == 0 {
+        (values[middle - 1] + values[middle]) / 2.0
+    } else {
+        values[middle]
+    })
+}
+
+fn median_u64(values: &[u64]) -> Option<u64> {
+    if values.is_empty() {
+        return None;
+    }
+    let middle = values.len() / 2;
+    Some(if values.len() % 2 == 0 {
+        values[middle - 1].saturating_add(values[middle]) / 2
+    } else {
+        values[middle]
+    })
 }
 
 pub fn remove_assets(directory: &Path) -> Result<RerankerModelStatus, String> {
@@ -617,7 +892,7 @@ async fn download_assets(
                 &target,
                 proxy_config,
                 Some(spec.sha256),
-                move |progress| {
+                move |progress, route| {
                     let current = base_bytes + progress.downloaded.min(spec.size);
                     let mut status = status_for(
                         &status_directory,
@@ -628,7 +903,7 @@ async fn download_assets(
                         "准确模式模型文件下载中",
                         None,
                     );
-                    status.route = Some(label.to_string());
+                    status.route = Some(format_download_route(label, route));
                     write_download_status(status);
                 },
                 || CANCEL_DOWNLOAD.load(Ordering::SeqCst),
@@ -636,7 +911,7 @@ async fn download_assets(
             .await
             {
                 Ok(route) => {
-                    downloaded = Some(route.label);
+                    downloaded = Some(format_download_route(label, &route));
                     break;
                 }
                 Err(error) => errors.push(format!("{}: {}", label, error)),
@@ -665,6 +940,29 @@ async fn download_assets(
     ));
     verify_assets(directory)?;
     Ok(last_route)
+}
+
+fn format_download_route(source: &str, route: &GitHubRouteSummary) -> String {
+    let source = match source {
+        "huggingface" => "Hugging Face",
+        "hf-mirror" => "HF Mirror",
+        other => other,
+    };
+    if !route.using_local_proxy {
+        return format!("{} · 直连", source);
+    }
+
+    let proxy_type = route
+        .proxy_type
+        .as_deref()
+        .unwrap_or("proxy")
+        .to_ascii_uppercase();
+    match (route.proxy_host.as_deref(), route.proxy_port) {
+        (Some(host), Some(port)) => {
+            format!("{} · 本地代理 {} {}:{}", source, proxy_type, host, port)
+        }
+        _ => format!("{} · 本地代理 {}", source, proxy_type),
+    }
 }
 
 fn verify_assets(directory: &Path) -> Result<(), String> {
@@ -811,6 +1109,97 @@ mod tests {
         assert_eq!(total, MODEL_TOTAL_BYTES);
         assert_eq!(paths.len(), MODEL_FILES.len());
         assert!(MODEL_FILES.iter().all(|spec| spec.sha256.len() == 64));
+    }
+
+    #[test]
+    fn temporary_network_selection_overrides_global_proxy_behavior() {
+        let global = crate::config::default_proxy_config();
+        let direct = RerankerDownloadNetwork::Direct
+            .apply_to(global.clone())
+            .expect("直连模式应生成有效配置");
+        assert!(!direct.auto_detect);
+        assert!(!direct.enabled);
+
+        let proxy = RerankerDownloadNetwork::Proxy {
+            proxy: RerankerProxySettings {
+                proxy_type: "HTTP".to_string(),
+                host: " 127.0.0.1 ".to_string(),
+                port: 7890,
+            },
+        }
+        .apply_to(global)
+        .expect("临时代理应生成有效配置");
+        assert!(!proxy.auto_detect);
+        assert!(proxy.enabled);
+        assert_eq!(proxy.proxy_type, "http");
+        assert_eq!(proxy.host, "127.0.0.1");
+        assert_eq!(proxy.port, 7890);
+        assert!(!proxy.only_for_cn);
+    }
+
+    #[test]
+    fn download_route_label_exposes_real_transport() {
+        let proxy_route = GitHubRouteSummary {
+            label: "local-proxy:http://127.0.0.1:7890".to_string(),
+            url: "https://huggingface.co/model".to_string(),
+            used_mirror: false,
+            using_local_proxy: true,
+            proxy_host: Some("127.0.0.1".to_string()),
+            proxy_port: Some(7890),
+            proxy_type: Some("http".to_string()),
+        };
+        assert_eq!(
+            format_download_route("huggingface", &proxy_route),
+            "Hugging Face · 本地代理 HTTP 127.0.0.1:7890"
+        );
+
+        let direct_route = GitHubRouteSummary {
+            label: "direct".to_string(),
+            url: "https://hf-mirror.com/model".to_string(),
+            used_mirror: false,
+            using_local_proxy: false,
+            proxy_host: None,
+            proxy_port: None,
+            proxy_type: None,
+        };
+        assert_eq!(
+            format_download_route("hf-mirror", &direct_route),
+            "HF Mirror · 直连"
+        );
+    }
+
+    #[test]
+    fn probe_summary_reports_median_range_and_variation() {
+        let result = summarize_probe_samples(
+            "proxy",
+            "测试代理",
+            vec![
+                ProbeSample {
+                    bytes_per_second: 100.0,
+                    ttfb_ms: 30,
+                    supports_ranges: true,
+                },
+                ProbeSample {
+                    bytes_per_second: 300.0,
+                    ttfb_ms: 10,
+                    supports_ranges: true,
+                },
+                ProbeSample {
+                    bytes_per_second: 200.0,
+                    ttfb_ms: 20,
+                    supports_ranges: true,
+                },
+            ],
+            Vec::new(),
+        );
+        assert!(result.available);
+        assert!(result.supports_ranges);
+        assert_eq!(result.completed_samples, 3);
+        assert_eq!(result.median_bytes_per_second, Some(200.0));
+        assert_eq!(result.min_bytes_per_second, Some(100.0));
+        assert_eq!(result.max_bytes_per_second, Some(300.0));
+        assert_eq!(result.variation_percent, Some(100.0));
+        assert_eq!(result.median_ttfb_ms, Some(20));
     }
 
     #[test]
