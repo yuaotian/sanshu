@@ -151,6 +151,7 @@ interface LocalIndexStatus {
   semantic_provider_fallback_reason?: string
   semantic_cuda_runtime_available?: boolean
   semantic_cuda_runtime_dir?: string
+  semantic_cuda_runtime_error?: string
   semantic_batch_size?: number
   semantic_intra_threads?: number
 }
@@ -184,6 +185,7 @@ interface EmbeddingModelStatus {
   provider_fallback_reason?: string
   cuda_runtime_available?: boolean
   cuda_runtime_dir?: string
+  cuda_runtime_error?: string
   runtime_path?: string
   batch_size?: number
   intra_threads?: number
@@ -717,7 +719,6 @@ const embeddingExecutionProviderLabel = computed(() =>
 const embeddingRequestedProviderLabel = computed(() => {
   const provider = embeddingModelStatus.value?.requested_provider || config.value.sou_embedding_provider
   return formatProviderLabel(provider)
-})
 })
 
 const embeddingProviderTagType = computed<'default' | 'info' | 'success' | 'warning' | 'error'>(() => {
@@ -2514,7 +2515,7 @@ defineExpose({ saveConfig })
                   </n-radio-group>
                   <template #feedback>
                     <span class="form-feedback">
-                      自动优先尝试 CUDA；缺少 CUDA provider 或初始化失败时回退 CPU。外部 CUDA 运行时目录可通过 SANSHU_ORT_CUDA_DIR 指定，切换 provider 后需重启 Sanshu 进程。
+                      自动优先尝试 CUDA，失败时回退 CPU；显式 CUDA/CPU 为强制模式。外部 CUDA 运行时目录可通过 SANSHU_ORT_CUDA_DIR 指定，需使用匹配 ORT 1.28.0 的 CUDA/cuDNN 依赖，切换 provider 后需重启 Sanshu 进程。
                     </span>
                   </template>
                 </n-form-item>
@@ -2637,10 +2638,13 @@ defineExpose({ saveConfig })
                     <span>耗时 {{ formatElapsed(localIndexElapsedMs) }}</span>
                   </div>
                   <div class="form-feedback">
-                    推理设备：{{ formatProviderLabel(localIndexStatus.semantic_execution_provider || 'cpu') }} · 请求 {{ formatProviderLabel(localIndexStatus.semantic_requested_provider || config.sou_embedding_provider) }} · batch {{ localIndexStatus.semantic_batch_size || 32 }} · intra_threads {{ localIndexStatus.semantic_intra_threads || '默认' }}
+                    推理设备：{{ formatProviderLabel(localIndexStatus.semantic_execution_provider || 'cpu') }} · 请求 {{ formatProviderLabel(localIndexStatus.semantic_requested_provider || config.sou_embedding_provider) }} · batch {{ localIndexStatus.semantic_batch_size || 64 }} · intra_threads {{ localIndexStatus.semantic_intra_threads || '默认' }}
                   </div>
                   <n-alert v-if="localIndexStatus.semantic_provider_fallback_reason" type="warning" :bordered="false">
                     {{ localIndexStatus.semantic_provider_fallback_reason }}
+                  </n-alert>
+                  <n-alert v-if="localIndexStatus.semantic_cuda_runtime_error" type="warning" :bordered="false">
+                    CUDA 依赖预检失败：{{ localIndexStatus.semantic_cuda_runtime_error }}
                   </n-alert>
                   <div class="sou-history-line">
                     预计剩余：{{ localIndexEtaLabel }}
@@ -2699,13 +2703,16 @@ defineExpose({ saveConfig })
                     {{ embeddingStatusReadError ? `状态读取失败，保留最近数据：${embeddingStatusReadError}` : '近 30 秒速度窗口仅保存在当前页面' }}
                   </div>
                   <div class="form-feedback">
-                    推理设备：{{ embeddingExecutionProviderLabel }} · 请求 {{ embeddingRequestedProviderLabel }} · batch {{ embeddingModelStatus?.batch_size || 32 }} · intra_threads {{ embeddingModelStatus?.intra_threads || '默认' }}
+                    推理设备：{{ embeddingExecutionProviderLabel }} · 请求 {{ embeddingRequestedProviderLabel }} · batch {{ embeddingModelStatus?.batch_size || 64 }} · intra_threads {{ embeddingModelStatus?.intra_threads || '默认' }}
                   </div>
                   <div class="form-feedback">
-                    CUDA 运行时：{{ embeddingModelStatus?.cuda_runtime_available ? (embeddingModelStatus?.cuda_runtime_dir || '已发现') : '未发现' }}
+                    CUDA 运行时：{{ embeddingModelStatus?.cuda_runtime_available ? (embeddingModelStatus?.cuda_runtime_dir || '预检通过') : (embeddingModelStatus?.cuda_runtime_dir ? `${embeddingModelStatus.cuda_runtime_dir}（预检失败）` : '未发现') }}
                   </div>
                   <n-alert v-if="embeddingModelStatus?.provider_fallback_reason" type="warning" :bordered="false">
                     {{ embeddingModelStatus.provider_fallback_reason }}
+                  </n-alert>
+                  <n-alert v-if="embeddingModelStatus?.cuda_runtime_error" type="warning" :bordered="false">
+                    CUDA provider 或依赖 DLL 加载失败：{{ embeddingModelStatus.cuda_runtime_error }}
                   </n-alert>
                   <div v-if="embeddingModelStatus?.route" class="form-feedback">
                     下载路由：{{ embeddingModelStatus.route }}

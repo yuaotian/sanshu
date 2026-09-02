@@ -422,6 +422,12 @@ pub async fn save_acemcp_config(
     save_config(&state, &app)
         .await
         .map_err(|e| format!("保存配置失败: {}", e))?;
+    if let Some(provider) = normalized_embedding_provider.as_deref() {
+        // 中文说明：配置落盘成功后同步共享运行时缓存，状态轮询无需重复解析整份配置文件。
+        crate::mcp::embedding::set_configured_provider(
+            crate::mcp::embedding::ProviderPreference::from_config(Some(provider)),
+        );
+    }
 
     let next_config = super::AcemcpTool::get_acemcp_config()
         .await
@@ -1755,6 +1761,7 @@ pub struct LocalEmbeddingModelStatus {
     pub provider_fallback_reason: Option<String>,
     pub cuda_runtime_available: bool,
     pub cuda_runtime_dir: Option<String>,
+    pub cuda_runtime_error: Option<String>,
     pub runtime_path: Option<String>,
     pub batch_size: usize,
     pub intra_threads: Option<usize>,
@@ -1783,11 +1790,22 @@ pub fn get_local_embedding_model_status(
     let snapshot = crate::mcp::embedding::snapshot(&model_dir);
     let snapshot_error = snapshot.error.clone();
     let (phase, message, error) = if !assets_ready {
-        (
-            "missing".to_string(),
-            "固定 BGE 模型资产尚未就绪".to_string(),
-            None,
-        )
+        let message = if !crate::mcp::embedding::model_assets_have_expected_sizes(&model_dir) {
+            "固定 BGE 模型资产尚未就绪".to_string()
+        } else {
+            match requested_provider {
+                crate::mcp::embedding::ProviderPreference::Cuda => {
+                    "已选择 CUDA，但匹配的 CUDA 运行时尚未就绪".to_string()
+                }
+                crate::mcp::embedding::ProviderPreference::Cpu => {
+                    "已选择 CPU，但 CPU ONNX Runtime 尚未就绪".to_string()
+                }
+                crate::mcp::embedding::ProviderPreference::Auto => {
+                    "CPU 与 CUDA ONNX Runtime 均未就绪".to_string()
+                }
+            }
+        };
+        ("missing".to_string(), message, None)
     } else {
         match snapshot.phase {
             crate::mcp::embedding::RuntimePhase::Loading => (
@@ -1829,6 +1847,7 @@ pub fn get_local_embedding_model_status(
         cuda_runtime_dir: snapshot
             .cuda_runtime_dir
             .map(|value| value.to_string_lossy().to_string()),
+        cuda_runtime_error: snapshot.cuda_runtime_error,
         runtime_path: snapshot
             .runtime_path
             .map(|value| value.to_string_lossy().to_string()),

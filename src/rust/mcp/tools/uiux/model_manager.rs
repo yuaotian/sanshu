@@ -111,6 +111,8 @@ pub struct UiuxModelStatus {
     #[serde(default)]
     pub cuda_runtime_dir: Option<String>,
     #[serde(default)]
+    pub cuda_runtime_error: Option<String>,
+    #[serde(default)]
     pub runtime_path: Option<String>,
     #[serde(default)]
     pub batch_size: usize,
@@ -1074,6 +1076,7 @@ fn status_for(directory: &Path, phase: &str, message: &str) -> UiuxModelStatus {
     let model_downloaded_bytes = quick_model_downloaded_bytes(directory);
     let runtime_downloaded_bytes = quick_runtime_downloaded_bytes();
     let downloaded_bytes = model_downloaded_bytes + runtime_downloaded_bytes;
+    let provider = embedding::configured_provider();
     let embedding_snapshot = embedding::snapshot(directory);
     UiuxModelStatus {
         phase: phase.to_string(),
@@ -1087,8 +1090,7 @@ fn status_for(directory: &Path, phase: &str, message: &str) -> UiuxModelStatus {
         completed_files: quick_completed_files(directory),
         total_files: MODEL_FILES.len() + 1,
         runtime_version: ORT_VERSION.to_string(),
-        runtime_ready: runtime_assets_have_expected_sizes()
-            || embedding_snapshot.cuda_runtime_available,
+        runtime_ready: embedding::runtime_available_for_provider(provider),
         runtime_dir: effective_runtime_dir().to_string_lossy().to_string(),
         runtime_downloaded_bytes,
         runtime_total_bytes: ORT_ARCHIVE_BYTES,
@@ -1099,6 +1101,7 @@ fn status_for(directory: &Path, phase: &str, message: &str) -> UiuxModelStatus {
         cuda_runtime_dir: embedding_snapshot
             .cuda_runtime_dir
             .map(|value| value.to_string_lossy().to_string()),
+        cuda_runtime_error: embedding_snapshot.cuda_runtime_error,
         runtime_path: embedding_snapshot
             .runtime_path
             .map(|value| value.to_string_lossy().to_string()),
@@ -1116,6 +1119,15 @@ fn status_for(directory: &Path, phase: &str, message: &str) -> UiuxModelStatus {
 }
 
 fn current_status(directory: &Path) -> UiuxModelStatus {
+    if !assets_have_expected_sizes(directory) && !DOWNLOAD_RUNNING.load(Ordering::SeqCst) {
+        let mut status = status_for(directory, "missing", "当前 provider 的模型运行时尚未就绪");
+        if let Some(saved) = read_status(directory) {
+            if saved.phase == "error" {
+                status.error = saved.error;
+            }
+        }
+        return status;
+    }
     if let Ok(runtime) = RUNTIME.lock() {
         if runtime.directory.as_deref() == Some(directory) {
             match runtime.phase {
@@ -1254,14 +1266,6 @@ fn runtime_assets_have_expected_sizes() -> bool {
 
 fn assets_have_expected_sizes(directory: &Path) -> bool {
     embedding::assets_available_for_provider(directory, embedding::configured_provider())
-}
-
-fn model_files_have_expected_sizes(directory: &Path) -> bool {
-    MODEL_FILES.iter().all(|spec| {
-        fs::metadata(directory.join(spec.relative_path))
-            .map(|metadata| metadata.len() == spec.size)
-            .unwrap_or(false)
-    })
 }
 
 fn quick_model_downloaded_bytes(directory: &Path) -> u64 {

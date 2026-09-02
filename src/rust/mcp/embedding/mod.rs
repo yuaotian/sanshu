@@ -14,7 +14,8 @@ pub const MODEL_REVISION: &str = "75c43b069aac4d136ba6bc1122f995fedcfd2781";
 pub const MODEL_DIMENSION: usize = 512;
 pub const QUERY_PREFIX: &str = "为这个句子生成表示以用于检索相关文章：";
 pub const ORT_VERSION: &str = "1.28.0";
-pub const EMBEDDING_BATCH_SIZE: usize = 32;
+// 中文说明：本机 512/1024 分块受控基准中 64 优于 32/128，固定为中间值控制 CPU 峰值与显存占用。
+pub const EMBEDDING_BATCH_SIZE: usize = 64;
 
 const MODEL_FILES: &[(&str, u64)] = &[
     ("onnx/model.onnx", 94_851_877),
@@ -28,6 +29,7 @@ const ORT_DLL_BYTES: u64 = 15_809_848;
 const CUDA_PROVIDER_DLL_FILE_NAME: &str = "onnxruntime_providers_cuda.dll";
 const CUDA_RUNTIME_ENV: &str = "SANSHU_ORT_CUDA_DIR";
 const CUDA_INTRA_THREADS: usize = 4;
+const CUDA_PREFLIGHT_CACHE_TTL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderPreference {
@@ -59,8 +61,34 @@ impl ProviderPreference {
         }
     }
 
-    fn wants_cuda(self) -> bool {
+    fn attempts_cuda(self) -> bool {
         matches!(self, Self::Auto | Self::Cuda)
+    }
+
+    fn allows_cpu_fallback(self) -> bool {
+        self == Self::Auto
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OrtRuntimeInfo {
+    /// 实际载入的 ORT 核心 DLL；进程内只能选择一次。
+    pub runtime_path: PathBuf,
+    /// 核心 DLL 是否来自带 CUDA provider 的运行时包。
+    pub cuda_capable: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CudaRuntimeStatus {
+    /// 找到的 CUDA 包目录；即使预检失败也保留，便于界面定位安装路径。
+    pub directory: Option<PathBuf>,
+    /// provider DLL 或其依赖加载失败的具体原因。
+    pub error: Option<String>,
+}
+
+impl CudaRuntimeStatus {
+    fn available(&self) -> bool {
+        self.directory.is_some() && self.error.is_none()
     }
 }
 
@@ -108,6 +136,7 @@ pub struct RuntimeSnapshot {
     pub provider_fallback_reason: Option<String>,
     pub cuda_runtime_available: bool,
     pub cuda_runtime_dir: Option<PathBuf>,
+    pub cuda_runtime_error: Option<String>,
     pub runtime_path: Option<PathBuf>,
     pub batch_size: usize,
     pub intra_threads: Option<usize>,
@@ -157,6 +186,27 @@ impl Default for RuntimeSlot {
 
 static RUNTIME: Lazy<Mutex<RuntimeSlot>> = Lazy::new(|| Mutex::new(RuntimeSlot::default()));
 
+#[derive(Default)]
+struct ProviderConfigCache {
+    initialized: bool,
+    value: ProviderPreference,
+}
+
+struct CudaPreflightCache {
+    checked_at: Instant,
+    status: CudaRuntimeStatus,
+}
+
+struct OrtRuntimeState {
+    info: Option<OrtRuntimeInfo>,
+}
+
+static PROVIDER_CONFIG: Lazy<Mutex<ProviderConfigCache>> =
+    Lazy::new(|| Mutex::new(ProviderConfigCache::default()));
+static CUDA_PREFLIGHT: Lazy<Mutex<Option<CudaPreflightCache>>> = Lazy::new(|| Mutex::new(None));
+static ORT_RUNTIME: Lazy<Mutex<OrtRuntimeState>> =
+    Lazy::new(|| Mutex::new(OrtRuntimeState { info: None }));
+
 pub fn effective_model_dir(shared: Option<&str>, legacy_uiux: Option<&str>) -> PathBuf {
     shared
         .or(legacy_uiux)
@@ -185,14 +235,30 @@ pub fn runtime_dir() -> PathBuf {
 }
 
 pub fn configured_provider() -> ProviderPreference {
-    crate::config::load_standalone_config()
-        .ok()
-        .and_then(|config| config.mcp_config.sou_embedding_provider)
-        .map(|value| ProviderPreference::from_config(Some(&value)))
-        .unwrap_or_default()
+    let mut cache = match PROVIDER_CONFIG.lock() {
+        Ok(cache) => cache,
+        Err(_) => return ProviderPreference::default(),
+    };
+    if !cache.initialized {
+        cache.value = crate::config::load_standalone_config()
+            .ok()
+            .and_then(|config| config.mcp_config.sou_embedding_provider)
+            .map(|value| ProviderPreference::from_config(Some(&value)))
+            .unwrap_or_default();
+        cache.initialized = true;
+    }
+    cache.value
 }
 
-fn model_files_have_expected_sizes(directory: &Path) -> bool {
+/// 配置保存成功后同步内存值，避免状态轮询反复解析整份配置文件。
+pub fn set_configured_provider(provider: ProviderPreference) {
+    if let Ok(mut cache) = PROVIDER_CONFIG.lock() {
+        cache.value = provider;
+        cache.initialized = true;
+    }
+}
+
+pub fn model_assets_have_expected_sizes(directory: &Path) -> bool {
     MODEL_FILES.iter().all(|(relative_path, size)| {
         fs::metadata(directory.join(relative_path))
             .map(|metadata| metadata.is_file() && metadata.len() == *size)
@@ -216,8 +282,8 @@ fn cuda_runtime_assets_have_expected_sizes(directory: &Path) -> bool {
         })
 }
 
-/// 查找可由 ORT 动态加载的 CUDA 包；安装目录通过环境变量或共享运行时子目录提供。
-pub fn cuda_runtime_dir() -> Option<PathBuf> {
+/// 只检查候选目录中的固定文件，真正的依赖加载由 `cuda_runtime_status` 负责。
+fn cuda_runtime_candidate_dir() -> Option<PathBuf> {
     #[cfg(not(feature = "cuda"))]
     {
         return None;
@@ -247,15 +313,67 @@ pub fn cuda_runtime_dir() -> Option<PathBuf> {
     }
 }
 
+/// 查找可由 ORT 动态加载的 CUDA 包；安装目录通过环境变量或共享运行时子目录提供。
+pub fn cuda_runtime_dir() -> Option<PathBuf> {
+    cuda_runtime_candidate_dir()
+}
+
+/// 预加载 CUDA provider，让 Windows loader 同时校验 provider 及其依赖 DLL。
+/// 结果短暂缓存，避免 UI 状态轮询每秒重复触发 LoadLibrary。
+pub fn cuda_runtime_status() -> CudaRuntimeStatus {
+    let directory = cuda_runtime_candidate_dir();
+    let Some(directory) = directory else {
+        return CudaRuntimeStatus {
+            directory: None,
+            error: None,
+        };
+    };
+
+    if let Ok(mut cache) = CUDA_PREFLIGHT.lock() {
+        if let Some(previous) = cache.as_ref() {
+            if previous.status.directory.as_ref() == Some(&directory)
+                && previous.checked_at.elapsed() < CUDA_PREFLIGHT_CACHE_TTL
+            {
+                return previous.status.clone();
+            }
+        }
+        let status = match prepare_cuda_runtime(&directory) {
+            Ok(()) => CudaRuntimeStatus {
+                directory: Some(directory),
+                error: None,
+            },
+            Err(error) => CudaRuntimeStatus {
+                directory: Some(directory),
+                error: Some(error),
+            },
+        };
+        *cache = Some(CudaPreflightCache {
+            checked_at: Instant::now(),
+            status: status.clone(),
+        });
+        return status;
+    }
+
+    CudaRuntimeStatus {
+        directory: Some(directory.clone()),
+        error: Some("CUDA 运行时预检缓存锁不可用".to_string()),
+    }
+}
+
 pub fn assets_available_for_provider(directory: &Path, provider: ProviderPreference) -> bool {
-    if !model_files_have_expected_sizes(directory) {
+    if !model_assets_have_expected_sizes(directory) {
         return false;
     }
+    runtime_available_for_provider(provider)
+}
+
+pub fn runtime_available_for_provider(provider: ProviderPreference) -> bool {
     let cpu_available = cpu_runtime_assets_have_expected_sizes();
-    let cuda_available = cuda_runtime_dir().is_some();
+    let cuda_available = cuda_runtime_status().available();
     match provider {
         ProviderPreference::Cpu => cpu_available,
-        ProviderPreference::Auto | ProviderPreference::Cuda => cpu_available || cuda_available,
+        ProviderPreference::Cuda => cuda_available,
+        ProviderPreference::Auto => cpu_available || cuda_available,
     }
 }
 
@@ -265,9 +383,35 @@ pub fn assets_have_expected_sizes(directory: &Path) -> bool {
 
 pub fn snapshot(directory: &Path) -> RuntimeSnapshot {
     let requested_provider = configured_provider();
-    let cuda_runtime_dir = cuda_runtime_dir();
-    let cuda_runtime_available = cuda_runtime_dir.is_some();
-    let cpu_runtime_available = cpu_runtime_assets_have_expected_sizes();
+    let availability = runtime_availability();
+    snapshot_with_availability(directory, requested_provider, &availability)
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeAvailability {
+    cpu_runtime_available: bool,
+    cuda: CudaRuntimeStatus,
+}
+
+impl RuntimeAvailability {
+    fn cuda_runtime_available(&self) -> bool {
+        self.cuda.available()
+    }
+}
+
+fn runtime_availability() -> RuntimeAvailability {
+    RuntimeAvailability {
+        cpu_runtime_available: cpu_runtime_assets_have_expected_sizes(),
+        cuda: cuda_runtime_status(),
+    }
+}
+
+fn snapshot_with_availability(
+    directory: &Path,
+    requested_provider: ProviderPreference,
+    availability: &RuntimeAvailability,
+) -> RuntimeSnapshot {
+    let cuda_runtime_available = availability.cuda_runtime_available();
     match RUNTIME.lock() {
         Ok(runtime) if runtime.directory.as_deref() == Some(directory) => {
             let provider_changed = runtime.requested_provider != requested_provider;
@@ -284,12 +428,14 @@ pub fn snapshot(directory: &Path) -> RuntimeSnapshot {
                         fallback_reason_for(
                             requested_provider,
                             cuda_runtime_available,
-                            cpu_runtime_available,
+                            availability.cpu_runtime_available,
+                            availability.cuda.error.as_deref(),
                         )
                     })
                 },
                 cuda_runtime_available,
-                cuda_runtime_dir: cuda_runtime_dir.clone(),
+                cuda_runtime_dir: availability.cuda.directory.clone(),
+                cuda_runtime_error: availability.cuda.error.clone(),
                 runtime_path: runtime.runtime_path.clone(),
                 batch_size: EMBEDDING_BATCH_SIZE,
                 intra_threads: runtime.intra_threads,
@@ -304,10 +450,12 @@ pub fn snapshot(directory: &Path) -> RuntimeSnapshot {
             provider_fallback_reason: fallback_reason_for(
                 requested_provider,
                 cuda_runtime_available,
-                cpu_runtime_available,
+                availability.cpu_runtime_available,
+                availability.cuda.error.as_deref(),
             ),
             cuda_runtime_available,
-            cuda_runtime_dir,
+            cuda_runtime_dir: availability.cuda.directory.clone(),
+            cuda_runtime_error: availability.cuda.error.clone(),
             runtime_path: None,
             batch_size: EMBEDDING_BATCH_SIZE,
             intra_threads: None,
@@ -321,10 +469,12 @@ pub fn snapshot(directory: &Path) -> RuntimeSnapshot {
             provider_fallback_reason: fallback_reason_for(
                 requested_provider,
                 cuda_runtime_available,
-                cpu_runtime_available,
+                availability.cpu_runtime_available,
+                availability.cuda.error.as_deref(),
             ),
             cuda_runtime_available,
-            cuda_runtime_dir,
+            cuda_runtime_dir: availability.cuda.directory.clone(),
+            cuda_runtime_error: availability.cuda.error.clone(),
             runtime_path: None,
             batch_size: EMBEDDING_BATCH_SIZE,
             intra_threads: None,
@@ -336,9 +486,77 @@ fn fallback_reason_for(
     requested_provider: ProviderPreference,
     cuda_runtime_available: bool,
     cpu_runtime_available: bool,
+    cuda_runtime_error: Option<&str>,
 ) -> Option<String> {
-    (requested_provider.wants_cuda() && !cuda_runtime_available && cpu_runtime_available)
-        .then(|| "CUDA 运行时未找到，当前使用 CPU；可设置 SANSHU_ORT_CUDA_DIR".to_string())
+    if !requested_provider.allows_cpu_fallback() || cuda_runtime_available || !cpu_runtime_available
+    {
+        return None;
+    }
+    Some(match cuda_runtime_error {
+        Some(error) => format!("CUDA 运行时预检失败，当前使用 CPU: {}", error),
+        None => "CUDA 运行时未找到，当前使用 CPU；可设置 SANSHU_ORT_CUDA_DIR".to_string(),
+    })
+}
+
+/// 确保进程级 ONNX Runtime 只初始化一次，避免 reranker 先载入 CPU DLL 抢占 CUDA 入口。
+pub fn ensure_ort_runtime(
+    requested_provider: ProviderPreference,
+) -> Result<OrtRuntimeInfo, String> {
+    let cuda = cuda_runtime_status();
+    let target_cuda = match requested_provider {
+        ProviderPreference::Cuda => {
+            if !cuda.available() {
+                return Err(cuda
+                    .error
+                    .map(|error| format!("CUDA 运行时预检失败: {}", error))
+                    .unwrap_or_else(|| {
+                        "CUDA 运行时未找到；可设置 SANSHU_ORT_CUDA_DIR".to_string()
+                    }));
+            }
+            true
+        }
+        ProviderPreference::Auto => cuda.available(),
+        ProviderPreference::Cpu => false,
+    };
+
+    let mut state = ORT_RUNTIME
+        .lock()
+        .map_err(|error| format!("锁定 ONNX Runtime 初始化状态失败: {}", error))?;
+    if let Some(info) = state.info.clone() {
+        if target_cuda && !info.cuda_capable && requested_provider == ProviderPreference::Cuda {
+            return Err("ONNX Runtime 已按 CPU 初始化；切换 CUDA 需要重启 Sanshu 进程".to_string());
+        }
+        return Ok(info);
+    }
+
+    let runtime_path = if target_cuda {
+        cuda.directory
+            .clone()
+            .expect("CUDA 预检成功时必须存在运行时目录")
+            .join(ORT_DLL_FILE_NAME)
+    } else {
+        runtime_dir().join(ORT_DLL_FILE_NAME)
+    };
+    if !runtime_path.is_file() {
+        return Err(format!(
+            "ONNX Runtime 核心 DLL 不存在: {}",
+            runtime_path.display()
+        ));
+    }
+    let environment = ort::init_from(&runtime_path)
+        .map_err(|error| format!("加载 ONNX Runtime {} 失败: {}", ORT_VERSION, error))?;
+    if !environment.commit() {
+        return Err(
+            "ONNX Runtime 已由其他入口初始化，无法确认当前 provider；请重启 Sanshu 进程"
+                .to_string(),
+        );
+    }
+    let info = OrtRuntimeInfo {
+        runtime_path,
+        cuda_capable: target_cuda,
+    };
+    state.info = Some(info.clone());
+    Ok(info)
 }
 
 pub fn ensure_started(directory: &Path) {
@@ -445,9 +663,23 @@ pub fn embed_documents_blocking(
     documents: Vec<String>,
     wait_budget: Duration,
 ) -> Result<Vec<Vec<f32>>, EmbeddingUnavailable> {
+    embed_documents_blocking_with_batch_size(
+        directory,
+        documents,
+        wait_budget,
+        EMBEDDING_BATCH_SIZE,
+    )
+}
+
+pub fn embed_documents_blocking_with_batch_size(
+    directory: &Path,
+    documents: Vec<String>,
+    wait_budget: Duration,
+    batch_size: usize,
+) -> Result<Vec<Vec<f32>>, EmbeddingUnavailable> {
     ensure_started(directory);
     wait_until_ready_blocking(directory, wait_budget)?;
-    embed_texts_ready(directory, documents, EMBEDDING_BATCH_SIZE)
+    embed_texts_ready(directory, documents, batch_size.max(1))
 }
 
 pub fn reset() {
@@ -461,8 +693,11 @@ async fn wait_until_ready(
     wait_budget: Duration,
 ) -> Result<(), EmbeddingUnavailable> {
     let deadline = Instant::now() + wait_budget;
+    // 中文说明：等待期间 provider 与 DLL 诊断保持一次快照，避免每 50ms 重新读配置和扫描运行时。
+    let requested_provider = configured_provider();
+    let availability = runtime_availability();
     loop {
-        match snapshot(directory) {
+        match snapshot_with_availability(directory, requested_provider, &availability) {
             RuntimeSnapshot {
                 phase: RuntimePhase::Ready,
                 ..
@@ -505,8 +740,11 @@ fn wait_until_ready_blocking(
     wait_budget: Duration,
 ) -> Result<(), EmbeddingUnavailable> {
     let deadline = Instant::now() + wait_budget;
+    // 中文说明：阻塞等待同样复用一次 provider/运行时快照，状态变化只读取进程内运行时槽位。
+    let requested_provider = configured_provider();
+    let availability = runtime_availability();
     loop {
-        match snapshot(directory) {
+        match snapshot_with_availability(directory, requested_provider, &availability) {
             RuntimeSnapshot {
                 phase: RuntimePhase::Ready,
                 ..
@@ -588,72 +826,78 @@ fn load_model(
     requested_provider: ProviderPreference,
 ) -> Result<LoadedModel, String> {
     let mut fallback_reason = None;
-    if requested_provider.wants_cuda() {
-        if let Some(cuda_dir) = cuda_runtime_dir() {
-            match load_model_with_provider(
-                directory,
-                ExecutionProvider::Cuda,
-                Some(cuda_dir.as_path()),
-            ) {
-                Ok((model, runtime_path, intra_threads)) => {
-                    return Ok(LoadedModel {
-                        model,
-                        execution_provider: ExecutionProvider::Cuda,
-                        provider_fallback_reason: None,
-                        runtime_path,
-                        intra_threads,
-                    });
-                }
-                Err(error) => {
-                    fallback_reason = Some(format!("CUDA 初始化失败，已回退 CPU: {}", error));
-                    log::warn!(
-                        "[embedding] CUDA provider 初始化失败，将回退 CPU: {}",
-                        error
-                    );
+    if requested_provider.attempts_cuda() {
+        match ensure_ort_runtime(ProviderPreference::Cuda) {
+            Ok(runtime) => {
+                match create_embedding_model(directory, ExecutionProvider::Cuda, &runtime) {
+                    Ok((model, intra_threads)) => {
+                        return Ok(LoadedModel {
+                            model,
+                            execution_provider: ExecutionProvider::Cuda,
+                            provider_fallback_reason: None,
+                            runtime_path: runtime.runtime_path,
+                            intra_threads,
+                        });
+                    }
+                    Err(error) if requested_provider.allows_cpu_fallback() => {
+                        // 中文说明：CUDA 核心已载入时不能再次切换 DLL；在同一核心上创建 CPU 会话完成回退。
+                        fallback_reason = Some(format!("CUDA 初始化失败，已回退 CPU: {}", error));
+                        log::warn!(
+                            "[embedding] CUDA provider 初始化失败，将在同一 ORT 核心回退 CPU: {}",
+                            error
+                        );
+                        let (model, intra_threads) =
+                            create_embedding_model(directory, ExecutionProvider::Cpu, &runtime)?;
+                        return Ok(LoadedModel {
+                            model,
+                            execution_provider: ExecutionProvider::Cpu,
+                            provider_fallback_reason: fallback_reason,
+                            runtime_path: runtime.runtime_path,
+                            intra_threads,
+                        });
+                    }
+                    Err(error) => return Err(format!("CUDA 初始化失败: {}", error)),
                 }
             }
-        } else {
-            fallback_reason =
-                Some("CUDA 运行时未找到，当前使用 CPU；可设置 SANSHU_ORT_CUDA_DIR".to_string());
+            Err(error) if requested_provider.allows_cpu_fallback() => {
+                fallback_reason =
+                    Some(format!("CUDA 运行时预检/初始化失败，已回退 CPU: {}", error));
+                log::warn!("[embedding] CUDA 运行时不可用，将回退 CPU: {}", error);
+            }
+            Err(error) => return Err(format!("CUDA 初始化失败: {}", error)),
         }
     }
 
-    let (model, runtime_path, intra_threads) =
-        match load_model_with_provider(directory, ExecutionProvider::Cpu, None) {
-            Ok(value) => value,
-            Err(error) => {
-                if let Some(reason) = fallback_reason.as_ref() {
-                    return Err(format!("{}；CPU 初始化失败: {}", reason, error));
-                }
-                return Err(error);
-            }
-        };
+    let runtime = ensure_ort_runtime(ProviderPreference::Cpu).map_err(|error| {
+        fallback_reason
+            .as_ref()
+            .map(|reason| format!("{}；CPU 初始化失败: {}", reason, error))
+            .unwrap_or(error)
+    })?;
+    let (model, intra_threads) =
+        create_embedding_model(directory, ExecutionProvider::Cpu, &runtime).map_err(|error| {
+            fallback_reason
+                .as_ref()
+                .map(|reason| format!("{}；CPU 初始化失败: {}", reason, error))
+                .unwrap_or(error)
+        })?;
     Ok(LoadedModel {
         model,
         execution_provider: ExecutionProvider::Cpu,
         provider_fallback_reason: fallback_reason,
-        runtime_path,
+        runtime_path: runtime.runtime_path,
         intra_threads,
     })
 }
 
-fn load_model_with_provider(
+fn create_embedding_model(
     directory: &Path,
     provider: ExecutionProvider,
-    cuda_dir: Option<&Path>,
-) -> Result<(TextEmbedding, PathBuf, usize), String> {
-    let runtime_path = match provider {
-        ExecutionProvider::Cpu => runtime_dir().join(ORT_DLL_FILE_NAME),
-        ExecutionProvider::Cuda => cuda_dir
-            .ok_or_else(|| "CUDA 运行时目录未提供".to_string())?
-            .join(ORT_DLL_FILE_NAME),
-    };
-    if provider == ExecutionProvider::Cuda {
-        prepare_cuda_runtime(cuda_dir.ok_or_else(|| "CUDA 运行时目录未提供".to_string())?)?;
+    runtime: &OrtRuntimeInfo,
+) -> Result<(TextEmbedding, usize), String> {
+    if provider == ExecutionProvider::Cuda && !runtime.cuda_capable {
+        return Err("当前 ONNX Runtime 核心不含可用 CUDA provider".to_string());
     }
-    let environment = ort::init_from(&runtime_path)
-        .map_err(|error| format!("加载 ONNX Runtime {} 失败: {}", ORT_VERSION, error))?;
-    let _ = environment.commit();
 
     let threads = match provider {
         ExecutionProvider::Cpu => std::thread::available_parallelism()
@@ -680,7 +924,7 @@ fn load_model_with_provider(
     let model = user_defined_model(directory)?;
     let embedding = TextEmbedding::try_new_from_user_defined(model, options)
         .map_err(|error| format!("创建 BGE ONNX 会话失败: {}", error))?;
-    Ok((embedding, runtime_path, threads))
+    Ok((embedding, threads))
 }
 
 #[cfg(feature = "cuda")]

@@ -104,10 +104,42 @@ pub(super) fn inspect(db_path: &Path) -> Result<SemanticIndexStats> {
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SemanticSyncTuning {
+    embedding_batch_size: usize,
+    commit_each_batch: bool,
+}
+
+impl Default for SemanticSyncTuning {
+    fn default() -> Self {
+        Self {
+            embedding_batch_size: embedding::EMBEDDING_BATCH_SIZE,
+            commit_each_batch: true,
+        }
+    }
+}
+
 pub(super) fn sync_vectors<F>(
     db_path: &Path,
     model_dir: &Path,
+    on_progress: F,
+) -> Result<SemanticSyncStats>
+where
+    F: FnMut(u64, u64),
+{
+    sync_vectors_with_tuning(
+        db_path,
+        model_dir,
+        on_progress,
+        SemanticSyncTuning::default(),
+    )
+}
+
+fn sync_vectors_with_tuning<F>(
+    db_path: &Path,
+    model_dir: &Path,
     mut on_progress: F,
+    tuning: SemanticSyncTuning,
 ) -> Result<SemanticSyncStats>
 where
     F: FnMut(u64, u64),
@@ -160,37 +192,46 @@ where
     let mut indexed = total.saturating_sub(pending.len() as u64);
     on_progress(indexed, pending.len() as u64);
 
-    for batch in pending.chunks_mut(embedding::EMBEDDING_BATCH_SIZE) {
-        let documents = batch
-            .iter()
-            .map(|chunk| format!("{}\n{}", chunk.relative_path, chunk.excerpt))
-            .collect::<Vec<_>>();
-        let embeddings =
-            embedding::embed_documents_blocking(model_dir, documents, Duration::from_secs(120))
-                .map_err(|error| anyhow::anyhow!("{}: {}", error.state, error.message))?;
+    let batch_size = tuning.embedding_batch_size.max(1);
+    if tuning.commit_each_batch {
+        for batch in pending.chunks_mut(batch_size) {
+            let documents = batch
+                .iter()
+                .map(|chunk| format!("{}\n{}", chunk.relative_path, chunk.excerpt))
+                .collect::<Vec<_>>();
+            let embeddings = embedding::embed_documents_blocking_with_batch_size(
+                model_dir,
+                documents,
+                Duration::from_secs(120),
+                batch_size,
+            )
+            .map_err(|error| anyhow::anyhow!("{}: {}", error.state, error.message))?;
+            let transaction = connection.transaction()?;
+            insert_vector_batch(&transaction, batch, embeddings, &key)?;
+            transaction.commit()?;
+            indexed += batch.len() as u64;
+            on_progress(indexed, total.saturating_sub(indexed));
+        }
+    } else {
+        // 中文说明：基准变体把所有向量写入一个事务，用于量化 SQLite commit 开销；生产默认仍逐批提交。
         let transaction = connection.transaction()?;
-        for (chunk, vector) in batch.iter().zip(embeddings) {
-            transaction.execute(
-                "INSERT OR REPLACE INTO chunk_vectors(
-                    chunk_key, path, start_line, end_line, content_hash, chunk_rowid,
-                    model_key, dimension, embedding
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    chunk.key,
-                    chunk.relative_path,
-                    chunk.start_line as i64,
-                    chunk.end_line as i64,
-                    chunk.content_hash,
-                    chunk.rowid,
-                    key,
-                    embedding::MODEL_DIMENSION as i64,
-                    encode_vector(&vector),
-                ],
-            )?;
+        for batch in pending.chunks_mut(batch_size) {
+            let documents = batch
+                .iter()
+                .map(|chunk| format!("{}\n{}", chunk.relative_path, chunk.excerpt))
+                .collect::<Vec<_>>();
+            let embeddings = embedding::embed_documents_blocking_with_batch_size(
+                model_dir,
+                documents,
+                Duration::from_secs(120),
+                batch_size,
+            )
+            .map_err(|error| anyhow::anyhow!("{}: {}", error.state, error.message))?;
+            insert_vector_batch(&transaction, batch, embeddings, &key)?;
+            indexed += batch.len() as u64;
+            on_progress(indexed, total.saturating_sub(indexed));
         }
         transaction.commit()?;
-        indexed += batch.len() as u64;
-        on_progress(indexed, total.saturating_sub(indexed));
     }
 
     let generation = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
@@ -207,6 +248,34 @@ where
         indexed_chunks: total,
         pending_chunks: 0,
     })
+}
+
+fn insert_vector_batch(
+    transaction: &rusqlite::Transaction<'_>,
+    batch: &[SourceChunk],
+    embeddings: Vec<Vec<f32>>,
+    key: &str,
+) -> Result<()> {
+    for (chunk, vector) in batch.iter().zip(embeddings) {
+        transaction.execute(
+            "INSERT OR REPLACE INTO chunk_vectors(
+                chunk_key, path, start_line, end_line, content_hash, chunk_rowid,
+                model_key, dimension, embedding
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                chunk.key,
+                chunk.relative_path,
+                chunk.start_line as i64,
+                chunk.end_line as i64,
+                chunk.content_hash,
+                chunk.rowid,
+                key,
+                embedding::MODEL_DIMENSION as i64,
+                encode_vector(&vector),
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) async fn search(
@@ -1126,5 +1195,108 @@ mod tests {
         });
         println!("SOU_PHASE2_20K_RESULT={result}");
         assert!(p95_ms <= max_p95_ms);
+    }
+
+    #[test]
+    #[ignore = "显式使用本机既有 BGE 资产比较语义索引吞吐变体"]
+    fn benchmark_sync_throughput_variants() {
+        let chunk_count = std::env::var("SANSHU_SOU_BENCH_CHUNKS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(512)
+            .max(64);
+        let model_dir = embedding::default_model_dir();
+        assert!(
+            embedding::assets_have_expected_sizes(&model_dir),
+            "本机固定 BGE 与 ONNX Runtime 资产应已就绪"
+        );
+
+        // 中文说明：先完成一次短 batch 预热，把模型加载和首轮算子初始化从 A/B 数据中剥离。
+        embedding::embed_documents_blocking(
+            &model_dir,
+            vec!["语义索引吞吐基准预热：代码上下文".to_string()],
+            Duration::from_secs(120),
+        )
+        .expect("BGE 预热应成功");
+
+        let variants = [
+            ("batch32_per_batch_txn", 32usize, true),
+            ("batch64_per_batch_txn", 64usize, true),
+            ("batch128_per_batch_txn", 128usize, true),
+            ("batch32_single_txn", 32usize, false),
+        ];
+        let mut results = Vec::with_capacity(variants.len());
+        for (name, batch_size, commit_each_batch) in variants {
+            let temp = tempdir().expect("应创建吞吐基准临时目录");
+            let db_path = temp.path().join("semantic-throughput.sqlite3");
+            let connection = Connection::open(&db_path).expect("应创建吞吐基准数据库");
+            connection
+                .execute_batch(
+                    "CREATE VIRTUAL TABLE chunks USING fts5(
+                        path UNINDEXED,
+                        start_line UNINDEXED,
+                        end_line UNINDEXED,
+                        search_text,
+                        content UNINDEXED
+                     );",
+                )
+                .expect("应创建吞吐基准切片表");
+            {
+                let transaction = connection
+                    .unchecked_transaction()
+                    .expect("应开启吞吐基准夹具事务");
+                for index in 0..chunk_count {
+                    let path = format!("src/bench/module_{index:05}.rs");
+                    let content = format!(
+                        "fn generated_module_{index:05}() {{ process semantic indexing fixture; token_group {}; }}",
+                        index % 17
+                    );
+                    transaction
+                        .execute(
+                            "INSERT INTO chunks(path, start_line, end_line, search_text, content)
+                             VALUES (?1, 1, 20, ?2, ?2)",
+                            params![path, content],
+                        )
+                        .expect("应写入吞吐基准 chunk");
+                }
+                transaction.commit().expect("应提交吞吐基准夹具事务");
+            }
+            drop(connection);
+
+            let started = Instant::now();
+            let stats = sync_vectors_with_tuning(
+                &db_path,
+                &model_dir,
+                |_, _| {},
+                SemanticSyncTuning {
+                    embedding_batch_size: batch_size,
+                    commit_each_batch,
+                },
+            )
+            .expect("吞吐基准同步应成功");
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            let chunks_per_second = if elapsed_ms == 0 {
+                0.0
+            } else {
+                stats.indexed_chunks as f64 * 1000.0 / elapsed_ms as f64
+            };
+            results.push(serde_json::json!({
+                "name": name,
+                "batch_size": batch_size,
+                "commit_each_batch": commit_each_batch,
+                "chunks": stats.indexed_chunks,
+                "elapsed_ms": elapsed_ms,
+                "chunks_per_second": chunks_per_second,
+            }));
+        }
+        let snapshot = embedding::snapshot(&model_dir);
+        let result = serde_json::json!({
+            "type": "semantic_sync_throughput",
+            "provider": snapshot.execution_provider,
+            "requested_provider": snapshot.requested_provider,
+            "chunks": chunk_count,
+            "results": results,
+        });
+        println!("SOU_SEMANTIC_THROUGHPUT_RESULT={result}");
     }
 }

@@ -26,8 +26,6 @@ pub const MAX_LENGTH: usize = 512;
 
 const MODEL_TOTAL_BYTES: u64 = 1_134_628_267;
 const LOCK_FILE_NAME: &str = ".sou-reranker.lock";
-const ORT_DLL_FILE_NAME: &str = "onnxruntime.dll";
-const ORT_DLL_BYTES: u64 = 15_809_848;
 const PROBE_SAMPLE_BYTES: u64 = 512 * 1024;
 const PROBE_SAMPLE_OFFSETS: [u64; 3] = [0, 384 * 1024 * 1024, 768 * 1024 * 1024];
 const PROBE_CONNECT_TIMEOUT_SECS: u64 = 8;
@@ -789,9 +787,9 @@ fn rerank_ready(
 
 fn load_model(directory: &Path) -> Result<TextRerank, String> {
     verify_assets(directory)?;
-    ort::init_from(crate::mcp::embedding::runtime_dir().join(ORT_DLL_FILE_NAME))
-        .map_err(|error| format!("加载共享 ONNX Runtime 失败: {}", error))?
-        .commit();
+    // 中文说明：准确模式与语义 embedding 共用 ORT 首次初始化入口，避免先加载 CPU 核心锁死 CUDA。
+    let _runtime =
+        crate::mcp::embedding::ensure_ort_runtime(crate::mcp::embedding::configured_provider())?;
     let model = UserDefinedRerankingModel::new(
         directory.join("onnx/model.onnx"),
         TokenizerFiles {
@@ -1069,9 +1067,9 @@ fn write_download_status(status: RerankerModelStatus) {
 }
 
 fn ort_runtime_ready() -> bool {
-    fs::metadata(crate::mcp::embedding::runtime_dir().join(ORT_DLL_FILE_NAME))
-        .map(|metadata| metadata.is_file() && metadata.len() == ORT_DLL_BYTES)
-        .unwrap_or(false)
+    crate::mcp::embedding::runtime_available_for_provider(
+        crate::mcp::embedding::configured_provider(),
+    )
 }
 
 fn partial_path(target: &Path) -> PathBuf {
