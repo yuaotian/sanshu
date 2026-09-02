@@ -3,6 +3,7 @@
  * 代码搜索工具 (Acemcp/Sou) 配置组件
  * 包含：基础配置、高级配置、日志调试、索引管理
  */
+import type { IndexStatus, ProjectIndexStatus, ProjectsIndexStatus } from '../../types/tauri'
 import { invoke } from '@tauri-apps/api/core'
 import { useDialog, useMessage } from 'naive-ui'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
@@ -85,7 +86,13 @@ const debugQuery = ref('')
 const debugLoading = ref(false)
 const debugBackend = ref<'default' | 'auto' | 'ace' | 'fast_context' | 'local' | 'both'>('default')
 const debugUseManualInput = ref(false) // 是否使用手动输入模式
-const debugProjectOptions = ref<{ label: string, value: string }[]>([]) // 项目选择选项
+interface ProjectSelectOption {
+  label: string
+  value: string
+  status: IndexStatus
+}
+
+const debugProjectOptions = ref<ProjectSelectOption[]>([]) // 项目选择选项
 const debugProjectOptionsLoading = ref(false) // 加载项目列表中
 
 // 调试结果增强类型
@@ -136,10 +143,27 @@ interface LocalIndexStatus {
 interface EmbeddingModelStatus {
   phase: 'missing' | 'downloading' | 'verifying' | 'loading' | 'indexing' | 'ready' | 'error'
   model_name: string
+  revision: string
   model_dir: string
+  downloaded_bytes: number
+  total_bytes: number
+  model_downloaded_bytes: number
+  model_total_bytes: number
+  completed_files: number
+  total_files: number
+  runtime_version: string
+  runtime_ready: boolean
+  runtime_dir: string
+  runtime_downloaded_bytes: number
+  runtime_total_bytes: number
+  indexed_documents: number
+  total_documents: number
   progress_percent: number
+  index_progress_percent: number
+  route?: string
   message: string
   error?: string
+  updated_at: string
 }
 
 interface RerankerModelStatus {
@@ -158,6 +182,18 @@ interface RerankerModelStatus {
   route?: string
   message: string
   error?: string
+}
+
+interface ResourceUsageSnapshot {
+  cpu_percent: number | null
+  memory_bytes: number | null
+  gpu_percent: number | null
+  gpu_memory_bytes: number | null
+  gpu_memory_total_bytes: number | null
+  cpu_provider?: string
+  gpu_provider?: string
+  sampled_at: string
+  message: string
 }
 
 interface FastContextApiKeyDetectionResult {
@@ -184,6 +220,26 @@ const embeddingModelStatus = ref<EmbeddingModelStatus | null>(null)
 const embeddingModelOperating = ref(false)
 const rerankerModelStatus = ref<RerankerModelStatus | null>(null)
 const rerankerModelOperating = ref(false)
+const resourceUsage = ref<ResourceUsageSnapshot | null>(null)
+const localUseManualInput = ref(false)
+const embeddingDownloadSpeed = ref<number | null>(null)
+const rerankerDownloadSpeed = ref<number | null>(null)
+const localIndexThroughput = ref<number | null>(null)
+const localIndexElapsedMs = ref(0)
+const localIndexStartedAt = ref<number | null>(null)
+
+interface RateSample {
+  value: number
+  at: number
+}
+
+let embeddingRateSample: RateSample | null = null
+let rerankerRateSample: RateSample | null = null
+let localIndexRateSample: RateSample | null = null
+let embeddingStatusTimer: ReturnType<typeof setInterval> | null = null
+let localIndexStatusTimer: ReturnType<typeof setInterval> | null = null
+let resourceUsageTimer: ReturnType<typeof setInterval> | null = null
+let localIndexStatusRequestActive = false
 
 interface ExtensionGroup {
   id: string
@@ -470,6 +526,8 @@ const semanticModeDescription = computed(() => {
 const localIndexStateLabel = computed(() => {
   if (!localIndexStatus.value)
     return '未读取'
+  if (localIndexStatus.value.sync_running)
+    return '同步中'
   return {
     missing: '未建立',
     building: '同步中',
@@ -479,6 +537,8 @@ const localIndexStateLabel = computed(() => {
 })
 
 const localIndexTagType = computed<'default' | 'info' | 'success' | 'error'>(() => {
+  if (localIndexStatus.value?.sync_running)
+    return 'info'
   switch (localIndexStatus.value?.state) {
     case 'ready': return 'success'
     case 'building': return 'info'
@@ -500,14 +560,19 @@ const semanticStateLabel = computed(() => {
   }[localIndexStatus.value?.semantic_state || 'missing']
 })
 
-const rerankerPhaseLabel = computed(() => ({
-  missing: '未下载',
-  downloading: '下载中',
-  verifying: '校验中',
-  loading: '加载中',
-  ready: '已就绪',
-  error: '异常',
-}[rerankerModelStatus.value?.phase || 'missing']))
+const rerankerPhaseLabel = computed(() => {
+  const status = rerankerModelStatus.value
+  if (status?.phase === 'missing' && status.downloaded_bytes > 0)
+    return '未完成'
+  return ({
+    missing: '未下载',
+    downloading: '下载中',
+    verifying: '校验中',
+    loading: '加载中',
+    ready: '已就绪',
+    error: '异常',
+  }[status?.phase || 'missing'] || '未知')
+})
 
 const rerankerTagType = computed<'default' | 'info' | 'success' | 'error'>(() => {
   switch (rerankerModelStatus.value?.phase) {
@@ -523,7 +588,93 @@ const rerankerTagType = computed<'default' | 'info' | 'success' | 'error'>(() =>
 const rerankerTaskActive = computed(() =>
   rerankerModelOperating.value
   || rerankerModelStatus.value?.phase === 'downloading'
-  || rerankerModelStatus.value?.phase === 'verifying',
+  || rerankerModelStatus.value?.phase === 'verifying'
+  || rerankerModelStatus.value?.phase === 'loading',
+)
+
+const embeddingPhaseLabel = computed(() => {
+  const status = embeddingModelStatus.value
+  if (status?.phase === 'missing' && status.downloaded_bytes > 0)
+    return '未完成'
+  return ({
+    missing: '未下载',
+    downloading: '下载中',
+    verifying: '校验中',
+    loading: '加载中',
+    indexing: '建索引中',
+    ready: '可用',
+    error: '异常',
+  }[status?.phase || 'missing'] || '未知')
+})
+
+const embeddingTagType = computed<'default' | 'info' | 'success' | 'warning' | 'error'>(() => {
+  switch (embeddingModelStatus.value?.phase) {
+    case 'ready': return 'success'
+    case 'error': return 'error'
+    case 'missing': return 'warning'
+    case 'downloading':
+    case 'verifying':
+    case 'loading':
+    case 'indexing': return 'info'
+    default: return 'default'
+  }
+})
+
+const embeddingTaskActive = computed(() =>
+  embeddingModelOperating.value
+  || ['downloading', 'verifying', 'loading', 'indexing'].includes(embeddingModelStatus.value?.phase || ''),
+)
+
+const localIndexProgressPercent = computed(() => {
+  const status = localIndexStatus.value
+  if (!status)
+    return 0
+  if (!semanticEnabled.value)
+    return status.state === 'ready' ? 100 : 0
+  if (status.semantic_state === 'missing')
+    return 0
+  const total = status.semantic_indexed_chunks + status.semantic_pending_chunks
+  if (total <= 0)
+    return status.semantic_state === 'ready' ? 100 : 0
+  return Math.max(0, Math.min(100, status.semantic_indexed_chunks / total * 100))
+})
+
+const localIndexTaskActive = computed(() =>
+  localIndexSyncing.value || !!localIndexStatus.value?.sync_running,
+)
+
+const resourceMemoryLabel = computed(() =>
+  resourceUsage.value?.memory_bytes != null
+    ? formatBytes(resourceUsage.value.memory_bytes)
+    : '未提供',
+)
+
+const resourceCpuLabel = computed(() =>
+  resourceUsage.value?.cpu_percent != null
+    ? `${resourceUsage.value.cpu_percent.toFixed(1)}%`
+    : '未提供',
+)
+
+const resourceGpuLabel = computed(() =>
+  resourceUsage.value?.gpu_percent != null
+    ? `${resourceUsage.value.gpu_percent.toFixed(1)}%`
+    : '未提供',
+)
+
+const resourceGpuMemoryLabel = computed(() => {
+  const usage = resourceUsage.value
+  if (!usage || usage.gpu_memory_bytes == null)
+    return '未提供'
+  const total = usage.gpu_memory_total_bytes != null
+    ? ` / ${formatBytes(usage.gpu_memory_total_bytes)}`
+    : ''
+  return `${formatBytes(usage.gpu_memory_bytes)}${total}`
+})
+
+const resourceSampleLabel = computed(() =>
+  resourceUsage.value?.sampled_at
+    ? `最近采样 ${formatDebugTime(resourceUsage.value.sampled_at)}`
+    : '等待首次采样',
 )
 
 const semanticTagType = computed<'default' | 'info' | 'success' | 'error'>(() => {
@@ -917,18 +1068,62 @@ async function testConnection() {
   }
 }
 
-/** 加载调试用项目选择列表 */
-async function refreshLocalIndexStatus(showFeedback = false) {
+function updateRate(sample: RateSample | null, value: number): { sample: RateSample, rate: number | null } {
+  const now = Date.now()
+  let rate: number | null = null
+  if (sample) {
+    const elapsed = now - sample.at
+    if (elapsed >= 250)
+      rate = Math.max(0, (value - sample.value) / (elapsed / 1000))
+  }
+  return { sample: { value, at: now }, rate }
+}
+
+function resetEmbeddingRate() {
+  embeddingRateSample = null
+  embeddingDownloadSpeed.value = null
+}
+
+function resetRerankerRate() {
+  rerankerRateSample = null
+  rerankerDownloadSpeed.value = null
+}
+
+function resetLocalIndexRate() {
+  localIndexRateSample = null
+  localIndexThroughput.value = null
+}
+
+function formatRate(value?: number | null): string {
+  if (!value || !Number.isFinite(value) || value <= 0)
+    return '等待采样'
+  return `${formatBytes(value)}/s`
+}
+
+async function refreshLocalIndexStatus(showFeedback = false, silent = false) {
   const projectRoot = debugProjectRoot.value.trim()
   if (!projectRoot) {
     localIndexStatus.value = null
+    localIndexElapsedMs.value = 0
+    localIndexStartedAt.value = null
     return
   }
-  localIndexLoading.value = true
+  if (!silent)
+    localIndexLoading.value = true
   try {
-    localIndexStatus.value = await invoke<LocalIndexStatus>('get_sou_local_index_status', {
+    const status = await invoke<LocalIndexStatus>('get_sou_local_index_status', {
       projectRootPath: projectRoot,
     })
+    localIndexStatus.value = status
+    if (status.index_path)
+      effectiveLocalIndexDir.value = status.index_path.replace(/[\\/][^\\/]+$/, '')
+    const rateSample = updateRate(localIndexRateSample, status.semantic_indexed_chunks)
+    localIndexRateSample = rateSample.sample
+    if (rateSample.rate != null)
+      localIndexThroughput.value = rateSample.rate
+    if (localIndexStartedAt.value) {
+      localIndexElapsedMs.value = Math.max(0, Date.now() - localIndexStartedAt.value)
+    }
   }
   catch (error) {
     localIndexStatus.value = null
@@ -936,8 +1131,34 @@ async function refreshLocalIndexStatus(showFeedback = false) {
       message.error(`读取 Local 索引状态失败: ${error}`)
   }
   finally {
-    localIndexLoading.value = false
+    if (!silent)
+      localIndexLoading.value = false
   }
+}
+
+function stopLocalIndexStatusPolling() {
+  if (localIndexStatusTimer) {
+    clearInterval(localIndexStatusTimer)
+    localIndexStatusTimer = null
+  }
+}
+
+function startLocalIndexStatusPolling() {
+  if (localIndexStatusTimer || !props.active)
+    return
+  localIndexStatusTimer = setInterval(async () => {
+    if (localIndexStatusRequestActive)
+      return
+    localIndexStatusRequestActive = true
+    try {
+      await refreshLocalIndexStatus(false, true)
+      if (!localIndexTaskActive.value && !localIndexSyncing.value)
+        stopLocalIndexStatusPolling()
+    }
+    finally {
+      localIndexStatusRequestActive = false
+    }
+  }, 1000)
 }
 
 async function syncLocalIndex() {
@@ -947,6 +1168,10 @@ async function syncLocalIndex() {
     return
   }
   localIndexSyncing.value = true
+  localIndexStartedAt.value = Date.now()
+  localIndexElapsedMs.value = 0
+  resetLocalIndexRate()
+  startLocalIndexStatusPolling()
   try {
     localIndexStatus.value = await invoke<LocalIndexStatus>('rebuild_sou_local_index', {
       projectRootPath: projectRoot,
@@ -958,6 +1183,9 @@ async function syncLocalIndex() {
   }
   finally {
     localIndexSyncing.value = false
+    stopLocalIndexStatusPolling()
+    await refreshLocalIndexStatus(false, true)
+    localIndexStartedAt.value = null
   }
 }
 
@@ -968,21 +1196,77 @@ async function selectSouStorageDirectory(field: SouDirectoryField, effectivePath
     const selected = await invoke<string | null>('select_sou_storage_directory', {
       defaultPath: config.value[field] || effectivePath,
     })
-    if (selected)
+    if (selected) {
       config.value[field] = selected
+      if (field === 'local_embedding_model_dir')
+        effectiveEmbeddingModelDir.value = selected
+      else if (field === 'sou_reranker_model_dir')
+        effectiveRerankerModelDir.value = selected
+      else
+        effectiveLocalIndexDir.value = selected
+    }
   }
   catch (error) {
     message.error(`选择目录失败: ${error}`)
   }
 }
 
+async function openSouStorageDirectory(path: string) {
+  const target = (path || '').trim()
+  if (!target) {
+    message.warning('目录路径尚未确定')
+    return
+  }
+  try {
+    await invoke('open_external_url', { url: target })
+  }
+  catch (error) {
+    message.error(`打开目录失败: ${error}`)
+  }
+}
+
 async function refreshEmbeddingModelStatus(showFeedback = false) {
   try {
-    embeddingModelStatus.value = await invoke<EmbeddingModelStatus>('get_local_embedding_model_status')
+    const status = await invoke<EmbeddingModelStatus>('get_uiux_model_status')
+    embeddingModelStatus.value = status
+    if (status.model_dir)
+      effectiveEmbeddingModelDir.value = status.model_dir
+    const rateSample = updateRate(embeddingRateSample, status.downloaded_bytes || 0)
+    embeddingRateSample = rateSample.sample
+    if (rateSample.rate != null)
+      embeddingDownloadSpeed.value = rateSample.rate
+    if (embeddingTaskActive.value)
+      startEmbeddingStatusPolling()
+    else
+      stopEmbeddingStatusPolling()
   }
   catch (error) {
     if (showFeedback)
       message.error(`读取共享模型状态失败: ${error}`)
+  }
+}
+
+function stopEmbeddingStatusPolling() {
+  if (embeddingStatusTimer) {
+    clearInterval(embeddingStatusTimer)
+    embeddingStatusTimer = null
+  }
+}
+
+function startEmbeddingStatusPolling() {
+  if (embeddingStatusTimer || !props.active)
+    return
+  embeddingStatusTimer = setInterval(() => refreshEmbeddingModelStatus(false), 1000)
+}
+
+async function cancelEmbeddingDownload() {
+  try {
+    await invoke('cancel_uiux_model_download')
+    message.info('已提交取消共享模型下载请求，已有分片会保留用于重试')
+    startEmbeddingStatusPolling()
+  }
+  catch (error) {
+    message.error(`取消共享模型下载失败: ${error}`)
   }
 }
 
@@ -996,15 +1280,22 @@ function stopRerankerStatusPolling() {
 }
 
 function startRerankerStatusPolling() {
-  if (rerankerStatusTimer)
+  if (rerankerStatusTimer || !props.active)
     return
   rerankerStatusTimer = setInterval(() => refreshRerankerModelStatus(false), 1000)
 }
 
 async function refreshRerankerModelStatus(showFeedback = false) {
   try {
-    rerankerModelStatus.value = await invoke<RerankerModelStatus>('get_sou_reranker_model_status')
-    if (rerankerModelStatus.value.phase === 'downloading' || rerankerModelStatus.value.phase === 'verifying')
+    const status = await invoke<RerankerModelStatus>('get_sou_reranker_model_status')
+    rerankerModelStatus.value = status
+    if (status.model_dir)
+      effectiveRerankerModelDir.value = status.model_dir
+    const rateSample = updateRate(rerankerRateSample, status.downloaded_bytes || 0)
+    rerankerRateSample = rateSample.sample
+    if (rateSample.rate != null)
+      rerankerDownloadSpeed.value = rateSample.rate
+    if (['downloading', 'verifying', 'loading'].includes(rerankerModelStatus.value.phase))
       startRerankerStatusPolling()
     else
       stopRerankerStatusPolling()
@@ -1015,12 +1306,37 @@ async function refreshRerankerModelStatus(showFeedback = false) {
   }
 }
 
+async function refreshResourceUsage(showFeedback = false) {
+  try {
+    resourceUsage.value = await invoke<ResourceUsageSnapshot>('get_sou_resource_usage')
+  }
+  catch (error) {
+    if (showFeedback)
+      message.error(`读取资源采样失败: ${error}`)
+  }
+}
+
+function stopResourceUsagePolling() {
+  if (resourceUsageTimer) {
+    clearInterval(resourceUsageTimer)
+    resourceUsageTimer = null
+  }
+}
+
+function startResourceUsagePolling() {
+  if (resourceUsageTimer || !props.active)
+    return
+  resourceUsageTimer = setInterval(() => refreshResourceUsage(false), 2000)
+}
+
 async function startRerankerDownload() {
   rerankerModelOperating.value = true
   try {
     if (!await saveConfig())
       return
     rerankerModelStatus.value = await invoke<RerankerModelStatus>('start_sou_reranker_model_download')
+    resetRerankerRate()
+    rerankerRateSample = updateRate(null, rerankerModelStatus.value.downloaded_bytes || 0).sample
     startRerankerStatusPolling()
     message.success('BGE reranker 下载任务已启动')
   }
@@ -1053,6 +1369,7 @@ function confirmRemoveReranker() {
       rerankerModelOperating.value = true
       try {
         rerankerModelStatus.value = await invoke<RerankerModelStatus>('remove_sou_reranker_model')
+        resetRerankerRate()
         message.success('准确模式模型已删除')
       }
       catch (error) {
@@ -1071,6 +1388,9 @@ async function installEmbeddingModel() {
     if (!await saveConfig())
       return
     embeddingModelStatus.value = await invoke<EmbeddingModelStatus>('start_uiux_model_download')
+    resetEmbeddingRate()
+    embeddingRateSample = updateRate(null, embeddingModelStatus.value.downloaded_bytes || 0).sample
+    startEmbeddingStatusPolling()
     message.success('共享 BGE 模型下载任务已启动')
   }
   catch (error) {
@@ -1081,22 +1401,53 @@ async function installEmbeddingModel() {
   }
 }
 
+const projectStatusLabel: Record<IndexStatus, string> = {
+  idle: '空闲',
+  indexing: '索引中',
+  paused: '等待恢复',
+  synced: '已完成',
+  failed: '失败',
+}
+
+function projectOptionLabel(status: ProjectIndexStatus): string {
+  const total = status.total_files || 0
+  const indexed = status.indexed_files || 0
+  const progress = status.status === 'indexing' || status.status === 'paused'
+    ? ` ${Math.round(status.progress || 0)}%`
+    : ''
+  const stale = status.is_stale && status.status !== 'indexing' ? ' · 待重建' : ''
+  return `${getProjectName(status.project_root)} · ${projectStatusLabel[status.status] || '未知'}${progress} · ${indexed}/${total} 文件${stale}`
+}
+
+/** 加载调试用项目选择列表；数据源与索引管理页保持一致。 */
 async function loadDebugProjectOptions() {
+  if (debugProjectOptionsLoading.value)
+    return
   debugProjectOptionsLoading.value = true
   try {
-    const statusResult = await invoke<{ projects: Record<string, { project_root: string, total_files: number }> }>('get_all_acemcp_index_status')
+    const statusResult = await invoke<ProjectsIndexStatus>('get_all_acemcp_index_status')
     const list = Object.values(statusResult.projects || {})
-      .filter(p => (p.total_files || 0) > 0)
-      .map(p => ({
-        label: `${getProjectName(p.project_root)} (${p.total_files} 文件)`,
-        value: p.project_root,
+      .filter(status => !!status.project_root)
+      .sort((a, b) => {
+        const statusOrder: Record<IndexStatus, number> = {
+          indexing: 0,
+          paused: 1,
+          failed: 2,
+          idle: 3,
+          synced: 4,
+        }
+        return statusOrder[a.status] - statusOrder[b.status]
+      })
+      .map(status => ({
+        label: projectOptionLabel(status),
+        value: status.project_root,
+        status: status.status,
       }))
     debugProjectOptions.value = list
     // 如果列表不为空且当前未选择项目，自动选择第一个
     if (list.length > 0 && !debugProjectRoot.value) {
       debugProjectRoot.value = list[0].value
     }
-    await refreshLocalIndexStatus(false)
   }
   catch (e) {
     console.error('加载项目列表失败:', e)
@@ -1175,6 +1526,13 @@ function formatBytes(value: number): string {
   const units = ['B', 'KB', 'MB', 'GB']
   const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1)
   return `${(value / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`
+}
+
+function formatElapsed(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000))
+  const minutes = Math.floor(seconds / 60)
+  const remainder = seconds % 60
+  return minutes > 0 ? `${minutes}分 ${remainder}秒` : `${remainder}秒`
 }
 
 /** 复制调试结果到剪贴板 */
@@ -1318,6 +1676,11 @@ let localStatusTimer: ReturnType<typeof setTimeout> | undefined
 watch(debugProjectRoot, () => {
   if (localStatusTimer)
     clearTimeout(localStatusTimer)
+  if (!localIndexSyncing.value) {
+    resetLocalIndexRate()
+    localIndexElapsedMs.value = 0
+    localIndexStartedAt.value = null
+  }
   localStatusTimer = setTimeout(() => refreshLocalIndexStatus(false), 350)
 })
 
@@ -1326,23 +1689,58 @@ watch(() => config.value.sou_local_semantic_mode, (mode) => {
     refreshRerankerModelStatus(false)
   else
     stopRerankerStatusPolling()
+  if (mode === 'off')
+    stopResourceUsagePolling()
+  else
+    startResourceUsagePolling()
 })
 
-// 组件挂载
-onMounted(async () => {
-  if (props.active) {
-    await loadAcemcpConfig()
-    await Promise.all([
-      fetchAutoIndexEnabled(),
-      fetchWatchingProjects(),
-      refreshEmbeddingModelStatus(false),
-      refreshRerankerModelStatus(false),
-    ])
+async function loadActiveData() {
+  await loadAcemcpConfig()
+  await Promise.all([
+    fetchAutoIndexEnabled(),
+    fetchWatchingProjects(),
+    loadDebugProjectOptions(),
+    refreshEmbeddingModelStatus(false),
+    refreshRerankerModelStatus(false),
+    refreshResourceUsage(false),
+  ])
+  await refreshLocalIndexStatus(false)
+  if (!props.active)
+    return
+  if (semanticEnabled.value)
+    startResourceUsagePolling()
+  if (embeddingTaskActive.value)
+    startEmbeddingStatusPolling()
+  if (accurateModeActive.value && rerankerTaskActive.value)
+    startRerankerStatusPolling()
+  if (localIndexTaskActive.value)
+    startLocalIndexStatusPolling()
+}
+
+watch(() => props.active, (active) => {
+  if (active) {
+    void loadActiveData()
+  }
+  else {
+    stopEmbeddingStatusPolling()
+    stopRerankerStatusPolling()
+    stopLocalIndexStatusPolling()
+    stopResourceUsagePolling()
   }
 })
 
+// 组件挂载
+onMounted(() => {
+  if (props.active)
+    void loadActiveData()
+})
+
 onBeforeUnmount(() => {
+  stopEmbeddingStatusPolling()
   stopRerankerStatusPolling()
+  stopLocalIndexStatusPolling()
+  stopResourceUsagePolling()
   if (localStatusTimer)
     clearTimeout(localStatusTimer)
 })
@@ -1575,6 +1973,44 @@ defineExpose({ saveConfig })
                 </n-alert>
 
                 <n-grid :x-gap="24" :y-gap="16" :cols="2">
+                  <n-grid-item :span="2">
+                    <n-form-item label="项目路径">
+                      <div class="sou-project-picker">
+                        <n-select
+                          v-if="!localUseManualInput"
+                          v-model:value="debugProjectRoot"
+                          :options="debugProjectOptions"
+                          :loading="debugProjectOptionsLoading"
+                          placeholder="从索引管理选择项目..."
+                          filterable
+                          clearable
+                          :disabled="localIndexTaskActive"
+                          class="sou-project-select"
+                          @focus="loadDebugProjectOptions"
+                        />
+                        <n-input
+                          v-else
+                          v-model:value="debugProjectRoot"
+                          placeholder="填写项目绝对路径"
+                          clearable
+                          :disabled="localIndexTaskActive"
+                          class="sou-project-select"
+                        />
+                        <n-button text size="small" :disabled="localIndexTaskActive" @click="localUseManualInput = !localUseManualInput">
+                          <template #icon>
+                            <div :class="localUseManualInput ? 'i-carbon-list-bulleted' : 'i-carbon-edit'" />
+                          </template>
+                          {{ localUseManualInput ? '选择索引项目' : '手动输入' }}
+                        </n-button>
+                      </div>
+                      <template #feedback>
+                        <span v-if="localIndexStatus" class="form-feedback">
+                          {{ localIndexStatus.project_root }} · {{ localIndexStatus.indexed_files }} 文件 / {{ localIndexStatus.indexed_chunks }} 分块
+                        </span>
+                        <span v-else class="form-feedback">索引管理中的项目会在此列出，也可以切换为手动输入。</span>
+                      </template>
+                    </n-form-item>
+                  </n-grid-item>
                   <n-grid-item>
                     <n-form-item label="索引状态">
                       <n-space align="center">
@@ -1585,11 +2021,6 @@ defineExpose({ saveConfig })
                           {{ localIndexStatus.indexed_files }} 文件 / {{ localIndexStatus.indexed_chunks }} 分块
                         </span>
                       </n-space>
-                    </n-form-item>
-                  </n-grid-item>
-                  <n-grid-item>
-                    <n-form-item label="项目路径">
-                      <n-input v-model:value="debugProjectRoot" placeholder="选择已索引项目或填写绝对路径" clearable />
                     </n-form-item>
                   </n-grid-item>
                   <n-grid-item>
@@ -1604,94 +2035,285 @@ defineExpose({ saveConfig })
                       </n-space>
                     </n-form-item>
                   </n-grid-item>
-                  <n-grid-item>
-                    <n-form-item label="共享嵌入模型">
-                      <n-space align="center">
-                        <n-tag :type="embeddingModelStatus?.phase === 'ready' ? 'success' : 'default'" :bordered="false">
-                          {{ embeddingModelStatus?.phase || '未读取' }}
-                        </n-tag>
-                        <span class="form-feedback">{{ embeddingModelStatus?.model_name || 'bge-small-zh-v1.5' }}</span>
-                      </n-space>
-                    </n-form-item>
-                  </n-grid-item>
-                  <n-grid-item :span="2">
-                    <n-form-item label="嵌入模型目录">
-                      <n-input-group>
-                        <n-input
-                          v-model:value="config.local_embedding_model_dir"
-                          :placeholder="effectiveEmbeddingModelDir || '使用系统默认目录'"
-                          clearable
-                        />
-                        <n-tooltip trigger="hover">
-                          <template #trigger>
-                            <n-button aria-label="选择嵌入模型目录" @click="selectSouStorageDirectory('local_embedding_model_dir', effectiveEmbeddingModelDir)">
-                              <template #icon>
-                                <div class="i-carbon-folder" />
-                              </template>
-                            </n-button>
-                          </template>
-                          选择嵌入模型目录
-                        </n-tooltip>
-                      </n-input-group>
-                      <template #feedback>
-                        <span class="form-feedback">{{ config.local_embedding_model_dir || effectiveEmbeddingModelDir }}</span>
-                      </template>
-                    </n-form-item>
-                  </n-grid-item>
-                  <n-grid-item :span="2">
-                    <n-form-item label="本地索引目录">
-                      <n-input-group>
-                        <n-input
-                          v-model:value="config.sou_local_index_dir"
-                          :placeholder="effectiveLocalIndexDir || '使用系统默认目录'"
-                          clearable
-                        />
-                        <n-tooltip trigger="hover">
-                          <template #trigger>
-                            <n-button aria-label="选择本地索引目录" @click="selectSouStorageDirectory('sou_local_index_dir', effectiveLocalIndexDir)">
-                              <template #icon>
-                                <div class="i-carbon-folder" />
-                              </template>
-                            </n-button>
-                          </template>
-                          选择本地索引目录
-                        </n-tooltip>
-                      </n-input-group>
-                      <template #feedback>
-                        <span class="form-feedback">建议放在 SSD/NVMe；目录切换后，新查询会使用独立索引库。当前：{{ config.sou_local_index_dir || effectiveLocalIndexDir }}</span>
-                      </template>
-                    </n-form-item>
-                  </n-grid-item>
-                  <n-grid-item v-if="accurateModeActive" :span="2">
-                    <n-form-item label="重排模型目录">
-                      <n-input-group>
-                        <n-input
-                          v-model:value="config.sou_reranker_model_dir"
-                          :placeholder="effectiveRerankerModelDir || '使用系统默认目录'"
-                          :disabled="rerankerTaskActive"
-                          clearable
-                        />
-                        <n-tooltip trigger="hover">
-                          <template #trigger>
-                            <n-button
-                              :disabled="rerankerTaskActive"
-                              aria-label="选择重排模型目录"
-                              @click="selectSouStorageDirectory('sou_reranker_model_dir', effectiveRerankerModelDir)"
-                            >
-                              <template #icon>
-                                <div class="i-carbon-folder" />
-                              </template>
-                            </n-button>
-                          </template>
-                          选择重排模型目录
-                        </n-tooltip>
-                      </n-input-group>
-                      <template #feedback>
-                        <span class="form-feedback">{{ config.sou_reranker_model_dir || effectiveRerankerModelDir }}</span>
-                      </template>
-                    </n-form-item>
-                  </n-grid-item>
                 </n-grid>
+
+                <div v-if="semanticEnabled && localIndexStatus" class="sou-progress-panel">
+                  <div class="sou-panel-header">
+                    <div>
+                      <div class="sou-panel-title">
+                        语义索引进度
+                      </div>
+                      <div class="form-feedback">
+                        {{ localIndexTaskActive ? '正在构建，状态每秒刷新' : (localIndexStatus.semantic_last_error || '已持久化向量分块') }}
+                      </div>
+                    </div>
+                    <strong class="sou-panel-value">{{ localIndexProgressPercent.toFixed(1) }}%</strong>
+                  </div>
+                  <n-progress
+                    type="line"
+                    :percentage="localIndexProgressPercent"
+                    :status="localIndexStatus.semantic_state === 'error' ? 'error' : localIndexStatus.semantic_state === 'ready' ? 'success' : 'default'"
+                    :height="8"
+                    :border-radius="4"
+                  />
+                  <div class="sou-metrics">
+                    <span>{{ localIndexStatus.semantic_indexed_chunks }} 已索引</span>
+                    <span>{{ localIndexStatus.semantic_pending_chunks }} 待处理</span>
+                    <span>吞吐 {{ formatRate(localIndexThroughput) }}</span>
+                    <span>耗时 {{ formatElapsed(localIndexElapsedMs) }}</span>
+                  </div>
+                </div>
+
+                <div class="sou-model-panel">
+                  <div class="sou-panel-header">
+                    <div class="min-w-0">
+                      <div class="sou-panel-title">
+                        共享嵌入模型
+                      </div>
+                      <div class="form-feedback">
+                        {{ embeddingModelStatus?.model_name || 'Xenova/bge-small-zh-v1.5' }} · {{ embeddingModelStatus?.message || '正在读取模型状态' }}
+                      </div>
+                    </div>
+                    <n-space align="center" :wrap="false">
+                      <n-tag :type="embeddingModelStatus?.runtime_ready ? 'success' : 'warning'" :bordered="false">
+                        ORT {{ embeddingModelStatus?.runtime_ready ? '就绪' : '待加载' }}
+                      </n-tag>
+                      <n-tag :type="embeddingTagType" :bordered="false">
+                        {{ embeddingPhaseLabel }}
+                      </n-tag>
+                    </n-space>
+                  </div>
+                  <n-progress
+                    type="line"
+                    :percentage="Math.max(0, Math.min(100, embeddingModelStatus?.progress_percent || 0))"
+                    :status="embeddingModelStatus?.phase === 'error' ? 'error' : embeddingModelStatus?.phase === 'ready' ? 'success' : 'default'"
+                    :height="8"
+                    :border-radius="4"
+                  />
+                  <div class="sou-metrics">
+                    <span>总计 {{ formatBytes(embeddingModelStatus?.downloaded_bytes || 0) }} / {{ formatBytes(embeddingModelStatus?.total_bytes || 0) }}</span>
+                    <span>BGE {{ formatBytes(embeddingModelStatus?.model_downloaded_bytes || 0) }} / {{ formatBytes(embeddingModelStatus?.model_total_bytes || 0) }}</span>
+                    <span>ORT {{ formatBytes(embeddingModelStatus?.runtime_downloaded_bytes || 0) }} / {{ formatBytes(embeddingModelStatus?.runtime_total_bytes || 0) }}</span>
+                    <span>文件 {{ embeddingModelStatus?.completed_files || 0 }} / {{ embeddingModelStatus?.total_files || 0 }}</span>
+                    <span>速度 {{ formatRate(embeddingDownloadSpeed) }}</span>
+                  </div>
+                  <div v-if="embeddingModelStatus?.route" class="form-feedback">
+                    下载路由：{{ embeddingModelStatus.route }}
+                  </div>
+                  <n-alert v-if="embeddingModelStatus?.error" type="error" :bordered="false">
+                    {{ embeddingModelStatus.error }}
+                  </n-alert>
+                  <div class="sou-panel-actions">
+                    <n-button
+                      v-if="embeddingModelStatus?.phase === 'downloading' || embeddingModelStatus?.phase === 'verifying'"
+                      secondary
+                      type="warning"
+                      @click="cancelEmbeddingDownload"
+                    >
+                      <template #icon>
+                        <div class="i-carbon-stop-filled" />
+                      </template>
+                      取消下载
+                    </n-button>
+                    <n-button
+                      v-else
+                      type="primary"
+                      :loading="embeddingModelOperating"
+                      :disabled="embeddingTaskActive"
+                      @click="installEmbeddingModel"
+                    >
+                      <template #icon>
+                        <div class="i-carbon-download" />
+                      </template>
+                      {{ embeddingModelStatus?.phase === 'error' || (embeddingModelStatus?.phase === 'missing' && (embeddingModelStatus?.downloaded_bytes || 0) > 0) ? '重试下载' : embeddingModelStatus?.phase === 'ready' ? '重新校验' : '下载共享模型' }}
+                    </n-button>
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <n-button quaternary circle :loading="embeddingModelOperating" aria-label="刷新共享模型状态" @click="refreshEmbeddingModelStatus(true)">
+                          <template #icon>
+                            <div class="i-carbon-renew" />
+                          </template>
+                        </n-button>
+                      </template>
+                      刷新共享模型状态
+                    </n-tooltip>
+                  </div>
+                </div>
+
+                <n-form-item label="嵌入模型目录">
+                  <n-input-group>
+                    <n-input
+                      v-model:value="config.local_embedding_model_dir"
+                      :placeholder="effectiveEmbeddingModelDir || '使用系统默认目录'"
+                      :disabled="embeddingTaskActive"
+                      clearable
+                      class="sou-path-input"
+                    />
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <n-button :disabled="embeddingTaskActive" aria-label="选择嵌入模型目录" @click="selectSouStorageDirectory('local_embedding_model_dir', effectiveEmbeddingModelDir)">
+                          <template #icon>
+                            <div class="i-carbon-folder" />
+                          </template>
+                        </n-button>
+                      </template>
+                      选择嵌入模型目录
+                    </n-tooltip>
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <n-button
+                          quaternary
+                          circle
+                          aria-label="打开嵌入模型目录"
+                          :disabled="!(config.local_embedding_model_dir || effectiveEmbeddingModelDir)"
+                          @click="openSouStorageDirectory(config.local_embedding_model_dir || effectiveEmbeddingModelDir)"
+                        >
+                          <template #icon>
+                            <div class="i-carbon-folder-open" />
+                          </template>
+                        </n-button>
+                      </template>
+                      打开嵌入模型目录
+                    </n-tooltip>
+                  </n-input-group>
+                  <template #feedback>
+                    <span class="form-feedback">{{ config.local_embedding_model_dir || effectiveEmbeddingModelDir }}</span>
+                  </template>
+                </n-form-item>
+                <n-form-item label="本地索引目录">
+                  <n-input-group>
+                    <n-input
+                      v-model:value="config.sou_local_index_dir"
+                      :placeholder="effectiveLocalIndexDir || '使用系统默认目录'"
+                      :disabled="localIndexTaskActive"
+                      clearable
+                      class="sou-path-input"
+                    />
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <n-button :disabled="localIndexTaskActive" aria-label="选择本地索引目录" @click="selectSouStorageDirectory('sou_local_index_dir', effectiveLocalIndexDir)">
+                          <template #icon>
+                            <div class="i-carbon-folder" />
+                          </template>
+                        </n-button>
+                      </template>
+                      选择本地索引目录
+                    </n-tooltip>
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <n-button
+                          quaternary
+                          circle
+                          aria-label="打开本地索引目录"
+                          :disabled="!(config.sou_local_index_dir || effectiveLocalIndexDir)"
+                          @click="openSouStorageDirectory(config.sou_local_index_dir || effectiveLocalIndexDir)"
+                        >
+                          <template #icon>
+                            <div class="i-carbon-folder-open" />
+                          </template>
+                        </n-button>
+                      </template>
+                      打开本地索引目录
+                    </n-tooltip>
+                  </n-input-group>
+                  <template #feedback>
+                    <span class="form-feedback">建议放在 SSD/NVMe；当前：{{ config.sou_local_index_dir || effectiveLocalIndexDir }}</span>
+                  </template>
+                </n-form-item>
+                <div v-if="accurateModeActive">
+                  <n-form-item label="重排模型目录">
+                    <n-input-group>
+                      <n-input
+                        v-model:value="config.sou_reranker_model_dir"
+                        :placeholder="effectiveRerankerModelDir || '使用系统默认目录'"
+                        :disabled="rerankerTaskActive"
+                        clearable
+                        class="sou-path-input"
+                      />
+                      <n-tooltip trigger="hover">
+                        <template #trigger>
+                          <n-button
+                            :disabled="rerankerTaskActive"
+                            aria-label="选择重排模型目录"
+                            @click="selectSouStorageDirectory('sou_reranker_model_dir', effectiveRerankerModelDir)"
+                          >
+                            <template #icon>
+                              <div class="i-carbon-folder" />
+                            </template>
+                          </n-button>
+                        </template>
+                        选择重排模型目录
+                      </n-tooltip>
+                      <n-tooltip trigger="hover">
+                        <template #trigger>
+                          <n-button
+                            quaternary
+                            circle
+                            aria-label="打开重排模型目录"
+                            :disabled="rerankerTaskActive || !(config.sou_reranker_model_dir || effectiveRerankerModelDir)"
+                            @click="openSouStorageDirectory(config.sou_reranker_model_dir || effectiveRerankerModelDir)"
+                          >
+                            <template #icon>
+                              <div class="i-carbon-folder-open" />
+                            </template>
+                          </n-button>
+                        </template>
+                        打开重排模型目录
+                      </n-tooltip>
+                    </n-input-group>
+                    <template #feedback>
+                      <span class="form-feedback">{{ config.sou_reranker_model_dir || effectiveRerankerModelDir }}</span>
+                    </template>
+                  </n-form-item>
+                </div>
+
+                <div v-if="semanticEnabled" class="sou-resource-panel">
+                  <div class="sou-panel-header">
+                    <div>
+                      <div class="sou-panel-title">
+                        进程资源
+                      </div>
+                      <div class="form-feedback">
+                        持续采样当前 Sanshu 进程；GPU 指标按本机可用能力显示
+                      </div>
+                    </div>
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <n-button quaternary circle aria-label="刷新进程资源" @click="refreshResourceUsage(true)">
+                          <template #icon>
+                            <div class="i-carbon-renew" />
+                          </template>
+                        </n-button>
+                      </template>
+                      刷新进程资源
+                    </n-tooltip>
+                  </div>
+                  <div class="sou-resource-grid">
+                    <div class="sou-resource-item">
+                      <span class="sou-resource-label">CPU</span>
+                      <strong>{{ resourceCpuLabel }}</strong>
+                      <small>{{ resourceUsage?.cpu_provider || '能力未提供' }}</small>
+                    </div>
+                    <div class="sou-resource-item">
+                      <span class="sou-resource-label">进程 RSS</span>
+                      <strong>{{ resourceMemoryLabel }}</strong>
+                      <small>工作集采样</small>
+                    </div>
+                    <div class="sou-resource-item">
+                      <span class="sou-resource-label">GPU</span>
+                      <strong>{{ resourceGpuLabel }}</strong>
+                      <small>{{ resourceUsage?.gpu_provider || '能力未提供' }}</small>
+                    </div>
+                    <div class="sou-resource-item">
+                      <span class="sou-resource-label">显存</span>
+                      <strong>{{ resourceGpuMemoryLabel }}</strong>
+                      <small>可用时显示已用 / 总量</small>
+                    </div>
+                  </div>
+                  <div class="form-feedback">
+                    {{ resourceUsage?.message || '等待首次采样' }} · {{ resourceSampleLabel }}
+                  </div>
+                </div>
 
                 <n-alert v-if="localIndexStatus?.last_error" type="error" :bordered="false">
                   {{ localIndexStatus.last_error }}
@@ -1699,10 +2321,6 @@ defineExpose({ saveConfig })
                 <n-alert v-if="localIndexStatus?.semantic_last_error" type="warning" :bordered="false">
                   {{ localIndexStatus.semantic_last_error }}
                 </n-alert>
-                <n-alert v-if="embeddingModelStatus?.error" type="error" :bordered="false">
-                  {{ embeddingModelStatus.error }}
-                </n-alert>
-
                 <div v-if="accurateModeActive" class="reranker-panel">
                   <div class="reranker-header">
                     <div class="min-w-0">
@@ -1732,6 +2350,7 @@ defineExpose({ saveConfig })
                   <div class="reranker-metrics">
                     <span>{{ formatBytes(rerankerModelStatus?.downloaded_bytes || 0) }} / {{ formatBytes(rerankerModelStatus?.total_bytes || 0) }}</span>
                     <span>文件 {{ rerankerModelStatus?.completed_files || 0 }} / {{ rerankerModelStatus?.total_files || 0 }}</span>
+                    <span>速度 {{ formatRate(rerankerDownloadSpeed) }}</span>
                     <span>{{ rerankerModelStatus?.runtime_threads || 8 }} 线程</span>
                     <span>批量 {{ rerankerModelStatus?.batch_size || 8 }}</span>
                     <span>召回 Top50 + Top10 · 重排 Top32</span>
@@ -1768,12 +2387,13 @@ defineExpose({ saveConfig })
                       v-else
                       secondary
                       :loading="rerankerModelOperating"
+                      :disabled="rerankerTaskActive"
                       @click="startRerankerDownload"
                     >
                       <template #icon>
                         <div class="i-carbon-download" />
                       </template>
-                      {{ rerankerModelStatus?.phase === 'ready' ? '重新校验' : '下载约 1.13 GB 模型' }}
+                      {{ rerankerModelStatus?.phase === 'error' || (rerankerModelStatus?.phase === 'missing' && (rerankerModelStatus?.downloaded_bytes || 0) > 0) ? '重试下载' : rerankerModelStatus?.phase === 'ready' ? '重新校验' : '下载约 1.13 GB 模型' }}
                     </n-button>
                     <n-tooltip trigger="hover">
                       <template #trigger>
@@ -1795,27 +2415,6 @@ defineExpose({ saveConfig })
                 </div>
 
                 <div class="flex justify-end gap-2">
-                  <n-tooltip trigger="hover">
-                    <template #trigger>
-                      <n-button quaternary circle :loading="embeddingModelOperating" @click="refreshEmbeddingModelStatus(true)">
-                        <template #icon>
-                          <div class="i-carbon-renew" />
-                        </template>
-                      </n-button>
-                    </template>
-                    刷新共享模型状态
-                  </n-tooltip>
-                  <n-button
-                    v-if="semanticEnabled && embeddingModelStatus?.phase !== 'ready'"
-                    secondary
-                    :loading="embeddingModelOperating"
-                    @click="installEmbeddingModel"
-                  >
-                    <template #icon>
-                      <div class="i-carbon-download" />
-                    </template>
-                    下载共享模型
-                  </n-button>
                   <n-button secondary :loading="localIndexLoading" :disabled="!debugProjectRoot" @click="refreshLocalIndexStatus(true)">
                     <template #icon>
                       <div class="i-carbon-renew" />
@@ -2516,8 +3115,117 @@ defineExpose({ saveConfig })
 
 /* 表单反馈文字 */
 .form-feedback {
+  overflow-wrap: anywhere;
   font-size: 11px;
   color: var(--color-on-surface-muted, #9ca3af);
+}
+
+.sou-project-picker {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+}
+
+.sou-project-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.sou-progress-panel,
+.sou-model-panel,
+.sou-resource-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--color-border, rgba(128, 128, 128, 0.2));
+  border-radius: 8px;
+  background: var(--color-container, rgba(128, 128, 128, 0.06));
+}
+
+.sou-model-panel {
+  background: rgba(20, 184, 166, 0.04);
+}
+
+.sou-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sou-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+  color: var(--color-on-surface, #e5e7eb);
+}
+
+.sou-panel-value {
+  flex: 0 0 auto;
+  color: rgb(45, 212, 191);
+  font-size: 15px;
+}
+
+.sou-metrics,
+.sou-panel-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.sou-metrics {
+  color: var(--color-on-surface-muted, #9ca3af);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.sou-panel-actions {
+  justify-content: flex-end;
+}
+
+.sou-resource-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.sou-resource-item {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border, rgba(128, 128, 128, 0.16));
+  border-radius: 6px;
+  background: rgba(128, 128, 128, 0.04);
+}
+
+.sou-resource-label {
+  color: var(--color-on-surface-muted, #9ca3af);
+  font-size: 11px;
+}
+
+.sou-resource-item strong {
+  overflow: hidden;
+  color: var(--color-on-surface, #e5e7eb);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sou-resource-item small {
+  overflow: hidden;
+  color: var(--color-on-surface-muted, #9ca3af);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sou-path-input {
+  min-width: 0;
 }
 
 .reranker-panel {
@@ -2772,6 +3480,16 @@ defineExpose({ saveConfig })
 }
 
 @media (max-width: 640px) {
+  .sou-project-picker,
+  .sou-panel-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sou-resource-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .extension-manager-head,
   .extension-group-header {
     align-items: flex-start;

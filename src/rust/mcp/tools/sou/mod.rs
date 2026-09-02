@@ -18,6 +18,7 @@ pub(crate) mod fast_context;
 pub(crate) mod local;
 pub(crate) mod reranker;
 pub(crate) mod semantic;
+pub(crate) mod telemetry;
 
 const BACKEND_ACE: &str = "ace";
 const BACKEND_FAST_CONTEXT: &str = "fast_context";

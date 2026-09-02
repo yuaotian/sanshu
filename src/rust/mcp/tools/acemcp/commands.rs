@@ -1798,6 +1798,16 @@ pub fn get_sou_reranker_model_status(
     Ok(crate::mcp::tools::sou::reranker::current_status(&directory))
 }
 
+/// 获取当前 Sanshu 进程的能力化资源采样；缺失的平台指标以空值返回。
+#[tauri::command]
+pub async fn get_sou_resource_usage(
+) -> Result<crate::mcp::tools::sou::telemetry::ResourceUsageSnapshot, String> {
+    // 中文说明：外部 GPU 查询可能短暂阻塞，放到 blocking worker 避免占用界面线程。
+    tauri::async_runtime::spawn_blocking(crate::mcp::tools::sou::telemetry::snapshot)
+        .await
+        .map_err(|error| format!("资源采样任务异常: {}", error))
+}
+
 #[tauri::command]
 pub async fn select_sou_storage_directory(
     app_handle: AppHandle,
@@ -1823,7 +1833,7 @@ pub async fn select_sou_storage_directory(
 }
 
 #[tauri::command]
-pub fn start_sou_reranker_model_download(
+pub async fn start_sou_reranker_model_download(
     state: State<'_, AppState>,
 ) -> Result<crate::mcp::tools::sou::reranker::RerankerModelStatus, String> {
     let (directory, proxy_config) = {

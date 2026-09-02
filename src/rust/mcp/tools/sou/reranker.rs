@@ -253,8 +253,8 @@ pub fn start_download(
     );
     write_download_status(initial.clone());
 
-    // 同步 Tauri command 可能运行在非 Tokio 线程，后台下载必须交给 Tauri 托管运行时。
-    tauri::async_runtime::spawn(async move {
+    // 中文说明：使用明确的 Tauri runtime handle，避免同步入口落到没有 reactor 的调用线程。
+    let _download_task = tauri::async_runtime::handle().spawn(async move {
         let result = download_assets(&directory, &proxy_config).await;
         DOWNLOAD_RUNNING.store(false, Ordering::SeqCst);
         match result {

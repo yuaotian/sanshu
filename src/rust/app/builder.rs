@@ -89,6 +89,7 @@ pub fn build_tauri_app() -> Builder<tauri::Wry> {
             crate::mcp::tools::acemcp::commands::get_sou_local_index_status,
             crate::mcp::tools::acemcp::commands::get_local_embedding_model_status,
             crate::mcp::tools::acemcp::commands::get_sou_reranker_model_status,
+            crate::mcp::tools::acemcp::commands::get_sou_resource_usage,
             crate::mcp::tools::acemcp::commands::select_sou_storage_directory,
             crate::mcp::tools::acemcp::commands::start_sou_reranker_model_download,
             crate::mcp::tools::acemcp::commands::cancel_sou_reranker_model_download,
