@@ -1718,11 +1718,24 @@ pub fn get_sou_local_index_status(
     project_root_path: String,
     state: State<'_, AppState>,
 ) -> Result<crate::mcp::tools::sou::local::LocalIndexStatus, String> {
-    let (index_dir, semantic_settings) = {
+    let (excludes, index_dir, semantic_settings) = {
         let config = state
             .config
             .lock()
             .map_err(|error| format!("获取配置失败: {}", error))?;
+        let excludes = config
+            .mcp_config
+            .fast_context_exclude_paths
+            .clone()
+            .unwrap_or_else(|| {
+                vec![
+                    "node_modules".to_string(),
+                    ".git".to_string(),
+                    "dist".to_string(),
+                    "build".to_string(),
+                    "target".to_string(),
+                ]
+            });
         let mode = crate::config::effective_sou_semantic_mode(
             config.mcp_config.sou_local_semantic_mode.as_deref(),
             config.mcp_config.sou_local_semantic_enabled,
@@ -1738,14 +1751,20 @@ pub fn get_sou_local_index_status(
             ),
         };
         (
+            excludes,
             crate::config::effective_sou_local_index_dir(
                 config.mcp_config.sou_local_index_dir.as_deref(),
             ),
             semantic,
         )
     };
-    crate::mcp::tools::sou::local::status(&project_root_path, index_dir, semantic_settings)
-        .map_err(|error| error.to_string())
+    crate::mcp::tools::sou::local::workspace_status(
+        &project_root_path,
+        excludes,
+        index_dir,
+        semantic_settings,
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -2084,7 +2103,7 @@ pub async fn rebuild_sou_local_index(
         );
         (excludes, index_dir, semantic_settings)
     };
-    crate::mcp::tools::sou::local::rebuild(
+    crate::mcp::tools::sou::local::rebuild_workspace(
         &project_root_path,
         excludes,
         index_dir,

@@ -88,6 +88,15 @@ pub struct ProjectScopeRisk {
 /// 项目索引状态信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectIndexStatus {
+    /// 非 Git 父目录是否为多个独立 Git 项目的联合工作区。
+    #[serde(default)]
+    pub is_workspace: bool,
+    /// 工作区包含的独立 Git 项目数量。
+    #[serde(default)]
+    pub workspace_project_count: usize,
+    /// 工作区子项目根路径；单项目为空。
+    #[serde(default)]
+    pub workspace_children: Vec<String>,
     /// 项目根路径（规范化后）
     pub project_root: String,
     /// 当前索引状态
@@ -146,6 +155,9 @@ pub struct ProjectIndexStatus {
 impl Default for ProjectIndexStatus {
     fn default() -> Self {
         Self {
+            is_workspace: false,
+            workspace_project_count: 0,
+            workspace_children: Vec::new(),
             project_root: String::new(),
             status: IndexStatus::Idle,
             progress: 0,

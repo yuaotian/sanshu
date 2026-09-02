@@ -20,6 +20,9 @@ export interface ProjectScopeRisk {
 }
 
 export interface ProjectIndexStatus {
+  is_workspace?: boolean
+  workspace_project_count?: number
+  workspace_children?: string[]
   project_root: string
   status: IndexStatus
   progress: number

@@ -12,6 +12,7 @@ pub mod skills;
 pub mod sou;
 pub mod tavily;
 pub mod uiux;
+pub(crate) mod workspace;
 
 // 重新导出工具以便访问
 pub use acemcp::AcemcpTool;

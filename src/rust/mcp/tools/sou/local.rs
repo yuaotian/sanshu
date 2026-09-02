@@ -78,7 +78,7 @@ impl LocalSemanticMode {
         }
     }
 
-    fn enabled(self) -> bool {
+    pub(crate) fn enabled(self) -> bool {
         self != Self::Off
     }
 
@@ -106,7 +106,9 @@ pub(super) struct LocalSearchOutput {
     pub hit_count: usize,
     pub engine: String,
     pub index_state: String,
+    pub degraded: bool,
     pub fallback_reason: Option<String>,
+    pub notice: Option<String>,
     pub duration_ms: u64,
     pub semantic_state: String,
     pub semantic_model: Option<String>,
@@ -137,13 +139,35 @@ pub(super) struct RerankerInputDiagnostics {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct LocalIndexScopeStatus {
+    pub name: String,
+    pub relative_path: String,
+    pub project_root: String,
+    pub index_path: String,
+    pub state: String,
+    pub indexed_files: u64,
+    pub indexed_chunks: u64,
+    pub lexical_sync_running: bool,
+    pub pending_changes: bool,
+    pub semantic_state: String,
+    pub semantic_indexed_chunks: u64,
+    pub semantic_pending_chunks: u64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct LocalIndexStatus {
+    pub is_workspace: bool,
+    pub project_count: usize,
+    pub scopes: Vec<LocalIndexScopeStatus>,
     pub project_root: String,
     pub index_path: String,
     pub state: String,
     pub indexed_files: u64,
     pub indexed_chunks: u64,
     pub sync_running: bool,
+    pub lexical_sync_running: bool,
+    pub semantic_sync_running: bool,
     pub pending_changes: bool,
     pub last_error: Option<String>,
     pub semantic_state: String,
@@ -182,6 +206,8 @@ struct ProjectIndex {
     indexed_files: AtomicU64,
     indexed_chunks: AtomicU64,
     sync_running: AtomicBool,
+    lexical_sync_running: AtomicBool,
+    startup_reconcile_pending: AtomicBool,
     dirty: Arc<AtomicBool>,
     profile_hash: Mutex<String>,
     last_error: Mutex<Option<String>>,
@@ -207,8 +233,9 @@ impl ProjectIndex {
             indexed_files: AtomicU64::new(files),
             indexed_chunks: AtomicU64::new(chunks),
             sync_running: AtomicBool::new(false),
-            // 进程重启后先做一次元数据对账，查询仍可读取已有索引。
-            dirty: Arc::new(AtomicBool::new(state == INDEX_READY)),
+            lexical_sync_running: AtomicBool::new(false),
+            startup_reconcile_pending: AtomicBool::new(state == INDEX_READY),
+            dirty: Arc::new(AtomicBool::new(false)),
             profile_hash: Mutex::new(String::new()),
             last_error: Mutex::new(error),
             watcher: Mutex::new(None),
@@ -276,14 +303,21 @@ impl ProjectIndex {
 
     fn status(&self, semantic_settings: &LocalSemanticSettings) -> LocalIndexStatus {
         let embedding_snapshot = crate::mcp::embedding::snapshot(&semantic_settings.model_dir);
+        let semantic_state = self.semantic_state.load(Ordering::Acquire);
         LocalIndexStatus {
+            is_workspace: false,
+            project_count: 1,
+            scopes: Vec::new(),
             project_root: normalize_path(&self.root),
             index_path: normalize_path(&self.db_path),
             state: self.state_name().to_string(),
             indexed_files: self.indexed_files.load(Ordering::Acquire),
             indexed_chunks: self.indexed_chunks.load(Ordering::Acquire),
             sync_running: self.sync_running.load(Ordering::Acquire),
-            pending_changes: self.dirty.load(Ordering::Acquire),
+            lexical_sync_running: self.lexical_sync_running.load(Ordering::Acquire),
+            semantic_sync_running: matches!(semantic_state, SEMANTIC_BUILDING | SEMANTIC_SYNCING),
+            pending_changes: self.dirty.load(Ordering::Acquire)
+                || self.startup_reconcile_pending.load(Ordering::Acquire),
             last_error: self.last_error.lock().ok().and_then(|value| value.clone()),
             semantic_state: self
                 .semantic_state_name(semantic_settings.enabled())
@@ -374,10 +408,21 @@ async fn search_with_index(
     }
     refresh_profile(&index, &options.exclude_paths);
 
+    let mut degraded = false;
     let mut fallback_reason = None;
+    let mut notice = None;
     let (mut hits, mut engine) = if index.state.load(Ordering::Acquire) == INDEX_READY {
-        if index.dirty.load(Ordering::Acquire) || index.sync_running.load(Ordering::Acquire) {
-            fallback_reason = Some("本地索引存在待同步变更，本次使用即时搜索".to_string());
+        let dirty = index.dirty.load(Ordering::Acquire);
+        let lexical_sync_running = index.lexical_sync_running.load(Ordering::Acquire);
+        let startup_reconcile_pending = index.startup_reconcile_pending.load(Ordering::Acquire);
+        if dirty || lexical_sync_running || startup_reconcile_pending {
+            notice = Some(if dirty {
+                "检测到文件变更，本次已使用即时搜索，后台词法索引正在同步".to_string()
+            } else if startup_reconcile_pending {
+                "进程启动后正在校验文件元数据，本次已使用即时搜索".to_string()
+            } else {
+                "后台词法索引正在同步，本次已使用即时搜索".to_string()
+            });
             schedule_sync(
                 Arc::clone(&index),
                 options.exclude_paths.clone(),
@@ -404,6 +449,7 @@ async fn search_with_index(
                 Ok(hits) => (hits, "fts5".to_string()),
                 Err(error) => {
                     let reason = format!("FTS5 查询失败: {}", error);
+                    degraded = true;
                     mark_index_error(&index, &reason);
                     schedule_sync(
                         Arc::clone(&index),
@@ -662,6 +708,7 @@ async fn search_with_index(
         &state,
         duration_ms,
         fallback_reason.as_deref(),
+        notice.as_deref(),
         &semantic_state,
         semantic_indexed_chunks,
         semantic_pending_chunks,
@@ -678,7 +725,9 @@ async fn search_with_index(
         hit_count: hits.len(),
         engine,
         index_state: state,
+        degraded,
         fallback_reason,
+        notice,
         duration_ms,
         semantic_state,
         semantic_model: options.semantic.enabled().then(|| semantic::model_key()),
@@ -693,6 +742,78 @@ async fn search_with_index(
         #[cfg(test)]
         reranker_input_diagnostics,
         fusion,
+    })
+}
+
+pub(super) async fn search_immediate(options: LocalSearchOptions) -> Result<LocalSearchOutput> {
+    let started_at = Instant::now();
+    let root = options
+        .project_root
+        .canonicalize()
+        .with_context(|| format!("即时搜索项目路径无效: {}", options.project_root.display()))?;
+    if !root.is_dir() {
+        return Err(anyhow!("即时搜索项目路径不是目录: {}", root.display()));
+    }
+    let terms = extract_query_terms(&options.query);
+    if terms.is_empty() {
+        return Err(anyhow!("本地搜索未提取到有效关键词"));
+    }
+    let (hits, engine) = run_immediate_search(&root, &options, &terms).await?;
+    let duration_ms = started_at.elapsed().as_millis() as u64;
+    let notice = "工作区直属文件使用即时词法搜索，不建立重复父级索引".to_string();
+    let text = format_hits(
+        &root,
+        &hits,
+        &engine,
+        "live",
+        duration_ms,
+        None,
+        Some(&notice),
+        "not_applicable",
+        0,
+        0,
+        None,
+        options.semantic.mode.as_str(),
+        options.semantic.mode.accurate().then_some("skipped"),
+        options
+            .semantic
+            .mode
+            .accurate()
+            .then_some(reranker::MODEL_NAME),
+        None,
+        None,
+        None,
+    );
+    Ok(LocalSearchOutput {
+        text,
+        hit_count: hits.len(),
+        engine,
+        index_state: "live".to_string(),
+        degraded: false,
+        fallback_reason: None,
+        notice: Some(notice),
+        duration_ms,
+        semantic_state: "not_applicable".to_string(),
+        semantic_model: None,
+        semantic_indexed_chunks: 0,
+        semantic_pending_chunks: 0,
+        semantic_top_score: None,
+        semantic_mode: options.semantic.mode.as_str().to_string(),
+        reranker_state: options
+            .semantic
+            .mode
+            .accurate()
+            .then(|| "skipped".to_string()),
+        reranker_model: options
+            .semantic
+            .mode
+            .accurate()
+            .then(|| reranker::MODEL_NAME.to_string()),
+        reranker_duration_ms: None,
+        reranker_top_score: None,
+        #[cfg(test)]
+        reranker_input_diagnostics: None,
+        fusion: None,
     })
 }
 
@@ -722,6 +843,261 @@ pub fn status(
     Ok(project_index(&root, &index_dir)?.status(&semantic_settings))
 }
 
+pub fn workspace_status(
+    project_root: &str,
+    exclude_paths: Vec<String>,
+    index_dir: PathBuf,
+    semantic_settings: LocalSemanticSettings,
+) -> Result<LocalIndexStatus> {
+    let layout =
+        crate::mcp::tools::workspace::resolve_workspace(Path::new(project_root), &exclude_paths)?;
+    if !layout.is_workspace {
+        return status(project_root, index_dir, semantic_settings);
+    }
+    archive_workspace_parent_index(&layout.root, &index_dir)?;
+
+    let mut statuses = Vec::new();
+    for project in &layout.projects {
+        let status = status(
+            &normalize_path(&project.root),
+            index_dir.clone(),
+            semantic_settings.clone(),
+        )?;
+        statuses.push((project, status));
+    }
+    aggregate_workspace_status(&layout, &index_dir, &semantic_settings, statuses)
+}
+
+pub async fn rebuild_workspace(
+    project_root: &str,
+    exclude_paths: Vec<String>,
+    index_dir: PathBuf,
+    semantic_settings: LocalSemanticSettings,
+) -> Result<LocalIndexStatus> {
+    let layout =
+        crate::mcp::tools::workspace::resolve_workspace(Path::new(project_root), &exclude_paths)?;
+    if !layout.is_workspace {
+        return rebuild(project_root, exclude_paths, index_dir, semantic_settings).await;
+    }
+    archive_workspace_parent_index(&layout.root, &index_dir)?;
+
+    for project in &layout.projects {
+        rebuild(
+            &normalize_path(&project.root),
+            exclude_paths.clone(),
+            index_dir.clone(),
+            semantic_settings.clone(),
+        )
+        .await?;
+    }
+    workspace_status(
+        &normalize_path(&layout.root),
+        exclude_paths,
+        index_dir,
+        semantic_settings,
+    )
+}
+
+fn aggregate_workspace_status(
+    layout: &crate::mcp::tools::workspace::WorkspaceLayout,
+    index_dir: &Path,
+    semantic_settings: &LocalSemanticSettings,
+    statuses: Vec<(
+        &crate::mcp::tools::workspace::WorkspaceProject,
+        LocalIndexStatus,
+    )>,
+) -> Result<LocalIndexStatus> {
+    let embedding_snapshot = crate::mcp::embedding::snapshot(&semantic_settings.model_dir);
+    let indexed_files = statuses
+        .iter()
+        .map(|(_, status)| status.indexed_files)
+        .sum();
+    let indexed_chunks = statuses
+        .iter()
+        .map(|(_, status)| status.indexed_chunks)
+        .sum();
+    let semantic_indexed_chunks = statuses
+        .iter()
+        .map(|(_, status)| status.semantic_indexed_chunks)
+        .sum();
+    let semantic_pending_chunks = statuses
+        .iter()
+        .map(|(_, status)| status.semantic_pending_chunks)
+        .sum();
+    let sync_running = statuses.iter().any(|(_, status)| status.sync_running);
+    let lexical_sync_running = statuses
+        .iter()
+        .any(|(_, status)| status.lexical_sync_running);
+    let semantic_sync_running = statuses
+        .iter()
+        .any(|(_, status)| status.semantic_sync_running);
+    let pending_changes = statuses.iter().any(|(_, status)| status.pending_changes);
+    let state = if statuses.iter().any(|(_, status)| status.state == "error") {
+        "error"
+    } else if statuses.iter().all(|(_, status)| status.state == "ready") {
+        "ready"
+    } else {
+        "partial"
+    };
+    let semantic_states = statuses
+        .iter()
+        .map(|(_, status)| status.semantic_state.clone())
+        .collect::<Vec<_>>();
+    let semantic_state = aggregate_status_name(&semantic_states);
+    let errors = statuses
+        .iter()
+        .filter_map(|(project, status)| {
+            status
+                .last_error
+                .as_ref()
+                .map(|error| format!("{}: {}", project.name(), error))
+        })
+        .collect::<Vec<_>>();
+    let semantic_errors = statuses
+        .iter()
+        .filter_map(|(project, status)| {
+            status
+                .semantic_last_error
+                .as_ref()
+                .map(|error| format!("{}: {}", project.name(), error))
+        })
+        .collect::<Vec<_>>();
+    let scopes = statuses
+        .into_iter()
+        .map(|(project, status)| LocalIndexScopeStatus {
+            name: project.name(),
+            relative_path: project.relative_path.clone(),
+            project_root: status.project_root,
+            index_path: status.index_path,
+            state: status.state,
+            indexed_files: status.indexed_files,
+            indexed_chunks: status.indexed_chunks,
+            lexical_sync_running: status.lexical_sync_running,
+            pending_changes: status.pending_changes,
+            semantic_state: status.semantic_state,
+            semantic_indexed_chunks: status.semantic_indexed_chunks,
+            semantic_pending_chunks: status.semantic_pending_chunks,
+            last_error: status.last_error,
+        })
+        .collect();
+
+    Ok(LocalIndexStatus {
+        is_workspace: true,
+        project_count: layout.projects.len(),
+        scopes,
+        project_root: normalize_path(&layout.root),
+        index_path: normalize_path(index_dir),
+        state: state.to_string(),
+        indexed_files,
+        indexed_chunks,
+        sync_running,
+        lexical_sync_running,
+        semantic_sync_running,
+        pending_changes,
+        last_error: (!errors.is_empty()).then(|| errors.join("；")),
+        semantic_state,
+        semantic_model: semantic_settings.enabled().then(semantic::model_key),
+        semantic_indexed_chunks,
+        semantic_pending_chunks,
+        semantic_last_error: (!semantic_errors.is_empty()).then(|| semantic_errors.join("；")),
+        semantic_requested_provider: embedding_snapshot.requested_provider,
+        semantic_execution_provider: embedding_snapshot.execution_provider,
+        semantic_provider_fallback_reason: embedding_snapshot.provider_fallback_reason,
+        semantic_cuda_runtime_available: embedding_snapshot.cuda_runtime_available,
+        semantic_cuda_runtime_dir: embedding_snapshot
+            .cuda_runtime_dir
+            .as_deref()
+            .map(normalize_path),
+        semantic_cuda_runtime_error: embedding_snapshot.cuda_runtime_error,
+        semantic_batch_size: embedding_snapshot.batch_size,
+        semantic_intra_threads: embedding_snapshot.intra_threads,
+    })
+}
+
+pub(crate) fn has_workspace_parent_index(project_root: &Path, index_dir: &Path) -> Result<bool> {
+    let root = project_root
+        .canonicalize()
+        .with_context(|| format!("工作区路径无效: {}", project_root.display()))?;
+    Ok(index_dir
+        .join(format!("{}.sqlite3", project_hash(&root)))
+        .exists())
+}
+
+pub(crate) fn archive_workspace_parent_index(
+    project_root: &Path,
+    index_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    let root = project_root
+        .canonicalize()
+        .with_context(|| format!("工作区路径无效: {}", project_root.display()))?;
+    let db_path = index_dir.join(format!("{}.sqlite3", project_hash(&root)));
+    let wal_path = PathBuf::from(format!("{}-wal", db_path.to_string_lossy()));
+    let shm_path = PathBuf::from(format!("{}-shm", db_path.to_string_lossy()));
+    if ![&db_path, &wal_path, &shm_path]
+        .iter()
+        .any(|path| path.exists())
+    {
+        return Ok(None);
+    }
+
+    let mut indexes = PROJECT_INDEXES
+        .lock()
+        .map_err(|_| anyhow!("本地索引管理器锁已损坏"))?;
+    if indexes
+        .get(&root)
+        .is_some_and(|index| index.sync_running.load(Ordering::Acquire))
+    {
+        return Err(anyhow!("父目录本地索引仍在同步，迁移已延后"));
+    }
+    indexes.remove(&root);
+    drop(indexes);
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let archive_dir = index_dir.join("archive").join(format!(
+        "workspace-parent-{}-{}",
+        timestamp,
+        project_hash(&root)
+    ));
+    fs::create_dir_all(&archive_dir).context("创建父目录本地索引归档目录失败")?;
+    for source in [&db_path, &wal_path, &shm_path] {
+        if !source.exists() {
+            continue;
+        }
+        let file_name = source
+            .file_name()
+            .ok_or_else(|| anyhow!("父目录本地索引文件名无效: {}", source.display()))?;
+        fs::rename(source, archive_dir.join(file_name))
+            .with_context(|| format!("归档父目录本地索引失败: {}", source.display()))?;
+    }
+    Ok(Some(archive_dir))
+}
+
+fn aggregate_status_name(states: &[String]) -> String {
+    if states.is_empty() {
+        return "not_applicable".to_string();
+    }
+    if states.iter().any(|state| state == "error") {
+        "error"
+    } else if states
+        .iter()
+        .any(|state| matches!(state.as_str(), "building" | "syncing"))
+    {
+        "syncing"
+    } else if states.iter().all(|state| state == "ready") {
+        "ready"
+    } else if states.iter().all(|state| state == "disabled") {
+        "disabled"
+    } else if states.iter().any(|state| state == "missing") {
+        "missing"
+    } else {
+        "partial"
+    }
+    .to_string()
+}
+
 fn project_index(root: &Path, index_dir: &Path) -> Result<Arc<ProjectIndex>> {
     let mut indexes = PROJECT_INDEXES
         .lock()
@@ -743,7 +1119,9 @@ fn project_index(root: &Path, index_dir: &Path) -> Result<Arc<ProjectIndex>> {
 fn refresh_profile(index: &ProjectIndex, excludes: &[String]) {
     let profile = profile_hash(excludes);
     if let Ok(mut current) = index.profile_hash.lock() {
-        if *current != profile {
+        if current.is_empty() {
+            *current = profile;
+        } else if *current != profile {
             *current = profile;
             index.dirty.store(true, Ordering::Release);
         }
@@ -777,6 +1155,7 @@ fn schedule_sync(
     }
     // 成功占有同步任务后再清除 dirty；同步期间的新事件会重新置位，不会丢失后续变更。
     index.dirty.store(false, Ordering::Release);
+    index.lexical_sync_running.store(true, Ordering::Release);
     if index.state.load(Ordering::Acquire) != INDEX_READY {
         index.state.store(INDEX_BUILDING, Ordering::Release);
     }
@@ -815,6 +1194,7 @@ async fn sync_now(
     }
     // 当前同步任务消费既有 dirty；同步期间的新文件事件仍会再次置位。
     index.dirty.store(false, Ordering::Release);
+    index.lexical_sync_running.store(true, Ordering::Release);
     index.state.store(INDEX_BUILDING, Ordering::Release);
     if semantic_settings.enabled() {
         let next_state = if index.semantic_state.load(Ordering::Acquire) == SEMANTIC_READY {
@@ -849,7 +1229,24 @@ fn sync_all(
     exclude_paths: &[String],
     semantic_settings: &LocalSemanticSettings,
 ) -> Result<SyncOutcome> {
-    let (files, chunks) = sync_index(index, exclude_paths)?;
+    let (files, chunks) = match sync_index(index, exclude_paths) {
+        Ok(counts) => counts,
+        Err(error) => {
+            index.lexical_sync_running.store(false, Ordering::Release);
+            return Err(error);
+        }
+    };
+    index.indexed_files.store(files, Ordering::Release);
+    index.indexed_chunks.store(chunks, Ordering::Release);
+    index.state.store(INDEX_READY, Ordering::Release);
+    index
+        .startup_reconcile_pending
+        .store(false, Ordering::Release);
+    if let Ok(mut error) = index.last_error.lock() {
+        *error = None;
+    }
+    // 词法快照已就绪后即可恢复 FTS5；向量写入仍由同一串行管线继续执行。
+    index.lexical_sync_running.store(false, Ordering::Release);
     let semantic = if !semantic_settings.enabled() {
         index
             .semantic_state
@@ -954,6 +1351,7 @@ fn finish_sync(index: &ProjectIndex, result: Result<SyncOutcome>) {
             log::warn!("[sou-local] 索引同步失败: {}", error);
         }
     }
+    index.lexical_sync_running.store(false, Ordering::Release);
     index.sync_running.store(false, Ordering::Release);
 }
 
@@ -1535,6 +1933,7 @@ fn format_hits(
     state: &str,
     duration_ms: u64,
     fallback_reason: Option<&str>,
+    notice: Option<&str>,
     semantic_state: &str,
     semantic_indexed_chunks: u64,
     semantic_pending_chunks: u64,
@@ -1595,6 +1994,9 @@ fn format_hits(
     ));
     if let Some(reason) = fallback_reason {
         parts.push(format!("[sou-local fallback] {}", reason));
+    }
+    if let Some(message) = notice {
+        parts.push(format!("[sou-local notice] {}", message));
     }
     parts.join("\n")
 }
@@ -1742,7 +2144,7 @@ fn build_search_text(path: &str, content: &str) -> String {
     tokenize_text(&format!("{}\n{}", path, content), usize::MAX).join(" ")
 }
 
-fn extract_query_terms(query: &str) -> Vec<String> {
+pub(super) fn extract_query_terms(query: &str) -> Vec<String> {
     let stopwords = [
         "the", "and", "for", "from", "with", "this", "that", "what", "where", "when", "代码",
         "项目", "搜索", "相关", "实现", "如何", "怎么", "什么", "是否",
@@ -2447,6 +2849,72 @@ mod tests {
         assert_ne!(output.engine, "fts5");
         assert_eq!(output.hit_count, 1);
         assert!(output.text.contains("CurrentFileValue"));
+        assert!(!output.degraded);
+        assert!(output.fallback_reason.is_none());
+        assert!(output
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("文件变更")));
+    }
+
+    #[tokio::test]
+    async fn semantic_sync_keeps_ready_fts5_available() {
+        let temp = tempdir().expect("语义同步测试目录应创建成功");
+        let root = temp.path().join("project");
+        fs::create_dir_all(&root).expect("语义同步测试项目应创建成功");
+        fs::write(
+            root.join("search_state.rs"),
+            "pub struct LexicalIndexRemainsReady;\n",
+        )
+        .expect("测试源码应写入成功");
+        let index = Arc::new(ProjectIndex::new(
+            root.clone(),
+            temp.path().join("semantic-sync.sqlite3"),
+        ));
+        sync_now(
+            Arc::clone(&index),
+            Vec::new(),
+            LocalSemanticSettings {
+                mode: LocalSemanticMode::Off,
+                model_dir: crate::mcp::embedding::default_model_dir(),
+                reranker_model_dir: crate::config::default_sou_reranker_model_dir(),
+            },
+        )
+        .await
+        .expect("词法索引应建立成功");
+        refresh_profile(&index, &[]);
+        index.dirty.store(false, Ordering::Release);
+        index.sync_running.store(true, Ordering::Release);
+        index.lexical_sync_running.store(false, Ordering::Release);
+        index
+            .semantic_state
+            .store(SEMANTIC_SYNCING, Ordering::Release);
+
+        let output = search_with_index(
+            LocalSearchOptions {
+                project_root: root.clone(),
+                query: "LexicalIndexRemainsReady".to_string(),
+                max_results: 5,
+                exclude_paths: Vec::new(),
+                index_dir: temp.path().join("indexes"),
+                semantic: LocalSemanticSettings {
+                    mode: LocalSemanticMode::Off,
+                    model_dir: crate::mcp::embedding::default_model_dir(),
+                    reranker_model_dir: crate::config::default_sou_reranker_model_dir(),
+                },
+            },
+            root,
+            Arc::clone(&index),
+            false,
+        )
+        .await
+        .expect("语义同步期间词法查询应可用");
+        index.sync_running.store(false, Ordering::Release);
+
+        assert_eq!(output.engine, "fts5");
+        assert_eq!(output.hit_count, 1);
+        assert!(output.notice.is_none());
+        assert!(output.fallback_reason.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

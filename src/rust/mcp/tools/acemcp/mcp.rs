@@ -1,4 +1,5 @@
 use anyhow::Result;
+use futures_util::stream::{self, StreamExt};
 use rmcp::model::{CallToolResult, Content, ErrorData as McpError, Tool};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -58,6 +59,92 @@ impl AcemcpTool {
     /// 执行代码库搜索
     /// 当检测到索引缺失或失效时，会在后台自动启动索引/重建任务
     pub async fn search_context(request: AcemcpRequest) -> Result<CallToolResult, McpError> {
+        let configured_excludes = crate::config::load_standalone_config()
+            .ok()
+            .and_then(|config| config.mcp_config.acemcp_exclude_patterns)
+            .unwrap_or_default();
+        let layout = crate::mcp::tools::workspace::resolve_workspace(
+            Path::new(&request.project_root_path),
+            &configured_excludes,
+        )
+        .map_err(|error| {
+            McpError::internal_error(format!("解析 ACE 工作区失败: {}", error), None)
+        })?;
+        if !layout.is_workspace {
+            return Self::search_single_context(request).await;
+        }
+        match migrate_legacy_workspace_parent(&layout) {
+            Ok(true) => {}
+            Ok(false) => log_debug!("ACE 父目录任务仍持有 lease，遗留迁移已延后"),
+            Err(error) => log::warn!("迁移 ACE 遗留父目录索引失败: {}", error),
+        }
+
+        let acemcp_config = Self::get_acemcp_config().await.map_err(|error| {
+            McpError::internal_error(format!("获取acemcp配置失败: {}", error), None)
+        })?;
+        let watcher_manager = super::watcher::get_watcher_manager();
+        if !watcher_manager.is_watching(&request.project_root_path) {
+            if let Err(error) = watcher_manager
+                .start_watching(request.project_root_path.clone(), acemcp_config, None, None)
+                .await
+            {
+                log_debug!("启动 ACE 工作区文件监听失败（不影响搜索）: {}", error);
+            }
+        }
+
+        let query = request.query.clone();
+        let tasks = layout.projects.into_iter().map(|project| {
+            let child_request = AcemcpRequest {
+                project_root_path: crate::mcp::tools::workspace::normalize_path(&project.root),
+                query: query.clone(),
+            };
+            async move {
+                let result = Self::search_single_context(child_request).await;
+                (project, result)
+            }
+        });
+        let results = stream::iter(tasks)
+            .buffer_unordered(4)
+            .collect::<Vec<_>>()
+            .await;
+        let mut sections = Vec::new();
+        let mut errors = Vec::new();
+        let mut success_count = 0usize;
+        for (project, result) in results {
+            match result {
+                Ok(result) if !result.is_error.unwrap_or(false) => {
+                    success_count += 1;
+                    let text = call_tool_result_text(&result);
+                    sections.push(format!(
+                        "[acemcp workspace project={}]\n{}",
+                        project.relative_path, text
+                    ));
+                }
+                Ok(result) => errors.push(format!(
+                    "{}: {}",
+                    project.relative_path,
+                    call_tool_result_text(&result)
+                )),
+                Err(error) => errors.push(format!("{}: {}", project.relative_path, error)),
+            }
+        }
+        sections.sort();
+        errors.sort();
+        if !errors.is_empty() {
+            sections.push(format!(
+                "[acemcp workspace notice] 部分子项目检索异常: {}",
+                errors.join("；")
+            ));
+        }
+        Ok(CallToolResult {
+            content: vec![Content::text(sections.join("\n\n"))],
+            is_error: Some(success_count == 0),
+            meta: None,
+            structured_content: None,
+        })
+    }
+
+    async fn search_single_context(request: AcemcpRequest) -> Result<CallToolResult, McpError> {
         log_important!(
             info,
             "Acemcp搜索请求（仅搜索模式）: project_root_path={}, query={}",
@@ -78,7 +165,7 @@ impl AcemcpTool {
 
         // 首次搜索时自动启动文件监听（如果尚未启动）
         let watcher_manager = super::watcher::get_watcher_manager();
-        if !watcher_manager.is_watching(&request.project_root_path) {
+        if !watcher_manager.is_path_covered(&request.project_root_path) {
             log_debug!("首次搜索，尝试启动文件监听");
             if let Err(e) = watcher_manager
                 .start_watching(
@@ -294,50 +381,37 @@ impl AcemcpTool {
 
         let acemcp_config = Self::get_acemcp_config().await?;
 
-        // 读取嵌套项目索引开关（默认启用）
-        let index_nested = crate::config::load_standalone_config()
-            .ok()
-            .and_then(|c| c.mcp_config.acemcp_index_nested_projects)
-            .unwrap_or(true);
+        let exclude_patterns =
+            effective_exclude_patterns(acemcp_config.exclude_patterns.as_deref());
+        let layout = crate::mcp::tools::workspace::resolve_workspace(
+            Path::new(&project_root_path),
+            &exclude_patterns,
+        )?;
 
-        // 检测嵌套子项目
-        let nested_status = match Self::get_project_with_nested_status(project_root_path.clone()) {
-            Ok(status) => status,
-            Err(e) => {
-                log_debug!("获取嵌套项目状态失败，将直接索引父目录: {}", e);
-                let launch = start_background_index_with_mode(
-                    &acemcp_config,
-                    &project_root_path,
-                    true,
-                    mode,
-                    app,
-                )
-                .await?;
-                return Ok(format!("已提交后台索引任务: {:?}", launch));
+        if layout.is_workspace {
+            match migrate_legacy_workspace_parent(&layout) {
+                Ok(true) => {}
+                Ok(false) => log_debug!("ACE 父目录任务仍持有 lease，遗留迁移已延后"),
+                Err(error) => log::warn!("迁移 ACE 遗留父目录索引失败: {}", error),
             }
-        };
-
-        let has_nested = !nested_status.nested_projects.is_empty();
-
-        if has_nested && index_nested {
-            // 策略A: 有嵌套子项目且开关启用，只索引子项目，不索引父目录（避免无意义上传）
             log_important!(
                 info,
-                "检测到 {} 个嵌套 Git 子项目，将分别索引",
-                nested_status.nested_projects.len()
+                "检测到 {} 个独立 Git 子项目，将分别索引",
+                layout.projects.len()
             );
 
             let mut launched = Vec::new();
-            for nested in &nested_status.nested_projects {
+            for project in &layout.projects {
+                let project_root = crate::mcp::tools::workspace::normalize_path(&project.root);
                 let state = start_background_index_with_mode(
                     &acemcp_config,
-                    &nested.absolute_path,
+                    &project_root,
                     true,
                     mode,
                     app.clone(),
                 )
                 .await?;
-                launched.push((nested.relative_path.clone(), format!("{:?}", state)));
+                launched.push((project.relative_path.clone(), format!("{:?}", state)));
             }
             Ok(format!(
                 "已提交 {} 个子项目后台索引任务: {:?}",
@@ -345,7 +419,6 @@ impl AcemcpTool {
                 launched
             ))
         } else {
-            // 策略B: 无嵌套子项目或开关关闭，直接提交父项目后台任务。
             let state = start_background_index_with_mode(
                 &acemcp_config,
                 &project_root_path,
@@ -391,6 +464,7 @@ impl AcemcpTool {
             reconcile_project_status_with_job(status);
             enrich_project_scope_state(status);
         }
+        synthesize_workspace_statuses(&mut all_status);
         all_status
     }
 
@@ -519,7 +593,7 @@ impl AcemcpTool {
         if !root_path.exists() || !root_path.is_dir() {
             anyhow::bail!("项目根目录不存在: {}", project_root_path);
         }
-        let root_status = get_project_status(&project_root_path);
+        let mut root_status = get_project_status(&project_root_path);
 
         let mut nested_projects = Vec::new();
         let mut regular_directories = Vec::new();
@@ -530,19 +604,26 @@ impl AcemcpTool {
             .and_then(|c| c.mcp_config.acemcp_exclude_patterns)
             .unwrap_or_default();
         let exclude_patterns = effective_exclude_patterns(Some(&configured_excludes));
-        let exclude_globset = if exclude_patterns.is_empty() {
-            None
-        } else {
-            match build_exclude_globset(&exclude_patterns) {
-                Ok(gs) => Some(gs),
-                Err(e) => {
-                    log_debug!("构建排除模式失败，将忽略目录过滤: {}", e);
-                    None
-                }
-            }
-        };
+        let layout =
+            crate::mcp::tools::workspace::resolve_workspace(&root_path, &exclude_patterns)?;
+        for project in layout.projects.iter().filter(|_| layout.is_workspace) {
+            let sub_path_str = normalize_project_path(&project.root.to_string_lossy());
+            let sub_status = get_project_status(&sub_path_str);
+            let file_count = if sub_status.status != IndexStatus::Idle {
+                sub_status.total_files
+            } else {
+                0
+            };
+            nested_projects.push(NestedProjectInfo {
+                relative_path: project.relative_path.clone(),
+                absolute_path: sub_path_str,
+                is_git_repo: true,
+                index_status: Some(sub_status),
+                file_count,
+            });
+        }
 
-        // 扫描直接子目录（仅第一层）
+        let exclude_globset = build_exclude_globset(&exclude_patterns).ok();
         let entries =
             fs::read_dir(&root_path).map_err(|e| anyhow::anyhow!("读取项目根目录失败: {}", e))?;
         for entry in entries {
@@ -567,30 +648,10 @@ impl AcemcpTool {
                 continue;
             }
 
-            // 检测是否是 Git 仓库
-            let git_dir = path.join(".git");
-            let is_git_repo = git_dir.exists() && git_dir.is_dir();
-
-            if is_git_repo {
-                // 获取子项目的索引状态
-                let sub_path_str = normalize_project_path(&path.to_string_lossy());
-                let sub_status = get_project_status(&sub_path_str);
-
-                // 粗略估计文件数量（使用索引状态中的 total_files，如果没有则设为 0）
-                let file_count = if sub_status.status != IndexStatus::Idle {
-                    sub_status.total_files
-                } else {
-                    0
-                };
-
-                nested_projects.push(NestedProjectInfo {
-                    relative_path: dir_name,
-                    absolute_path: sub_path_str,
-                    is_git_repo: true,
-                    index_status: Some(sub_status),
-                    file_count,
-                });
-            } else {
+            if !nested_projects
+                .iter()
+                .any(|project| project.relative_path == dir_name)
+            {
                 regular_directories.push(dir_name);
             }
         }
@@ -598,6 +659,20 @@ impl AcemcpTool {
         // 按字母顺序排序
         nested_projects.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
         regular_directories.sort();
+        if layout.is_workspace {
+            root_status = aggregate_workspace_project_status(
+                normalize_project_path(&layout.root.to_string_lossy()),
+                nested_projects
+                    .iter()
+                    .filter_map(|project| {
+                        project
+                            .index_status
+                            .clone()
+                            .map(|status| (project.relative_path.clone(), status))
+                    })
+                    .collect(),
+            );
+        }
 
         Ok(ProjectWithNestedStatus {
             root_status,
@@ -605,6 +680,282 @@ impl AcemcpTool {
             regular_directories,
         })
     }
+}
+
+fn call_tool_result_text(result: &CallToolResult) -> String {
+    let value = serde_json::to_value(&result.content).unwrap_or_default();
+    value
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|item| {
+            item.get("text")
+                .and_then(|value| value.as_str())
+                .or_else(|| item.get("data").and_then(|value| value.as_str()))
+        })
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn synthesize_workspace_statuses(all_status: &mut ProjectsIndexStatus) {
+    let config = crate::config::load_standalone_config().ok();
+    let excludes = config
+        .as_ref()
+        .and_then(|config| config.mcp_config.acemcp_exclude_patterns.clone())
+        .unwrap_or_default();
+    let mut roots = config
+        .and_then(|config| config.mcp_config.acemcp_watched_projects)
+        .unwrap_or_default();
+    roots.extend(super::watcher::get_watcher_manager().get_watching_projects());
+    roots.sort();
+    roots.dedup();
+
+    for root in roots {
+        let Ok(layout) =
+            crate::mcp::tools::workspace::resolve_workspace(Path::new(&root), &excludes)
+        else {
+            continue;
+        };
+        if !layout.is_workspace {
+            continue;
+        }
+        let mut children = Vec::new();
+        for project in &layout.projects {
+            let project_root = normalize_project_path(&project.root.to_string_lossy());
+            let mut status = all_status
+                .projects
+                .get(&project_root)
+                .cloned()
+                .unwrap_or_else(|| {
+                    let mut status = ProjectIndexStatus::default();
+                    status.project_root = project_root.clone();
+                    status
+                });
+            reconcile_project_status_with_job(&mut status);
+            enrich_project_scope_state(&mut status);
+            all_status
+                .projects
+                .insert(project_root.clone(), status.clone());
+            children.push((project.relative_path.clone(), status));
+        }
+        let workspace_root = normalize_project_path(&layout.root.to_string_lossy());
+        all_status.projects.insert(
+            workspace_root.clone(),
+            aggregate_workspace_project_status(workspace_root, children),
+        );
+    }
+}
+
+fn aggregate_workspace_project_status(
+    project_root: String,
+    children: Vec<(String, ProjectIndexStatus)>,
+) -> ProjectIndexStatus {
+    let total_files: usize = children.iter().map(|(_, status)| status.total_files).sum();
+    let indexed_files: usize = children
+        .iter()
+        .map(|(_, status)| status.indexed_files)
+        .sum();
+    let pending_files: usize = children
+        .iter()
+        .map(|(_, status)| status.pending_files)
+        .sum();
+    let failed_files: usize = children.iter().map(|(_, status)| status.failed_files).sum();
+    let status = if children
+        .iter()
+        .any(|(_, status)| status.status == IndexStatus::Indexing)
+    {
+        IndexStatus::Indexing
+    } else if children
+        .iter()
+        .any(|(_, status)| status.status == IndexStatus::Paused)
+    {
+        IndexStatus::Paused
+    } else if children
+        .iter()
+        .any(|(_, status)| status.status == IndexStatus::Failed)
+    {
+        IndexStatus::Failed
+    } else if !children.is_empty()
+        && children
+            .iter()
+            .all(|(_, status)| status.status == IndexStatus::Synced)
+    {
+        IndexStatus::Synced
+    } else {
+        IndexStatus::Idle
+    };
+    let progress = if total_files == 0 {
+        0
+    } else {
+        ((indexed_files.saturating_mul(100) / total_files).min(100)) as u8
+    };
+    let last_success_time = children
+        .iter()
+        .filter_map(|(_, status)| status.last_success_time.clone())
+        .max();
+    let last_failure_time = children
+        .iter()
+        .filter_map(|(_, status)| status.last_failure_time.clone())
+        .max();
+    let errors = children
+        .iter()
+        .filter_map(|(name, status)| {
+            status
+                .last_error
+                .as_ref()
+                .map(|error| format!("{}: {}", name, error))
+        })
+        .collect::<Vec<_>>();
+    let stale_projects = children
+        .iter()
+        .filter(|(_, status)| status.is_stale)
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let mut recent_indexed_files = children
+        .iter()
+        .flat_map(|(name, status)| {
+            status
+                .recent_indexed_files
+                .iter()
+                .map(move |path| format!("{}/{}", name, path))
+        })
+        .take(5)
+        .collect::<Vec<_>>();
+    recent_indexed_files.sort();
+    let directory_stats = children
+        .iter()
+        .map(|(name, status)| (name.clone(), (status.indexed_files, status.pending_files)))
+        .collect();
+    let workspace_children = children
+        .iter()
+        .map(|(_, status)| status.project_root.clone())
+        .collect::<Vec<_>>();
+
+    ProjectIndexStatus {
+        is_workspace: true,
+        workspace_project_count: children.len(),
+        workspace_children,
+        project_root,
+        status,
+        progress,
+        total_files,
+        indexed_files,
+        pending_files,
+        failed_files,
+        last_success_time,
+        last_failure_time,
+        last_error: (!errors.is_empty()).then(|| errors.join("；")),
+        last_failure_scope_hash: None,
+        index_scope_hash: None,
+        is_stale: !stale_projects.is_empty(),
+        stale_reason: (!stale_projects.is_empty())
+            .then(|| format!("子项目等待重建: {}", stale_projects.join("、"))),
+        directory_stats,
+        recent_indexed_files,
+        job_id: None,
+        total_batches: children
+            .iter()
+            .map(|(_, status)| status.total_batches)
+            .sum(),
+        completed_batches: children
+            .iter()
+            .map(|(_, status)| status.completed_batches)
+            .sum(),
+        job_updated_at: children
+            .iter()
+            .filter_map(|(_, status)| status.job_updated_at.clone())
+            .max(),
+        scope_risk: children
+            .iter()
+            .find_map(|(_, status)| status.scope_risk.clone()),
+    }
+}
+
+fn migrate_legacy_workspace_parent(
+    layout: &crate::mcp::tools::workspace::WorkspaceLayout,
+) -> Result<bool> {
+    if !layout.is_workspace {
+        return Ok(true);
+    }
+    let normalized_root = normalize_project_path(&layout.root.to_string_lossy());
+    let local_index_dir = crate::config::load_standalone_config()
+        .ok()
+        .map(|config| {
+            crate::config::effective_sou_local_index_dir(
+                config.mcp_config.sou_local_index_dir.as_deref(),
+            )
+        })
+        .unwrap_or_else(crate::config::default_sou_local_index_dir);
+    let has_projects = load_projects_file().0.contains_key(&normalized_root);
+    let has_status = load_projects_status()
+        .projects
+        .contains_key(&normalized_root);
+    let has_job = jobs::load_manifest().jobs.contains_key(&normalized_root);
+    let has_local =
+        crate::mcp::tools::sou::local::has_workspace_parent_index(&layout.root, &local_index_dir)?;
+    if !has_projects && !has_status && !has_job && !has_local {
+        return Ok(true);
+    }
+
+    let Some(_lease) = jobs::try_acquire_project_lease(&normalized_root)? else {
+        return Ok(false);
+    };
+    let backup_dir = home_projects_file()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("migrations")
+        .join(format!(
+            "workspace-parent-{}-{}",
+            chrono::Utc::now().format("%Y%m%d%H%M%S"),
+            uuid::Uuid::new_v4()
+        ));
+    fs::create_dir_all(&backup_dir)?;
+    for source in [
+        home_projects_file(),
+        home_projects_status_file(),
+        jobs::home_index_jobs_file(),
+    ] {
+        if source.exists() {
+            let file_name = source
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("ACE 状态文件名无效: {}", source.display()))?;
+            fs::copy(&source, backup_dir.join(file_name))?;
+        }
+    }
+
+    let local_archive = crate::mcp::tools::sou::local::archive_workspace_parent_index(
+        &layout.root,
+        &local_index_dir,
+    )?;
+    {
+        let _guard = projects_file_lock()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("获取 projects.json 写入锁失败"))?;
+        let mut projects = load_projects_file();
+        if projects.0.remove(&normalized_root).is_some() {
+            save_projects_file(&projects)?;
+        }
+    }
+    {
+        let _guard = projects_status_lock()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("获取 projects_status.json 写入锁失败"))?;
+        let mut statuses = load_projects_status();
+        if statuses.projects.remove(&normalized_root).is_some() {
+            save_projects_status(&statuses)?;
+        }
+    }
+    jobs::remove_job(&normalized_root)?;
+    log_important!(
+        info,
+        "已迁移遗留工作区父索引: project_root={}, backup={}, local_archive={}",
+        normalized_root,
+        backup_dir.display(),
+        local_archive
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "none".to_string())
+    );
+    Ok(true)
 }
 
 // ---------------- 已移除 Python Web 服务依赖，完全使用 Rust 实现 ----------------
@@ -1149,6 +1500,46 @@ pub async fn resume_index_jobs() -> anyhow::Result<()> {
         return Ok(());
     };
     for job in pending_jobs {
+        let exclude_patterns = effective_exclude_patterns(config.exclude_patterns.as_deref());
+        match crate::mcp::tools::workspace::resolve_workspace(
+            Path::new(&job.project_root),
+            &exclude_patterns,
+        ) {
+            Ok(layout) if layout.is_workspace => {
+                match migrate_legacy_workspace_parent(&layout) {
+                    Ok(true) => {
+                        for project in layout.projects {
+                            let project_root =
+                                crate::mcp::tools::workspace::normalize_path(&project.root);
+                            let _ = start_background_index_with_mode(
+                                &config,
+                                &project_root,
+                                true,
+                                IndexJobMode::from_str(&job.mode),
+                                None,
+                            )
+                            .await?;
+                        }
+                    }
+                    Ok(false) => log_debug!(
+                        "父目录索引任务仍由其他进程执行，跳过本次恢复: {}",
+                        job.project_root
+                    ),
+                    Err(error) => log::warn!(
+                        "恢复前迁移 ACE 遗留父目录索引失败: project_root={}, error={}",
+                        job.project_root,
+                        error
+                    ),
+                }
+                continue;
+            }
+            Ok(_) => {}
+            Err(error) => log_debug!(
+                "恢复 ACE 任务时解析工作区失败，按单项目继续: project_root={}, error={}",
+                job.project_root,
+                error
+            ),
+        }
         let status = get_project_status(&job.project_root);
         if should_hold_on_auth_failure(&config, &job.project_root, &status) {
             log_important!(
@@ -1404,7 +1795,8 @@ where
 
 #[cfg(test)]
 mod retry_tests {
-    use super::is_retryable_request_error;
+    use super::{aggregate_workspace_project_status, is_retryable_request_error};
+    use crate::mcp::tools::acemcp::types::{IndexStatus, ProjectIndexStatus};
 
     #[test]
     fn ace_sou_retries_tls_handshake_eof() {
@@ -1420,6 +1812,37 @@ mod retry_tests {
         let error = anyhow::anyhow!("HTTP 401 Unauthorized");
 
         assert!(!is_retryable_request_error(&error));
+    }
+
+    #[test]
+    fn workspace_status_aggregates_children_without_parent_job() {
+        let mut ready = ProjectIndexStatus::default();
+        ready.project_root = "D:/workspace/admin-ui".to_string();
+        ready.status = IndexStatus::Synced;
+        ready.total_files = 8;
+        ready.indexed_files = 8;
+        let mut indexing = ProjectIndexStatus::default();
+        indexing.project_root = "D:/workspace/server".to_string();
+        indexing.status = IndexStatus::Indexing;
+        indexing.total_files = 12;
+        indexing.indexed_files = 6;
+        indexing.pending_files = 6;
+
+        let status = aggregate_workspace_project_status(
+            "D:/workspace".to_string(),
+            vec![
+                ("admin-ui".to_string(), ready),
+                ("server".to_string(), indexing),
+            ],
+        );
+
+        assert!(status.is_workspace);
+        assert_eq!(status.workspace_project_count, 2);
+        assert_eq!(status.status, IndexStatus::Indexing);
+        assert_eq!(status.total_files, 20);
+        assert_eq!(status.indexed_files, 14);
+        assert_eq!(status.progress, 70);
+        assert!(status.job_id.is_none());
     }
 }
 

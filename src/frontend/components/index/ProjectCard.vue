@@ -171,8 +171,11 @@ function formatAbsoluteTime(timeStr: string | null): string {
         <div class="project-info">
           <!-- 项目名称 -->
           <div class="project-name">
-            <div class="i-carbon-folder text-primary-500 flex-shrink-0" />
+            <div :class="project.is_workspace ? 'i-carbon-folder-details' : 'i-carbon-folder'" class="text-primary-500 flex-shrink-0" />
             <span class="name-text">{{ projectName }}</span>
+            <n-tag v-if="project.is_workspace" size="tiny" :bordered="false" type="info">
+              工作区 · {{ project.workspace_project_count || 0 }} 项目
+            </n-tag>
             <!-- 目录不存在警告 -->
             <n-tooltip v-if="!props.directoryExists" trigger="hover">
               <template #trigger>

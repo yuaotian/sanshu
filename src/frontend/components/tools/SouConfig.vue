@@ -132,16 +132,37 @@ interface DebugSearchResult {
   fusion?: string
 }
 
-interface LocalIndexStatus {
+interface LocalIndexScopeStatus {
+  name: string
+  relative_path: string
   project_root: string
   index_path: string
-  state: 'missing' | 'building' | 'ready' | 'error'
+  state: 'missing' | 'building' | 'ready' | 'partial' | 'error'
+  indexed_files: number
+  indexed_chunks: number
+  lexical_sync_running: boolean
+  pending_changes: boolean
+  semantic_state: 'disabled' | 'missing' | 'building' | 'syncing' | 'ready' | 'partial' | 'error'
+  semantic_indexed_chunks: number
+  semantic_pending_chunks: number
+  last_error?: string
+}
+
+interface LocalIndexStatus {
+  is_workspace: boolean
+  project_count: number
+  scopes: LocalIndexScopeStatus[]
+  project_root: string
+  index_path: string
+  state: 'missing' | 'building' | 'ready' | 'partial' | 'error'
   indexed_files: number
   indexed_chunks: number
   sync_running: boolean
+  lexical_sync_running: boolean
+  semantic_sync_running: boolean
   pending_changes: boolean
   last_error?: string
-  semantic_state: 'disabled' | 'missing' | 'building' | 'syncing' | 'ready' | 'error'
+  semantic_state: 'disabled' | 'missing' | 'building' | 'syncing' | 'ready' | 'partial' | 'error'
   semantic_model?: string
   semantic_indexed_chunks: number
   semantic_pending_chunks: number
@@ -607,21 +628,23 @@ const semanticModeDescription = computed(() => {
 const localIndexStateLabel = computed(() => {
   if (!localIndexStatus.value)
     return '未读取'
-  if (localIndexStatus.value.sync_running)
+  if (localIndexStatus.value.lexical_sync_running)
     return '同步中'
   return {
     missing: '未建立',
     building: '同步中',
     ready: '可用',
+    partial: '部分可用',
     error: '异常',
   }[localIndexStatus.value.state]
 })
 
 const localIndexTagType = computed<'default' | 'info' | 'success' | 'error'>(() => {
-  if (localIndexStatus.value?.sync_running)
+  if (localIndexStatus.value?.lexical_sync_running)
     return 'info'
   switch (localIndexStatus.value?.state) {
     case 'ready': return 'success'
+    case 'partial': return 'info'
     case 'building': return 'info'
     case 'error': return 'error'
     default: return 'default'
@@ -637,6 +660,7 @@ const semanticStateLabel = computed(() => {
     building: '构建中',
     syncing: '同步中',
     ready: '混合检索可用',
+    partial: '部分可用',
     error: '异常',
   }[localIndexStatus.value?.semantic_state || 'missing']
 })
@@ -2573,7 +2597,7 @@ defineExpose({ saveConfig })
                       </div>
                       <template #feedback>
                         <span v-if="localIndexStatus" class="form-feedback">
-                          {{ localIndexStatus.project_root }} · {{ localIndexStatus.indexed_files }} 文件 / {{ localIndexStatus.indexed_chunks }} 分块
+                          {{ localIndexStatus.project_root }} · {{ localIndexStatus.is_workspace ? `${localIndexStatus.project_count} 个独立项目联合检索` : `${localIndexStatus.indexed_files} 文件 / ${localIndexStatus.indexed_chunks} 分块` }}
                         </span>
                         <span v-else class="form-feedback">索引管理中的项目会在此列出，也可以切换为手动输入。</span>
                         <span v-if="debugProjectOptionsReadError" class="form-feedback sou-warning-text">
@@ -2607,6 +2631,37 @@ defineExpose({ saveConfig })
                     </n-form-item>
                   </n-grid-item>
                 </n-grid>
+
+                <div v-if="localIndexStatus?.is_workspace" class="sou-workspace-scopes">
+                  <div class="sou-panel-header">
+                    <div>
+                      <div class="sou-panel-title">
+                        工作区子项目
+                      </div>
+                      <div class="form-feedback">
+                        各 Git 项目复用独立索引；工作区直属文件使用即时词法搜索。
+                      </div>
+                    </div>
+                    <n-tag :bordered="false" type="info">
+                      {{ localIndexStatus.project_count }} 个项目
+                    </n-tag>
+                  </div>
+                  <div v-for="scope in localIndexStatus.scopes" :key="scope.project_root" class="sou-workspace-scope">
+                    <div class="sou-workspace-scope-main">
+                      <strong>{{ scope.name }}</strong>
+                      <span>{{ scope.relative_path }}</span>
+                    </div>
+                    <div class="sou-workspace-scope-status">
+                      <n-tag size="small" :bordered="false" :type="scope.state === 'error' ? 'error' : scope.lexical_sync_running ? 'info' : scope.state === 'ready' ? 'success' : 'default'">
+                        FTS5 {{ scope.lexical_sync_running ? '同步中' : scope.state === 'ready' ? '可用' : scope.state === 'error' ? '异常' : '待同步' }}
+                      </n-tag>
+                      <n-tag size="small" :bordered="false" :type="scope.semantic_state === 'error' ? 'error' : ['building', 'syncing'].includes(scope.semantic_state) ? 'info' : scope.semantic_state === 'ready' ? 'success' : 'default'">
+                        BGE {{ scope.semantic_state === 'ready' ? '可用' : ['building', 'syncing'].includes(scope.semantic_state) ? '同步中' : scope.semantic_state === 'disabled' ? '关闭' : scope.semantic_state === 'error' ? '异常' : '待建立' }}
+                      </n-tag>
+                      <span>{{ scope.indexed_files }} 文件 / {{ scope.indexed_chunks }} 分块</span>
+                    </div>
+                  </div>
+                </div>
 
                 <div v-if="localIndexStatus && (semanticEnabled || localIndexTaskActive)" class="sou-progress-panel">
                   <div class="sou-panel-header">
@@ -3700,7 +3755,7 @@ defineExpose({ saveConfig })
                   </div>
                 </div>
 
-                <!-- 自动索引嵌套项目策略卡片 -->
+                <!-- 工作区联合索引策略卡片 -->
                 <div class="policy-card">
                   <div class="policy-card-header">
                     <div class="policy-icon-wrapper nested">
@@ -3708,17 +3763,16 @@ defineExpose({ saveConfig })
                     </div>
                     <div class="policy-meta">
                       <div class="policy-title">
-                        自动索引嵌套项目
+                        工作区联合索引
                       </div>
                       <div class="policy-desc">
-                        自动检测并索引所有 Git 子项目
+                        独立 Git 子项目分别索引，直属文件不上传 ACE
                       </div>
                     </div>
                     <div class="policy-action">
-                      <n-switch
-                        v-model:value="config.index_nested_projects"
-                        @update:value="() => saveConfig()"
-                      />
+                      <n-tag type="success" :bordered="false" size="small">
+                        固定启用
+                      </n-tag>
                     </div>
                   </div>
                 </div>
@@ -3829,7 +3883,8 @@ defineExpose({ saveConfig })
 
 .sou-progress-panel,
 .sou-model-panel,
-.sou-resource-panel {
+.sou-resource-panel,
+.sou-workspace-scopes {
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -3837,6 +3892,54 @@ defineExpose({ saveConfig })
   border: 1px solid var(--color-border, rgba(128, 128, 128, 0.2));
   border-radius: 8px;
   background: var(--color-container, rgba(128, 128, 128, 0.06));
+}
+
+.sou-workspace-scope {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border, rgba(128, 128, 128, 0.16));
+}
+
+.sou-workspace-scope-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.sou-workspace-scope-main strong,
+.sou-workspace-scope-main span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sou-workspace-scope-main span,
+.sou-workspace-scope-status {
+  color: var(--color-on-surface-muted, #9ca3af);
+  font-size: 11px;
+}
+
+.sou-workspace-scope-status {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+@media (max-width: 720px) {
+  .sou-workspace-scope {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .sou-workspace-scope-status {
+    justify-content: flex-start;
+  }
 }
 
 .sou-model-panel {

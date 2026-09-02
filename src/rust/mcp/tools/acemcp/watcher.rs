@@ -7,8 +7,7 @@
 // 3. 自管 debounce：用 mpsc 把"通过过滤"的事件推到后台任务，后台任务用
 //    `tokio::time::sleep` + `last_event_at` 维护"静默期"门限；同时通过
 //    `first_event_at` 维护"最大等待时间"门限，防止用户持续小写入永远触发不了。
-// 4. 嵌套项目场景：当变更不属于任何子项目但仍在父项目根之内（且未被排除），
-//    把父项目本身加入待索引列表——之前直接吞掉导致父项目长期不更新。
+// 4. 工作区场景：子项目变更路由到对应 Git 根；直属文件交给 Local/FastContext。
 
 use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -75,10 +74,11 @@ pub struct PathFilter {
 
 impl PathFilter {
     pub fn new(root: &str, exclude_patterns: &[String]) -> Self {
+        let exclude_patterns = effective_exclude_patterns(Some(exclude_patterns));
         let user_globset = if exclude_patterns.is_empty() {
             None
         } else {
-            build_exclude_globset(exclude_patterns).map(Arc::new).ok()
+            build_exclude_globset(&exclude_patterns).map(Arc::new).ok()
         };
         Self {
             root: Arc::new(root.to_string()),
@@ -200,26 +200,21 @@ impl WatcherManager {
     }
 
     /// 检测项目下的嵌套 Git 子项目
-    fn detect_nested_projects(&self, project_root: &str) -> Vec<NestedWatchInfo> {
-        // 调用 mcp.rs 中的嵌套项目检测逻辑
-        match super::mcp::AcemcpTool::get_project_with_nested_status(project_root.to_string()) {
-            Ok(status) => status
-                .nested_projects
-                .into_iter()
-                .map(|np| NestedWatchInfo {
-                    absolute_path: np.absolute_path,
-                    relative_path: np.relative_path,
-                })
-                .collect(),
-            Err(e) => {
-                log_debug!("检测嵌套项目失败: {}", e);
-                Vec::new()
-            }
-        }
+    fn detect_nested_projects(&self, project_root: &str) -> Result<Vec<NestedWatchInfo>> {
+        let status =
+            super::mcp::AcemcpTool::get_project_with_nested_status(project_root.to_string())?;
+        Ok(status
+            .nested_projects
+            .into_iter()
+            .map(|project| NestedWatchInfo {
+                absolute_path: project.absolute_path,
+                relative_path: project.relative_path,
+            })
+            .collect())
     }
 
-    /// 根据变更文件路径确定需要索引的项目（最长前缀匹配 + 父项目兜底）
-    /// - 当变更不属于任何子项目时，回退到父项目本身（修复嵌套场景丢事件的 bug）
+    /// 根据变更文件路径确定需要索引的项目（最长前缀匹配）。
+    /// 工作区直属文件由 Local/FastContext 检索，不创建 ACE 父目录任务。
     /// - 路径若被 `PathFilter` 过滤掉，则不参与计算（外层应已过滤）
     fn determine_affected_projects(
         parent_root: &str,
@@ -254,9 +249,7 @@ impl WatcherManager {
             if let Some(project) = matched_project {
                 affected.insert(project.to_string());
             } else if path_str.starts_with(parent_root) {
-                // 兜底：变更在父项目内但不属于任何子项目
-                // 旧实现这里直接吞掉，导致父项目长期不被索引（last_success_time 不更新）
-                affected.insert(parent_root.to_string());
+                log_debug!("工作区直属文件不进入 ACE 父索引: {}", path_str);
             } else {
                 log_debug!("文件变更不在父项目范围内，跳过: {}", path_str);
             }
@@ -311,29 +304,22 @@ impl WatcherManager {
             max_wait_ms
         );
 
-        // 读取嵌套项目索引开关（默认启用）
-        let index_nested = crate::config::load_standalone_config()
-            .ok()
-            .and_then(|c| c.mcp_config.acemcp_index_nested_projects)
-            .unwrap_or(true);
-
-        // 检测嵌套子项目
-        let nested_infos = if index_nested {
-            let infos = self.detect_nested_projects(&normalized_root);
-            if !infos.is_empty() {
-                log_important!(
-                    info,
-                    "检测到 {} 个嵌套 Git 子项目，将启用智能路由: {:?}",
-                    infos.len(),
-                    infos.iter().map(|i| &i.relative_path).collect::<Vec<_>>()
-                );
-                let mut map = self.nested_project_map.lock().unwrap();
-                map.insert(normalized_root.clone(), infos.clone());
-            }
-            infos
-        } else {
-            Vec::new()
-        };
+        let nested_infos = self.detect_nested_projects(&normalized_root)?;
+        if !nested_infos.is_empty() {
+            log_important!(
+                info,
+                "检测到 {} 个独立 Git 子项目，将启用工作区路由: {:?}",
+                nested_infos.len(),
+                nested_infos
+                    .iter()
+                    .map(|project| &project.relative_path)
+                    .collect::<Vec<_>>()
+            );
+            self.nested_project_map
+                .lock()
+                .unwrap()
+                .insert(normalized_root.clone(), nested_infos.clone());
+        }
 
         // 构建路径过滤器（在监听回调里使用）
         let exclude_patterns = effective_exclude_patterns(config.exclude_patterns.as_deref());
@@ -555,6 +541,25 @@ impl WatcherManager {
 
         let watchers = self.watchers.lock().unwrap();
         watchers.contains_key(&normalized_root)
+    }
+
+    /// 父工作区监听器会把变更路由到子项目，子项目无需再创建重复 watcher。
+    pub fn is_path_covered(&self, project_root: &str) -> bool {
+        let normalized_root = normalize_project_path(
+            &PathBuf::from(project_root)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(project_root))
+                .to_string_lossy(),
+        );
+        if self.watchers.lock().unwrap().contains_key(&normalized_root) {
+            return true;
+        }
+        self.nested_project_map
+            .lock()
+            .unwrap()
+            .values()
+            .flatten()
+            .any(|project| project.absolute_path == normalized_root)
     }
 }
 
@@ -850,8 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn determine_affected_projects_falls_back_to_parent() {
-        // 修复点：变更不在任何子项目内但在父项目内 → 应回落到父项目
+    fn determine_affected_projects_skips_workspace_direct_files() {
         let parent = "C:/proj";
         let nested = vec![NestedWatchInfo {
             absolute_path: "C:/proj/vendor/lib".to_string(),
@@ -859,7 +863,7 @@ mod tests {
         }];
         let paths = vec![PathBuf::from("C:/proj/src/main.rs")];
         let res = WatcherManager::determine_affected_projects(parent, &paths, &nested);
-        assert_eq!(res, vec![parent.to_string()]);
+        assert!(res.is_empty());
     }
 
     #[test]
@@ -872,7 +876,7 @@ mod tests {
         }];
         let paths = vec![PathBuf::from("C:/proj/sub-a-extra/file.rs")];
         let res = WatcherManager::determine_affected_projects(parent, &paths, &nested);
-        // 没有被错误归到 sub-a，回落到父项目
-        assert_eq!(res, vec![parent.to_string()]);
+        // 没有被错误归到 sub-a，也不创建工作区父目录 ACE 任务。
+        assert!(res.is_empty());
     }
 }

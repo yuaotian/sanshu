@@ -1,8 +1,9 @@
 use anyhow::{anyhow, Context, Result};
+use futures_util::stream::{self, StreamExt};
 use rmcp::model::{CallToolResult, Content, ErrorData as McpError, Tool};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use std::time::Instant;
 use crate::config::load_standalone_config;
 use crate::log_important;
 use crate::mcp::tools::acemcp::types::AcemcpRequest;
+use crate::mcp::tools::workspace::{resolve_workspace, WorkspaceLayout, WorkspaceProject};
 use crate::mcp::tools::AcemcpTool;
 
 pub(crate) mod fast_context;
@@ -80,6 +82,7 @@ struct BackendRunResult {
     text: String,
     hit_count: usize,
     duration_ms: u64,
+    degraded: bool,
     engine: Option<String>,
     index_state: Option<String>,
     fallback_reason: Option<String>,
@@ -94,6 +97,16 @@ struct BackendRunResult {
     reranker_duration_ms: Option<u64>,
     reranker_top_score: Option<f32>,
     fusion: Option<String>,
+    notice: Option<String>,
+    workspace: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+struct RankedWorkspaceSection {
+    section: SouSection,
+    retrieval_score: f64,
+    exact_match: bool,
+    coverage: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -483,6 +496,7 @@ async fn run_auto_result(
             Ok(mut ok) => {
                 if !errors.is_empty() {
                     let prior = format_backend_errors("", &errors);
+                    ok.degraded = true;
                     ok.fallback_reason = Some(match ok.fallback_reason.take() {
                         Some(current) => format!("{}；{}", prior, current),
                         None => prior,
@@ -632,6 +646,112 @@ fn result_to_call_tool(
 }
 
 async fn run_ace(request: &SouRequest) -> Result<BackendRunResult, String> {
+    let excludes = request.exclude_paths.clone().unwrap_or_default();
+    let layout = resolve_workspace(Path::new(&request.project_root_path), &excludes)
+        .map_err(|error| error.to_string())?;
+    if !layout.is_workspace {
+        return run_ace_single(request).await;
+    }
+
+    let started_at = Instant::now();
+    let project_count = layout.projects.len();
+    let tasks = layout.projects.clone().into_iter().map(|project| {
+        let mut child_request = request.clone();
+        child_request.project_root_path = normalize_path(&project.root);
+        async move {
+            let result = run_ace_single(&child_request).await;
+            (project, result)
+        }
+    });
+    let results = stream::iter(tasks)
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
+    let mut scopes = Vec::new();
+    let mut ranked_scopes = Vec::new();
+    let mut errors = Vec::new();
+    for (project, result) in results {
+        match result {
+            Ok(output) => {
+                let sections = qualify_project_sections(
+                    parse_sou_sections(&output.text, BACKEND_ACE),
+                    &project,
+                );
+                scopes.push(serde_json::json!({
+                    "project": project.relative_path,
+                    "status": "ready",
+                    "hit_count": sections.len(),
+                    "duration_ms": output.duration_ms,
+                }));
+                ranked_scopes.push(sections);
+            }
+            Err(error) => {
+                scopes.push(serde_json::json!({
+                    "project": project.relative_path,
+                    "status": "unavailable",
+                    "error": diagnostic_summary(&error),
+                }));
+                errors.push(format!(
+                    "{}: {}",
+                    project.name(),
+                    diagnostic_summary(&error)
+                ));
+            }
+        }
+    }
+
+    let limit = requested_max_results(request, 10);
+    let ranked = merge_workspace_sections(ranked_scopes, &request.query, limit);
+    let notice =
+        "ACE 工作区仅联合独立子项目；工作区直属文件由 Local 或 FastContext 检索".to_string();
+    let fallback_reason = (!errors.is_empty()).then(|| errors.join("；"));
+    let text = format_workspace_sections(
+        &ranked,
+        &format!(
+            "[sou-ace workspace] projects={}, hits={}, direct_files=not_indexed_by_ace",
+            project_count,
+            ranked.len()
+        ),
+        Some(&notice),
+    );
+    Ok(BackendRunResult {
+        backend: BACKEND_ACE.to_string(),
+        text,
+        hit_count: ranked.len(),
+        duration_ms: started_at.elapsed().as_millis() as u64,
+        degraded: !errors.is_empty(),
+        engine: Some("ace-workspace".to_string()),
+        index_state: Some(
+            if errors.is_empty() {
+                "ready"
+            } else {
+                "partial"
+            }
+            .to_string(),
+        ),
+        fallback_reason,
+        semantic_state: None,
+        semantic_model: None,
+        semantic_indexed_chunks: None,
+        semantic_pending_chunks: None,
+        semantic_top_score: None,
+        semantic_mode: None,
+        reranker_state: None,
+        reranker_model: None,
+        reranker_duration_ms: None,
+        reranker_top_score: None,
+        fusion: Some("workspace_rrf_k60".to_string()),
+        notice: Some(notice),
+        workspace: Some(serde_json::json!({
+            "root": normalize_path(&layout.root),
+            "project_count": project_count,
+            "direct_files": "not_indexed_by_ace",
+            "scopes": scopes,
+        })),
+    })
+}
+
+async fn run_ace_single(request: &SouRequest) -> Result<BackendRunResult, String> {
     let started_at = Instant::now();
     let result = AcemcpTool::search_context(AcemcpRequest {
         project_root_path: request.project_root_path.clone(),
@@ -649,6 +769,7 @@ async fn run_ace(request: &SouRequest) -> Result<BackendRunResult, String> {
         backend: BACKEND_ACE.to_string(),
         hit_count: parse_sou_sections(&text, BACKEND_ACE).len(),
         duration_ms: started_at.elapsed().as_millis() as u64,
+        degraded: false,
         engine: None,
         index_state: None,
         fallback_reason: None,
@@ -663,11 +784,30 @@ async fn run_ace(request: &SouRequest) -> Result<BackendRunResult, String> {
         reranker_duration_ms: None,
         reranker_top_score: None,
         fusion: None,
+        notice: None,
+        workspace: None,
         text,
     })
 }
 
 async fn run_local(
+    request: &SouRequest,
+    config: &SouRuntimeConfig,
+) -> Result<BackendRunResult, String> {
+    let defaults = &config.fast_context;
+    let excludes = request
+        .exclude_paths
+        .clone()
+        .unwrap_or_else(|| defaults.exclude_paths.clone());
+    let layout = resolve_workspace(Path::new(&request.project_root_path), &excludes)
+        .map_err(|error| error.to_string())?;
+    if !layout.is_workspace {
+        return run_local_single(request, config).await;
+    }
+    run_local_workspace(request, config, layout, excludes).await
+}
+
+async fn run_local_single(
     request: &SouRequest,
     config: &SouRuntimeConfig,
 ) -> Result<BackendRunResult, String> {
@@ -690,6 +830,7 @@ async fn run_local(
         text: output.text,
         hit_count: output.hit_count,
         duration_ms: output.duration_ms,
+        degraded: output.degraded,
         engine: Some(output.engine),
         index_state: Some(output.index_state),
         fallback_reason: output.fallback_reason,
@@ -704,7 +845,455 @@ async fn run_local(
         reranker_duration_ms: output.reranker_duration_ms,
         reranker_top_score: output.reranker_top_score,
         fusion: output.fusion,
+        notice: output.notice,
+        workspace: None,
     })
+}
+
+async fn run_local_workspace(
+    request: &SouRequest,
+    config: &SouRuntimeConfig,
+    layout: WorkspaceLayout,
+    base_excludes: Vec<String>,
+) -> Result<BackendRunResult, String> {
+    let started_at = Instant::now();
+    let requested_accurate = config.local_semantic.mode.accurate();
+    let project_count = layout.projects.len();
+    let parent_archive_notice =
+        match local::archive_workspace_parent_index(&layout.root, &config.local_index_dir) {
+            Ok(Some(path)) => Some(format!("遗留父目录本地索引已归档到 {}", path.display())),
+            Ok(None) => None,
+            Err(error) => Some(format!("遗留父目录本地索引迁移已延后: {}", error)),
+        };
+    let tasks = layout.projects.clone().into_iter().map(|project| {
+        let mut child_request = request.clone();
+        child_request.project_root_path = normalize_path(&project.root);
+        child_request.max_results = Some(30);
+        let mut child_config = config.clone();
+        if requested_accurate {
+            child_config.local_semantic.mode = local::LocalSemanticMode::Balanced;
+        }
+        async move {
+            let result = run_local_single(&child_request, &child_config).await;
+            (project, result)
+        }
+    });
+    let child_results = stream::iter(tasks)
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut ranked_scopes = Vec::new();
+    let mut scope_metadata = Vec::new();
+    let mut engines = HashSet::new();
+    let mut semantic_states = Vec::new();
+    let mut semantic_indexed_chunks = 0u64;
+    let mut semantic_pending_chunks = 0u64;
+    let mut semantic_top_score: Option<f32> = None;
+    let mut notices = Vec::new();
+    if let Some(message) = parent_archive_notice {
+        notices.push(message);
+    }
+    let mut errors = Vec::new();
+    let mut degraded = false;
+
+    for (project, result) in child_results {
+        match result {
+            Ok(output) => {
+                let sections = qualify_project_sections(
+                    parse_sou_sections(&output.text, BACKEND_LOCAL),
+                    &project,
+                );
+                if let Some(engine) = output.engine.as_deref() {
+                    engines.insert(engine.to_string());
+                }
+                if let Some(state) = output.semantic_state.as_deref() {
+                    semantic_states.push(state.to_string());
+                }
+                semantic_indexed_chunks = semantic_indexed_chunks
+                    .saturating_add(output.semantic_indexed_chunks.unwrap_or_default());
+                semantic_pending_chunks = semantic_pending_chunks
+                    .saturating_add(output.semantic_pending_chunks.unwrap_or_default());
+                if let Some(score) = output.semantic_top_score {
+                    semantic_top_score = Some(
+                        semantic_top_score
+                            .map(|current| current.max(score))
+                            .unwrap_or(score),
+                    );
+                }
+                if let Some(message) = output.notice.clone() {
+                    notices.push(format!("{}: {}", project.name(), message));
+                }
+                if let Some(reason) = output.fallback_reason.clone() {
+                    if output.degraded {
+                        errors.push(format!("{}: {}", project.name(), reason));
+                    } else {
+                        notices.push(format!("{}: {}", project.name(), reason));
+                    }
+                }
+                degraded |= output.degraded;
+                scope_metadata.push(serde_json::json!({
+                    "project": project.relative_path,
+                    "status": if output.degraded { "degraded" } else { "ready" },
+                    "hit_count": sections.len(),
+                    "engine": output.engine,
+                    "index_state": output.index_state,
+                    "semantic_state": output.semantic_state,
+                    "notice": output.notice,
+                    "fallback_reason": output.fallback_reason,
+                    "duration_ms": output.duration_ms,
+                }));
+                ranked_scopes.push(sections);
+            }
+            Err(error) => {
+                degraded = true;
+                errors.push(format!(
+                    "{}: {}",
+                    project.name(),
+                    diagnostic_summary(&error)
+                ));
+                scope_metadata.push(serde_json::json!({
+                    "project": project.relative_path,
+                    "status": "error",
+                    "error": diagnostic_summary(&error),
+                }));
+            }
+        }
+    }
+
+    let mut direct_excludes = base_excludes;
+    direct_excludes.extend(layout.project_excludes());
+    direct_excludes.sort();
+    direct_excludes.dedup();
+    let direct_output = local::search_immediate(local::LocalSearchOptions {
+        project_root: layout.root.clone(),
+        query: request.query.clone(),
+        max_results: 30,
+        exclude_paths: direct_excludes,
+        index_dir: config.local_index_dir.clone(),
+        semantic: config.local_semantic.clone(),
+    })
+    .await;
+    match direct_output {
+        Ok(output) => {
+            let sections = parse_sou_sections(&output.text, BACKEND_LOCAL);
+            scope_metadata.push(serde_json::json!({
+                "project": "workspace-direct",
+                "status": "live_search",
+                "hit_count": sections.len(),
+                "engine": output.engine,
+                "duration_ms": output.duration_ms,
+            }));
+            if !sections.is_empty() {
+                ranked_scopes.push(sections);
+            }
+        }
+        Err(error) => {
+            degraded = true;
+            errors.push(format!(
+                "workspace-direct: {}",
+                diagnostic_summary(&error.to_string())
+            ));
+            scope_metadata.push(serde_json::json!({
+                "project": "workspace-direct",
+                "status": "error",
+                "error": diagnostic_summary(&error.to_string()),
+            }));
+        }
+    }
+
+    let max_results = requested_max_results(request, config.fast_context.max_results as usize);
+    let candidate_limit = if requested_accurate { 50 } else { max_results };
+    let mut ranked = merge_workspace_sections(ranked_scopes, &request.query, candidate_limit);
+    let mut reranker_state = requested_accurate.then(|| "skipped".to_string());
+    let reranker_model = requested_accurate.then(|| reranker::MODEL_NAME.to_string());
+    let mut reranker_duration_ms = None;
+    let mut reranker_top_score = None;
+    let mut fusion = Some("workspace_rrf_k60".to_string());
+    if requested_accurate && !ranked.is_empty() {
+        let remaining = Duration::from_secs(3).saturating_sub(started_at.elapsed());
+        let documents = ranked
+            .iter()
+            .map(|candidate| {
+                format!(
+                    "{}\n{}",
+                    candidate.section.location, candidate.section.excerpt
+                )
+            })
+            .collect::<Vec<_>>();
+        let rerank_started = Instant::now();
+        match reranker::rerank(
+            &config.local_semantic.reranker_model_dir,
+            &request.query,
+            documents,
+            remaining,
+        )
+        .await
+        {
+            Ok(order) => {
+                reranker_duration_ms = Some(rerank_started.elapsed().as_millis() as u64);
+                reranker_top_score = order.first().map(|item| item.score);
+                ranked = apply_workspace_reranker(ranked, order, max_results);
+                reranker_state = Some("ready".to_string());
+                fusion = Some("workspace_retrieval_0.30_reranker_0.70_rrf".to_string());
+            }
+            Err(error) => {
+                reranker_duration_ms = Some(rerank_started.elapsed().as_millis() as u64);
+                reranker_state = Some(error.state);
+                notices.push(format!("准确模式全局重排暂未应用: {}", error.message));
+                ranked.truncate(max_results);
+            }
+        }
+    } else {
+        ranked.truncate(max_results);
+    }
+
+    let mut engine_values = engines.into_iter().collect::<Vec<_>>();
+    engine_values.sort();
+    let engine = if engine_values.is_empty() {
+        "workspace-rg".to_string()
+    } else {
+        format!("workspace[{}]", engine_values.join("+"))
+    };
+    let semantic_state = aggregate_semantic_state(&semantic_states);
+    if semantic_state == "syncing" {
+        notices.push("部分子项目的语义向量正在同步，已返回可用词法结果".to_string());
+    }
+    let notice = (!notices.is_empty()).then(|| notices.join("；"));
+    let fallback_reason = (!errors.is_empty()).then(|| errors.join("；"));
+    let diagnostics = format!(
+        "[sou-local workspace] projects={}, scopes={}, hits={}, consistency_mode={}, semantic_state={}",
+        project_count,
+        scope_metadata.len(),
+        ranked.len(),
+        if degraded { "partial" } else { "indexed" },
+        semantic_state
+    );
+    let text = format_workspace_sections(&ranked, &diagnostics, notice.as_deref());
+    Ok(BackendRunResult {
+        backend: BACKEND_LOCAL.to_string(),
+        text,
+        hit_count: ranked.len(),
+        duration_ms: started_at.elapsed().as_millis() as u64,
+        degraded,
+        engine: Some(engine),
+        index_state: Some(if degraded { "partial" } else { "ready" }.to_string()),
+        fallback_reason,
+        semantic_state: Some(semantic_state),
+        semantic_model: config
+            .local_semantic
+            .mode
+            .enabled()
+            .then(semantic::model_key),
+        semantic_indexed_chunks: Some(semantic_indexed_chunks),
+        semantic_pending_chunks: Some(semantic_pending_chunks),
+        semantic_top_score,
+        semantic_mode: Some(config.local_semantic.mode.as_str().to_string()),
+        reranker_state,
+        reranker_model,
+        reranker_duration_ms,
+        reranker_top_score,
+        fusion,
+        notice,
+        workspace: Some(serde_json::json!({
+            "root": normalize_path(&layout.root),
+            "project_count": project_count,
+            "direct_files": "live_search",
+            "scopes": scope_metadata,
+        })),
+    })
+}
+
+fn requested_max_results(request: &SouRequest, default_value: usize) -> usize {
+    request
+        .max_results
+        .map(usize::from)
+        .unwrap_or(default_value)
+        .clamp(1, 30)
+}
+
+fn qualify_project_sections(
+    sections: Vec<SouSection>,
+    project: &WorkspaceProject,
+) -> Vec<SouSection> {
+    sections
+        .into_iter()
+        .map(|mut section| {
+            let (path, range) = split_location_range(&section.location);
+            let source_path = PathBuf::from(path);
+            let qualified = if source_path.is_absolute() {
+                source_path
+            } else {
+                project.root.join(source_path)
+            };
+            section.location = match range {
+                Some(range) => format!("{}:{}", normalize_path(&qualified), range),
+                None => normalize_path(&qualified),
+            };
+            section
+        })
+        .collect()
+}
+
+fn split_location_range(location: &str) -> (&str, Option<&str>) {
+    let Some((path, range)) = location.rsplit_once(':') else {
+        return (location, None);
+    };
+    let Some((start, end)) = range.split_once('-') else {
+        return (location, None);
+    };
+    if start.parse::<usize>().is_ok() && end.parse::<usize>().is_ok() {
+        (path, Some(range))
+    } else {
+        (location, None)
+    }
+}
+
+fn merge_workspace_sections(
+    scoped_sections: Vec<Vec<SouSection>>,
+    query: &str,
+    limit: usize,
+) -> Vec<RankedWorkspaceSection> {
+    const RRF_K: f64 = 60.0;
+    let terms = local::extract_query_terms(query);
+    let normalized_query = query.trim().to_lowercase();
+    let mut merged: HashMap<String, RankedWorkspaceSection> = HashMap::new();
+
+    for sections in scoped_sections {
+        for (rank, section) in sections.into_iter().enumerate() {
+            let normalized = format!("{}\n{}", section.location, section.excerpt).to_lowercase();
+            let contribution = 1.0 / (RRF_K + rank as f64 + 1.0);
+            let coverage = terms
+                .iter()
+                .filter(|term| normalized.contains(term.as_str()))
+                .count();
+            let exact_match =
+                !normalized_query.is_empty() && normalized.contains(&normalized_query);
+            let key = section.location.clone();
+            let entry = merged.entry(key).or_insert_with(|| RankedWorkspaceSection {
+                section,
+                retrieval_score: 0.0,
+                exact_match,
+                coverage,
+            });
+            entry.retrieval_score += contribution;
+            entry.exact_match |= exact_match;
+            entry.coverage = entry.coverage.max(coverage);
+        }
+    }
+
+    let mut ranked = merged.into_values().collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .retrieval_score
+            .total_cmp(&left.retrieval_score)
+            .then_with(|| right.exact_match.cmp(&left.exact_match))
+            .then_with(|| right.coverage.cmp(&left.coverage))
+            .then_with(|| left.section.location.cmp(&right.section.location))
+    });
+    ranked.truncate(limit.max(1));
+    ranked
+}
+
+fn apply_workspace_reranker(
+    mut candidates: Vec<RankedWorkspaceSection>,
+    ranking: Vec<reranker::RerankMatch>,
+    max_results: usize,
+) -> Vec<RankedWorkspaceSection> {
+    const RRF_K: f64 = 60.0;
+    const RETRIEVAL_WEIGHT: f64 = 0.30;
+    const RERANKER_WEIGHT: f64 = 0.70;
+    let protected_exact = candidates
+        .iter()
+        .position(|candidate| candidate.exact_match);
+    let protected_location =
+        protected_exact.map(|index| candidates[index].section.location.clone());
+    let mut reranker_ranks = HashMap::new();
+    for (rank, item) in ranking.into_iter().enumerate() {
+        if item.index < candidates.len() {
+            reranker_ranks.entry(item.index).or_insert(rank);
+        }
+    }
+    for (retrieval_rank, candidate) in candidates.iter_mut().enumerate() {
+        let retrieval = RETRIEVAL_WEIGHT / (RRF_K + retrieval_rank as f64 + 1.0);
+        let reranked = reranker_ranks
+            .get(&retrieval_rank)
+            .map(|rank| RERANKER_WEIGHT / (RRF_K + *rank as f64 + 1.0))
+            .unwrap_or_default();
+        candidate.retrieval_score = retrieval + reranked;
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .retrieval_score
+            .total_cmp(&left.retrieval_score)
+            .then_with(|| right.exact_match.cmp(&left.exact_match))
+            .then_with(|| left.section.location.cmp(&right.section.location))
+    });
+    if let Some(location) = protected_location {
+        if let Some(index) = candidates
+            .iter()
+            .position(|candidate| candidate.section.location == location)
+        {
+            let protected = candidates.remove(index);
+            candidates.insert(0, protected);
+        }
+    }
+    candidates.truncate(max_results.max(1));
+    candidates
+}
+
+fn aggregate_semantic_state(states: &[String]) -> String {
+    if states.is_empty() {
+        return "not_applicable".to_string();
+    }
+    if states.iter().any(|state| state == "error") {
+        return "error".to_string();
+    }
+    if states
+        .iter()
+        .any(|state| matches!(state.as_str(), "building" | "syncing"))
+    {
+        return "syncing".to_string();
+    }
+    if states.iter().all(|state| state == "ready") {
+        return "ready".to_string();
+    }
+    if states.iter().all(|state| state == "disabled") {
+        return "disabled".to_string();
+    }
+    if states.iter().any(|state| state == "missing") {
+        return "missing".to_string();
+    }
+    "partial".to_string()
+}
+
+fn format_workspace_sections(
+    ranked: &[RankedWorkspaceSection],
+    diagnostics: &str,
+    notice: Option<&str>,
+) -> String {
+    let mut parts = vec![
+        "The following code sections were retrieved:".to_string(),
+        String::new(),
+    ];
+    for candidate in ranked {
+        let (path, range) = split_location_range(&candidate.section.location);
+        parts.push(format!("Path: {}", path));
+        if let Some(range) = range {
+            let (start, end) = range.split_once('-').unwrap_or((range, range));
+            parts.push(format!("Lines: L{}-L{}", start, end));
+        }
+        parts.extend(candidate.section.excerpt.lines().map(str::to_string));
+        parts.push(String::new());
+    }
+    if ranked.is_empty() {
+        parts.push("No relevant files found.".to_string());
+    }
+    parts.push(diagnostics.to_string());
+    if let Some(message) = notice {
+        parts.push(format!("[sou workspace notice] {}", message));
+    }
+    parts.join("\n")
 }
 
 async fn run_fast_context(
@@ -840,6 +1429,7 @@ async fn run_fast_context_once(
         backend: BACKEND_FAST_CONTEXT.to_string(),
         hit_count: parse_sou_sections(&text, BACKEND_FAST_CONTEXT).len(),
         duration_ms: started_at.elapsed().as_millis() as u64,
+        degraded: false,
         engine: None,
         index_state: None,
         fallback_reason: None,
@@ -854,6 +1444,8 @@ async fn run_fast_context_once(
         reranker_duration_ms: None,
         reranker_top_score: None,
         fusion: None,
+        notice: None,
+        workspace: None,
         text,
     })
 }
@@ -1104,8 +1696,13 @@ fn parse_sou_sections(text: &str, default_backend: &str) -> Vec<SouSection> {
         }
         if line.starts_with("[sou metadata]")
             || line.starts_with("[sou fallback]")
+            || line.starts_with("[sou notice]")
+            || line.starts_with("[sou workspace notice]")
             || line.starts_with("[sou-local]")
             || line.starts_with("[sou-local fallback]")
+            || line.starts_with("[sou-local notice]")
+            || line.starts_with("[sou-local workspace]")
+            || line.starts_with("[sou-ace workspace]")
             || line.starts_with("[fast-context stats]")
             || line.starts_with("[fast-context config]")
             || line.starts_with("grep keywords:")
@@ -1218,7 +1815,7 @@ fn backend_success_result(
     requested_backend: &str,
     include_fallback_text: bool,
 ) -> CallToolResult {
-    let degraded = result.fallback_reason.is_some();
+    let degraded = result.degraded;
     let mut text = result.text.clone();
     let diagnostics = [
         result
@@ -1286,6 +1883,9 @@ fn backend_success_result(
             text.push_str(&format!("\n[sou fallback] {}", diagnostic_summary(reason)));
         }
     }
+    if let Some(message) = result.notice.as_deref() {
+        text.push_str(&format!("\n[sou notice] {}", diagnostic_summary(message)));
+    }
     success_result_with_metadata(
         text,
         serde_json::json!({
@@ -1308,6 +1908,8 @@ fn backend_success_result(
             "reranker_duration_ms": result.reranker_duration_ms,
             "reranker_top_score": result.reranker_top_score,
             "fusion": result.fusion,
+            "notice": result.notice,
+            "workspace": result.workspace,
         }),
     )
 }
@@ -1525,6 +2127,38 @@ reqwest = { version = "0.11", features = ["socks"] }
         assert_eq!(sections[0].excerpt, "L2:fn local_search() {}");
     }
 
+    #[test]
+    fn workspace_rrf_merges_scopes_with_one_global_limit() {
+        let scopes = vec![
+            vec![
+                SouSection {
+                    backend: BACKEND_LOCAL.to_string(),
+                    location: "admin-ui/src/App.vue:1-8".to_string(),
+                    excerpt: "WorkspaceSearchPanel".to_string(),
+                },
+                SouSection {
+                    backend: BACKEND_LOCAL.to_string(),
+                    location: "admin-ui/src/api.ts:2-9".to_string(),
+                    excerpt: "fetchWorkspace".to_string(),
+                },
+            ],
+            vec![SouSection {
+                backend: BACKEND_LOCAL.to_string(),
+                location: "server/src/search.rs:10-20".to_string(),
+                excerpt: "struct WorkspaceSearchPanel;".to_string(),
+            }],
+        ];
+
+        let ranked = merge_workspace_sections(scopes, "WorkspaceSearchPanel", 2);
+
+        assert_eq!(ranked.len(), 2);
+        assert!(ranked[0].exact_match);
+        assert!(ranked[0].section.excerpt.contains("WorkspaceSearchPanel"));
+        assert!(ranked
+            .iter()
+            .any(|candidate| candidate.section.location.starts_with("server/")));
+    }
+
     #[tokio::test]
     async fn explicit_local_backend_returns_hits_and_structured_metadata() {
         let temp = tempdir().expect("Local 路由临时项目应创建成功");
@@ -1579,6 +2213,7 @@ reqwest = { version = "0.11", features = ["socks"] }
             text: output.text,
             hit_count: output.hit_count,
             duration_ms: output.duration_ms,
+            degraded: output.degraded,
             engine: Some(output.engine),
             index_state: Some(output.index_state),
             fallback_reason: output.fallback_reason,
@@ -1593,6 +2228,8 @@ reqwest = { version = "0.11", features = ["socks"] }
             reranker_duration_ms: output.reranker_duration_ms,
             reranker_top_score: output.reranker_top_score,
             fusion: output.fusion,
+            notice: output.notice,
+            workspace: None,
         };
         assert!(result.hit_count >= 1);
         let call_result = backend_success_result(result, BACKEND_LOCAL, true);
