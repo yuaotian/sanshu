@@ -322,13 +322,18 @@ pub async fn save_acemcp_config(
         config.mcp_config.acemcp_proxy_type = args.proxy_type.clone();
         config.mcp_config.acemcp_proxy_username = args.proxy_username.clone();
         config.mcp_config.acemcp_proxy_password = args.proxy_password.clone();
-        // 保存嵌套项目索引开关
-        // 仅在前端显式传入时才覆盖，避免其他页面保存配置时将用户设置重置为默认值
-        if let Some(v) = args.index_nested_projects {
-            config.mcp_config.acemcp_index_nested_projects = Some(v);
+        // 联合工作区策略固定启用；兼容接收旧客户端字段，但不再允许隐藏配置改变执行语义。
+        if args.index_nested_projects == Some(false) {
+            log::info!("已忽略旧版 index_nested_projects=false，联合工作区策略保持启用");
         }
+        config.mcp_config.acemcp_index_nested_projects = Some(true);
         if let Some(projects) = args.watched_projects.clone() {
-            config.mcp_config.acemcp_watched_projects = Some(normalize_project_list(projects));
+            config.mcp_config.acemcp_watched_projects = Some(
+                crate::mcp::tools::workspace::collapse_workspace_watch_roots(
+                    projects,
+                    &args.exclude_patterns,
+                ),
+            );
         }
         // 这些字段可能不会由复用 acemcp 配置的旧页面传入，需保留已有后端配置。
         if let Some(v) = args.sou_default_backend.clone() {
@@ -434,32 +439,20 @@ pub async fn save_acemcp_config(
         .map_err(|e| format!("读取新 ACE 配置失败: {}", e))?;
     let next_index_scope = super::mcp::build_index_scope_hash(&next_config);
     if previous_index_scope != next_index_scope {
-        let (mut projects, index_nested_projects) = crate::config::load_standalone_config()
+        let mut projects = crate::config::load_standalone_config()
             .ok()
-            .map(|config| {
-                (
-                    config
-                        .mcp_config
-                        .acemcp_watched_projects
-                        .unwrap_or_default(),
-                    config
-                        .mcp_config
-                        .acemcp_index_nested_projects
-                        .unwrap_or(true),
-                )
-            })
-            .unwrap_or_else(|| (Vec::new(), true));
+            .and_then(|config| config.mcp_config.acemcp_watched_projects)
+            .unwrap_or_default();
         projects.extend(
             super::AcemcpTool::get_all_index_status()
                 .projects
                 .keys()
                 .cloned(),
         );
-        let projects = if index_nested_projects {
-            collapse_nested_project_roots(projects)
-        } else {
-            normalize_project_list(projects)
-        };
+        let projects = crate::mcp::tools::workspace::collapse_workspace_watch_roots(
+            projects,
+            next_config.exclude_patterns.as_deref().unwrap_or_default(),
+        );
         for project_root in projects {
             let current_status = super::AcemcpTool::get_index_status(project_root.clone());
             if current_status.status == super::types::IndexStatus::Indexing {
@@ -1240,7 +1233,7 @@ pub struct AcemcpConfigResponse {
     pub proxy_type: String,
     pub proxy_username: String,
     pub proxy_password: String,
-    /// 是否自动索引嵌套的 Git 子项目（默认启用）
+    /// 兼容旧前端的只读字段；联合工作区策略固定启用。
     pub index_nested_projects: bool,
     pub sou_default_backend: String,
     pub sou_auto_order: Vec<String>,
@@ -1390,11 +1383,7 @@ pub async fn get_acemcp_config(state: State<'_, AppState>) -> Result<AcemcpConfi
             .acemcp_proxy_password
             .clone()
             .unwrap_or_default(),
-        // 嵌套项目索引开关（默认启用）
-        index_nested_projects: config
-            .mcp_config
-            .acemcp_index_nested_projects
-            .unwrap_or(true),
+        index_nested_projects: true,
         sou_default_backend: config
             .mcp_config
             .sou_default_backend
@@ -2318,7 +2307,7 @@ pub async fn set_auto_index_enabled(
 pub fn get_watching_projects(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     let watcher_manager = super::watcher::get_watcher_manager();
     let mut projects = watcher_manager.get_watching_projects();
-    {
+    let excludes = {
         let config = state
             .config
             .lock()
@@ -2330,8 +2319,13 @@ pub fn get_watching_projects(state: State<'_, AppState>) -> Result<Vec<String>, 
                 .clone()
                 .unwrap_or_default(),
         );
-    }
-    Ok(normalize_project_list(projects))
+        config
+            .mcp_config
+            .acemcp_exclude_patterns
+            .clone()
+            .unwrap_or_default()
+    };
+    Ok(crate::mcp::tools::workspace::collapse_workspace_watch_roots(projects, &excludes))
 }
 
 /// 检查指定项目是否正在监听
@@ -2342,7 +2336,7 @@ pub fn is_project_watching(
 ) -> Result<bool, String> {
     let normalized_root = normalize_watch_project_path(&project_root_path);
     let watcher_manager = super::watcher::get_watcher_manager();
-    if watcher_manager.is_watching(&normalized_root) {
+    if watcher_manager.is_path_covered(&normalized_root) {
         return Ok(true);
     }
 
@@ -2350,13 +2344,28 @@ pub fn is_project_watching(
         .config
         .lock()
         .map_err(|e| format!("获取配置失败: {}", e))?;
-    Ok(config
+    let watched = config
         .mcp_config
         .acemcp_watched_projects
         .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .any(|path| normalize_watch_project_path(&path) == normalized_root))
+        .unwrap_or_default();
+    if watched
+        .iter()
+        .any(|path| normalize_watch_project_path(path) == normalized_root)
+    {
+        return Ok(true);
+    }
+    let excludes = config
+        .mcp_config
+        .acemcp_exclude_patterns
+        .clone()
+        .unwrap_or_default();
+    Ok(crate::mcp::tools::workspace::workspace_watch_covering_root(
+        &watched,
+        &normalized_root,
+        &excludes,
+    )
+    .is_some())
 }
 
 /// 启动项目文件监听
@@ -2381,7 +2390,13 @@ pub async fn start_project_watching(
             .clone()
             .unwrap_or_default();
         projects.push(normalized_root.clone());
-        config.mcp_config.acemcp_watched_projects = Some(normalize_project_list(projects));
+        let excludes = config
+            .mcp_config
+            .acemcp_exclude_patterns
+            .clone()
+            .unwrap_or_default();
+        config.mcp_config.acemcp_watched_projects =
+            Some(crate::mcp::tools::workspace::collapse_workspace_watch_roots(projects, &excludes));
     }
     save_config(&state, &app)
         .await
@@ -2398,11 +2413,18 @@ pub async fn stop_project_watching(
     app: AppHandle,
 ) -> Result<(), String> {
     let normalized_root = normalize_watch_project_path(&project_root_path);
-    {
+    let removed_roots = {
         let mut config = state
             .config
             .lock()
             .map_err(|e| format!("获取配置失败: {}", e))?;
+        let excludes = config
+            .mcp_config
+            .acemcp_exclude_patterns
+            .clone()
+            .unwrap_or_default();
+        let removed_roots =
+            crate::mcp::tools::workspace::workspace_watch_scope_roots(&normalized_root, &excludes);
         let projects = config
             .mcp_config
             .acemcp_watched_projects
@@ -2411,19 +2433,26 @@ pub async fn stop_project_watching(
         config.mcp_config.acemcp_watched_projects = Some(
             normalize_project_list(projects)
                 .into_iter()
-                .filter(|path| path != &normalized_root)
+                .filter(|path| {
+                    !removed_roots
+                        .iter()
+                        .any(|removed| normalized_paths_equal(path, removed))
+                })
                 .collect(),
         );
-    }
+        removed_roots
+    };
     save_config(&state, &app)
         .await
         .map_err(|e| format!("保存监听配置失败: {}", e))?;
     // 当前 GUI 进程可能存在旧版本启动的 watcher，停止本地副本避免配置页继续显示过期状态。
     let watcher_manager = super::watcher::get_watcher_manager();
-    if watcher_manager.is_watching(&normalized_root) {
-        watcher_manager
-            .stop_watching(&normalized_root)
-            .map_err(|e| e.to_string())?;
+    for root in &removed_roots {
+        if watcher_manager.is_watching(root) {
+            watcher_manager
+                .stop_watching(root)
+                .map_err(|e| e.to_string())?;
+        }
     }
     log_important!(info, "已移除 MCP 持久监听项目: {}", normalized_root);
     Ok(())
@@ -2494,34 +2523,6 @@ fn normalize_project_list(projects: Vec<String>) -> Vec<String> {
         }
     }
     normalized
-}
-
-/// 嵌套索引开启时只保留最外层根目录，由统一调度器负责拆分子项目，避免重复排队。
-fn collapse_nested_project_roots(projects: Vec<String>) -> Vec<String> {
-    let mut normalized = normalize_project_list(projects);
-    normalized.sort_by_key(|path| path.len());
-    let mut roots: Vec<String> = Vec::new();
-    for path in normalized {
-        let comparable_path = if cfg!(windows) {
-            path.to_ascii_lowercase()
-        } else {
-            path.clone()
-        };
-        let is_nested = roots.iter().any(|root| {
-            let comparable_root = if cfg!(windows) {
-                root.to_ascii_lowercase()
-            } else {
-                root.clone()
-            };
-            comparable_path
-                .strip_prefix(comparable_root.trim_end_matches('/'))
-                .is_some_and(|suffix| suffix.starts_with('/'))
-        });
-        if !is_nested {
-            roots.push(path);
-        }
-    }
-    roots
 }
 
 /// 清理指定项目的索引记录
@@ -2729,11 +2730,18 @@ pub async fn remove_acemcp_project_index(
 ) -> Result<String, String> {
     let normalized_root = normalize_path_key(&project_root_path);
     let result = purge_project_index_records(&normalized_root, true)?;
-    {
+    let removed_watch_roots = {
         let mut config = state
             .config
             .lock()
             .map_err(|error| format!("获取配置失败: {}", error))?;
+        let excludes = config
+            .mcp_config
+            .acemcp_exclude_patterns
+            .clone()
+            .unwrap_or_default();
+        let removed_watch_roots =
+            crate::mcp::tools::workspace::workspace_watch_scope_roots(&normalized_root, &excludes);
         let watched = config
             .mcp_config
             .acemcp_watched_projects
@@ -2742,7 +2750,11 @@ pub async fn remove_acemcp_project_index(
         config.mcp_config.acemcp_watched_projects = Some(
             watched
                 .into_iter()
-                .filter(|path| !normalized_paths_equal(path, &normalized_root))
+                .filter(|path| {
+                    !removed_watch_roots
+                        .iter()
+                        .any(|removed| normalized_paths_equal(path, removed))
+                })
                 .collect(),
         );
         let confirmed = config
@@ -2756,10 +2768,19 @@ pub async fn remove_acemcp_project_index(
                 .filter(|path| !normalized_paths_equal(path, &normalized_root))
                 .collect(),
         );
-    }
+        removed_watch_roots
+    };
     save_config(&state, &app)
         .await
         .map_err(|error| format!("保存项目清理结果失败: {}", error))?;
+    let watcher_manager = super::watcher::get_watcher_manager();
+    for root in removed_watch_roots {
+        if watcher_manager.is_watching(&root) {
+            watcher_manager
+                .stop_watching(&root)
+                .map_err(|error| error.to_string())?;
+        }
+    }
     Ok(result)
 }
 

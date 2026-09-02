@@ -840,7 +840,16 @@ pub fn status(
     let root = PathBuf::from(project_root)
         .canonicalize()
         .with_context(|| format!("本地索引项目路径无效: {}", project_root))?;
-    Ok(project_index(&root, &index_dir)?.status(&semantic_settings))
+    let cached = PROJECT_INDEXES
+        .lock()
+        .map_err(|_| anyhow!("本地索引管理器锁已损坏"))?
+        .get(&root)
+        .cloned();
+    if let Some(index) = cached {
+        return Ok(index.status(&semantic_settings));
+    }
+    let db_path = index_dir.join(format!("{}.sqlite3", project_hash(&root)));
+    Ok(ProjectIndex::new(root, db_path).status(&semantic_settings))
 }
 
 pub fn workspace_status(
@@ -854,7 +863,6 @@ pub fn workspace_status(
     if !layout.is_workspace {
         return status(project_root, index_dir, semantic_settings);
     }
-    archive_workspace_parent_index(&layout.root, &index_dir)?;
 
     let mut statuses = Vec::new();
     for project in &layout.projects {
@@ -1366,7 +1374,14 @@ fn inspect_existing_index(db_path: &Path) -> (u8, u64, u64, Option<String>) {
     if !db_path.is_file() {
         return (INDEX_MISSING, 0, 0, None);
     }
-    match open_database(db_path).and_then(|connection| index_counts(&connection)) {
+    let inspected = (|| -> Result<(u64, u64)> {
+        // 状态轮询只读既有数据库，schema 初始化由搜索和显式重建入口负责。
+        let connection = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .with_context(|| format!("只读打开本地索引失败: {}", db_path.display()))?;
+        connection.busy_timeout(Duration::from_millis(250))?;
+        index_counts(&connection)
+    })();
+    match inspected {
         Ok((files, chunks)) => (INDEX_READY, files, chunks, None),
         Err(error) => (INDEX_ERROR, 0, 0, Some(error.to_string())),
     }
@@ -2796,6 +2811,86 @@ mod tests {
         )
         .expect("更新后的索引查询应成功");
         assert_eq!(renamed.len(), 1);
+    }
+
+    #[test]
+    fn workspace_status_does_not_archive_legacy_parent_index() {
+        let temp = tempdir().expect("应创建临时目录");
+        let root = temp.path().join("workspace");
+        fs::create_dir_all(root.join("server/.git")).expect("应创建工作区子项目");
+        let canonical_root = root.canonicalize().expect("工作区路径应可规范化");
+        let index_dir = temp.path().join("indexes");
+        fs::create_dir_all(&index_dir).expect("应创建索引目录");
+        let parent_db = index_dir.join(format!("{}.sqlite3", project_hash(&canonical_root)));
+        fs::write(&parent_db, b"legacy-parent-index").expect("应写入遗留父索引");
+
+        let status = workspace_status(
+            &normalize_path(&canonical_root),
+            Vec::new(),
+            index_dir.clone(),
+            LocalSemanticSettings {
+                mode: LocalSemanticMode::Off,
+                model_dir: crate::mcp::embedding::default_model_dir(),
+                reranker_model_dir: crate::config::default_sou_reranker_model_dir(),
+            },
+        )
+        .expect("工作区状态读取应成功");
+
+        assert!(status.is_workspace);
+        assert!(parent_db.exists());
+        assert!(!index_dir.join("archive").exists());
+    }
+
+    #[test]
+    fn status_inspection_does_not_migrate_existing_database_schema() {
+        let temp = tempdir().expect("应创建状态只读测试目录");
+        let root = temp.path().join("project");
+        fs::create_dir_all(&root).expect("应创建状态只读测试项目");
+        let canonical_root = root.canonicalize().expect("项目路径应可规范化");
+        let index_dir = temp.path().join("indexes");
+        fs::create_dir_all(&index_dir).expect("应创建状态只读索引目录");
+        let db_path = index_dir.join(format!("{}.sqlite3", project_hash(&canonical_root)));
+        let connection = Connection::open(&db_path).expect("应创建最小旧版索引");
+        connection
+            .execute_batch(
+                "CREATE TABLE files (
+                    path TEXT PRIMARY KEY,
+                    modified_ns INTEGER NOT NULL,
+                    size INTEGER NOT NULL
+                );
+                CREATE VIRTUAL TABLE chunks USING fts5(
+                    path UNINDEXED,
+                    start_line UNINDEXED,
+                    end_line UNINDEXED,
+                    search_text,
+                    content UNINDEXED
+                );",
+            )
+            .expect("应创建旧版词法索引表");
+        drop(connection);
+
+        let inspected = status(
+            &normalize_path(&canonical_root),
+            index_dir,
+            LocalSemanticSettings {
+                mode: LocalSemanticMode::Off,
+                model_dir: crate::mcp::embedding::default_model_dir(),
+                reranker_model_dir: crate::config::default_sou_reranker_model_dir(),
+            },
+        )
+        .expect("状态查询应成功");
+
+        assert_eq!(inspected.state, "ready");
+        let connection = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("应只读复查旧版索引");
+        let semantic_table_count: u64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'chunk_vectors'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("应检查语义表是否存在");
+        assert_eq!(semantic_table_count, 0);
     }
 
     #[tokio::test]

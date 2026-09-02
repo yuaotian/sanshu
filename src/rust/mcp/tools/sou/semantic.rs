@@ -88,7 +88,10 @@ pub(super) fn inspect(db_path: &Path) -> Result<SemanticIndexStats> {
             pending_chunks: 0,
         });
     }
-    let connection = open_database(db_path)?;
+    // 状态查询只读取既有表，不触发 schema 迁移或 WAL 配置变更。
+    let connection = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("只读打开 sou 语义索引失败: {}", db_path.display()))?;
+    connection.busy_timeout(Duration::from_millis(250))?;
     let total = connection.query_row("SELECT COUNT(*) FROM chunks", [], |row| {
         row.get::<_, u64>(0)
     })?;

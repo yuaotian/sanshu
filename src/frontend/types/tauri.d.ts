@@ -23,6 +23,10 @@ export interface ProjectIndexStatus {
   is_workspace?: boolean
   workspace_project_count?: number
   workspace_children?: string[]
+  workspace_indexing_project_count?: number
+  workspace_paused_project_count?: number
+  workspace_failed_project_count?: number
+  workspace_resolution_error?: string | null
   project_root: string
   status: IndexStatus
   progress: number
@@ -48,6 +52,51 @@ export interface ProjectIndexStatus {
 
 export interface ProjectsIndexStatus {
   projects: Record<string, ProjectIndexStatus>
+}
+
+export interface LocalIndexScopeStatus {
+  name: string
+  relative_path: string
+  project_root: string
+  index_path: string
+  state: 'missing' | 'building' | 'ready' | 'partial' | 'error'
+  indexed_files: number
+  indexed_chunks: number
+  lexical_sync_running: boolean
+  pending_changes: boolean
+  semantic_state: 'disabled' | 'missing' | 'building' | 'syncing' | 'ready' | 'partial' | 'error'
+  semantic_indexed_chunks: number
+  semantic_pending_chunks: number
+  last_error?: string
+}
+
+export interface LocalIndexStatus {
+  is_workspace: boolean
+  project_count: number
+  scopes: LocalIndexScopeStatus[]
+  project_root: string
+  index_path: string
+  state: 'missing' | 'building' | 'ready' | 'partial' | 'error'
+  indexed_files: number
+  indexed_chunks: number
+  sync_running: boolean
+  lexical_sync_running: boolean
+  semantic_sync_running: boolean
+  pending_changes: boolean
+  last_error?: string
+  semantic_state: 'disabled' | 'missing' | 'building' | 'syncing' | 'ready' | 'partial' | 'error'
+  semantic_model?: string
+  semantic_indexed_chunks: number
+  semantic_pending_chunks: number
+  semantic_last_error?: string
+  semantic_requested_provider?: 'auto' | 'cuda' | 'cpu' | string
+  semantic_execution_provider?: 'cuda' | 'cpu' | string
+  semantic_provider_fallback_reason?: string
+  semantic_cuda_runtime_available?: boolean
+  semantic_cuda_runtime_dir?: string
+  semantic_cuda_runtime_error?: string
+  semantic_batch_size?: number
+  semantic_intra_threads?: number
 }
 
 // Acemcp 文件级索引状态类型定义

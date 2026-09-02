@@ -710,11 +710,24 @@ fn synthesize_workspace_statuses(all_status: &mut ProjectsIndexStatus) {
     roots.dedup();
 
     for root in roots {
-        let Ok(layout) =
-            crate::mcp::tools::workspace::resolve_workspace(Path::new(&root), &excludes)
-        else {
-            continue;
-        };
+        let layout =
+            match crate::mcp::tools::workspace::resolve_workspace(Path::new(&root), &excludes) {
+                Ok(layout) => layout,
+                Err(error) => {
+                    let normalized_root = normalize_project_path(&root);
+                    let status = all_status
+                        .projects
+                        .entry(normalized_root.clone())
+                        .or_insert_with(ProjectIndexStatus::default);
+                    status.project_root = normalized_root;
+                    status.status = IndexStatus::Failed;
+                    status.workspace_resolution_error = Some(error.to_string());
+                    if status.last_error.is_none() {
+                        status.last_error = Some(format!("工作区解析失败: {}", error));
+                    }
+                    continue;
+                }
+            };
         if !layout.is_workspace {
             continue;
         }
@@ -829,11 +842,27 @@ fn aggregate_workspace_project_status(
         .iter()
         .map(|(_, status)| status.project_root.clone())
         .collect::<Vec<_>>();
+    let workspace_indexing_project_count = children
+        .iter()
+        .filter(|(_, status)| status.status == IndexStatus::Indexing)
+        .count();
+    let workspace_paused_project_count = children
+        .iter()
+        .filter(|(_, status)| status.status == IndexStatus::Paused)
+        .count();
+    let workspace_failed_project_count = children
+        .iter()
+        .filter(|(_, status)| status.status == IndexStatus::Failed)
+        .count();
 
     ProjectIndexStatus {
         is_workspace: true,
         workspace_project_count: children.len(),
         workspace_children,
+        workspace_indexing_project_count,
+        workspace_paused_project_count,
+        workspace_failed_project_count,
+        workspace_resolution_error: None,
         project_root,
         status,
         progress,
@@ -868,6 +897,25 @@ fn aggregate_workspace_project_status(
             .iter()
             .find_map(|(_, status)| status.scope_risk.clone()),
     }
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceParentMigrationFile {
+    source: PathBuf,
+    backup: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceParentMigrationManifest {
+    version: u8,
+    project_root: String,
+    status: String,
+    prepared_at: chrono::DateTime<chrono::Utc>,
+    completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    backup_dir: PathBuf,
+    files: Vec<WorkspaceParentMigrationFile>,
+    local_archive: Option<PathBuf>,
+    error: Option<String>,
 }
 
 fn migrate_legacy_workspace_parent(
@@ -909,42 +957,89 @@ fn migrate_legacy_workspace_parent(
             uuid::Uuid::new_v4()
         ));
     fs::create_dir_all(&backup_dir)?;
-    for source in [
+    let files = [
         home_projects_file(),
         home_projects_status_file(),
         jobs::home_index_jobs_file(),
-    ] {
-        if source.exists() {
-            let file_name = source
-                .file_name()
-                .ok_or_else(|| anyhow::anyhow!("ACE 状态文件名无效: {}", source.display()))?;
-            fs::copy(&source, backup_dir.join(file_name))?;
-        }
-    }
+    ]
+    .into_iter()
+    .filter(|source| source.exists())
+    .map(|source| {
+        let file_name = source
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("ACE 状态文件名无效: {}", source.display()))?;
+        Ok(WorkspaceParentMigrationFile {
+            backup: backup_dir.join(file_name),
+            source,
+        })
+    })
+    .collect::<Result<Vec<_>>>()?;
+    let manifest_path = backup_dir.join("manifest.json");
+    let mut manifest = WorkspaceParentMigrationManifest {
+        version: 1,
+        project_root: normalized_root.clone(),
+        status: "prepared".to_string(),
+        prepared_at: chrono::Utc::now(),
+        completed_at: None,
+        backup_dir: backup_dir.clone(),
+        files,
+        local_archive: None,
+        error: None,
+    };
+    write_json_atomically(&manifest_path, &manifest)?;
 
-    let local_archive = crate::mcp::tools::sou::local::archive_workspace_parent_index(
-        &layout.root,
-        &local_index_dir,
-    )?;
-    {
-        let _guard = projects_file_lock()
-            .lock()
-            .map_err(|_| anyhow::anyhow!("获取 projects.json 写入锁失败"))?;
-        let mut projects = load_projects_file();
-        if projects.0.remove(&normalized_root).is_some() {
-            save_projects_file(&projects)?;
+    let migration_result = (|| -> Result<Option<PathBuf>> {
+        for file in &manifest.files {
+            fs::copy(&file.source, &file.backup)?;
         }
-    }
-    {
-        let _guard = projects_status_lock()
-            .lock()
-            .map_err(|_| anyhow::anyhow!("获取 projects_status.json 写入锁失败"))?;
-        let mut statuses = load_projects_status();
-        if statuses.projects.remove(&normalized_root).is_some() {
-            save_projects_status(&statuses)?;
+
+        let local_archive = crate::mcp::tools::sou::local::archive_workspace_parent_index(
+            &layout.root,
+            &local_index_dir,
+        )?;
+        {
+            let _guard = projects_file_lock()
+                .lock()
+                .map_err(|_| anyhow::anyhow!("获取 projects.json 写入锁失败"))?;
+            let mut projects = load_projects_file();
+            if projects.0.remove(&normalized_root).is_some() {
+                save_projects_file(&projects)?;
+            }
         }
-    }
-    jobs::remove_job(&normalized_root)?;
+        {
+            let _guard = projects_status_lock()
+                .lock()
+                .map_err(|_| anyhow::anyhow!("获取 projects_status.json 写入锁失败"))?;
+            let mut statuses = load_projects_status();
+            if statuses.projects.remove(&normalized_root).is_some() {
+                save_projects_status(&statuses)?;
+            }
+        }
+        jobs::remove_job(&normalized_root)?;
+        Ok(local_archive)
+    })();
+
+    let local_archive = match migration_result {
+        Ok(local_archive) => {
+            manifest.status = "completed".to_string();
+            manifest.completed_at = Some(chrono::Utc::now());
+            manifest.local_archive = local_archive.clone();
+            write_json_atomically(&manifest_path, &manifest)?;
+            local_archive
+        }
+        Err(error) => {
+            manifest.status = "failed".to_string();
+            manifest.error = Some(error.to_string());
+            if let Err(manifest_error) = write_json_atomically(&manifest_path, &manifest) {
+                log::warn!(
+                    "记录工作区父索引迁移失败状态时出错: manifest={}, error={}",
+                    manifest_path.display(),
+                    manifest_error
+                );
+            }
+            return Err(error);
+        }
+    };
     log_important!(
         info,
         "已迁移遗留工作区父索引: project_root={}, backup={}, local_archive={}",
@@ -1795,8 +1890,13 @@ where
 
 #[cfg(test)]
 mod retry_tests {
-    use super::{aggregate_workspace_project_status, is_retryable_request_error};
+    use super::{
+        aggregate_workspace_project_status, is_retryable_request_error, write_json_atomically,
+        WorkspaceParentMigrationFile, WorkspaceParentMigrationManifest,
+    };
     use crate::mcp::tools::acemcp::types::{IndexStatus, ProjectIndexStatus};
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn ace_sou_retries_tls_handshake_eof() {
@@ -1827,22 +1927,66 @@ mod retry_tests {
         indexing.total_files = 12;
         indexing.indexed_files = 6;
         indexing.pending_files = 6;
+        let mut failed = ProjectIndexStatus::default();
+        failed.project_root = "D:/workspace/debt-business".to_string();
+        failed.status = IndexStatus::Failed;
+        failed.last_error = Some("上传失败".to_string());
 
         let status = aggregate_workspace_project_status(
             "D:/workspace".to_string(),
             vec![
                 ("admin-ui".to_string(), ready),
                 ("server".to_string(), indexing),
+                ("debt-business".to_string(), failed),
             ],
         );
 
         assert!(status.is_workspace);
-        assert_eq!(status.workspace_project_count, 2);
+        assert_eq!(status.workspace_project_count, 3);
+        assert_eq!(status.workspace_indexing_project_count, 1);
+        assert_eq!(status.workspace_failed_project_count, 1);
         assert_eq!(status.status, IndexStatus::Indexing);
         assert_eq!(status.total_files, 20);
         assert_eq!(status.indexed_files, 14);
         assert_eq!(status.progress, 70);
         assert!(status.job_id.is_none());
+    }
+
+    #[test]
+    fn workspace_migration_manifest_keeps_prepared_and_completed_states() {
+        let temp = tempdir().expect("应创建迁移测试目录");
+        let manifest_path = temp.path().join("manifest.json");
+        let mut manifest = WorkspaceParentMigrationManifest {
+            version: 1,
+            project_root: "D:/workspace".to_string(),
+            status: "prepared".to_string(),
+            prepared_at: chrono::Utc::now(),
+            completed_at: None,
+            backup_dir: temp.path().to_path_buf(),
+            files: vec![WorkspaceParentMigrationFile {
+                source: temp.path().join("projects.json"),
+                backup: temp.path().join("backup/projects.json"),
+            }],
+            local_archive: None,
+            error: None,
+        };
+        write_json_atomically(&manifest_path, &manifest).expect("应写入 prepared manifest");
+        let prepared: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&manifest_path).expect("应读取 prepared manifest"),
+        )
+        .expect("prepared manifest 应为 JSON");
+        assert_eq!(prepared["status"], "prepared");
+
+        manifest.status = "completed".to_string();
+        manifest.completed_at = Some(chrono::Utc::now());
+        write_json_atomically(&manifest_path, &manifest).expect("应写入 completed manifest");
+
+        let completed: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&manifest_path).expect("应读取 completed manifest"),
+        )
+        .expect("completed manifest 应为 JSON");
+        assert_eq!(completed["status"], "completed");
+        assert!(completed["completed_at"].is_string());
     }
 }
 

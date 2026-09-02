@@ -285,6 +285,15 @@ impl WatcherManager {
             anyhow::bail!("项目索引范围存在风险，已暂停文件监听: {}", normalized_root);
         }
 
+        if let Some(parent_root) = self.covering_workspace_root(&normalized_root) {
+            log_debug!(
+                "项目 {} 已由工作区 {} 覆盖，跳过重复监听",
+                normalized_root,
+                parent_root
+            );
+            return Ok(());
+        }
+
         // 检查是否已经在监听
         {
             let watchers = self.watchers.lock().unwrap();
@@ -456,30 +465,33 @@ impl WatcherManager {
             .copied()
             .unwrap_or(false);
 
-        let desired: HashSet<String> = if sou_enabled {
+        let desired_roots = if sou_enabled {
             config
                 .mcp_config
                 .acemcp_watched_projects
                 .clone()
                 .unwrap_or_default()
-                .into_iter()
-                .map(|path| {
-                    normalize_project_path(
-                        &PathBuf::from(&path)
-                            .canonicalize()
-                            .unwrap_or_else(|_| PathBuf::from(&path))
-                            .to_string_lossy(),
-                    )
-                })
-                .collect()
         } else {
-            HashSet::new()
+            Vec::new()
         };
+        let excludes = config
+            .mcp_config
+            .acemcp_exclude_patterns
+            .clone()
+            .unwrap_or_default();
+        let desired: HashSet<String> =
+            crate::mcp::tools::workspace::collapse_workspace_watch_roots(desired_roots, &excludes)
+                .into_iter()
+                .collect();
 
         let current: HashSet<String> = self.get_watching_projects().into_iter().collect();
         let previous_persisted = { self.persisted_watch_roots.lock().unwrap().clone() };
 
         for project_root in desired.difference(&current) {
+            if self.is_path_covered(project_root) {
+                log_debug!("持久监听项目已被工作区覆盖，跳过重复启动: {}", project_root);
+                continue;
+            }
             let acemcp_config = match super::mcp::AcemcpTool::get_acemcp_config().await {
                 Ok(config) => config,
                 Err(e) => {
@@ -509,6 +521,26 @@ impl WatcherManager {
                     project_root,
                     e
                 ),
+            }
+        }
+
+        // 父工作区接管后清理旧配置或临时搜索遗留的子 watcher，避免同一文件事件被处理两次。
+        let current_after_start: HashSet<String> =
+            self.get_watching_projects().into_iter().collect();
+        for project_root in current_after_start.difference(&desired) {
+            let covered_by_desired = self
+                .covering_workspace_root(project_root)
+                .is_some_and(|parent| desired.contains(&parent));
+            if covered_by_desired {
+                if let Err(error) = self.stop_watching(project_root) {
+                    log_debug!(
+                        "停止工作区重叠子监听失败: project={}, error={}",
+                        project_root,
+                        error
+                    );
+                } else {
+                    log_important!(info, "已停止工作区重叠子监听: {}", project_root);
+                }
             }
         }
 
@@ -554,12 +586,27 @@ impl WatcherManager {
         if self.watchers.lock().unwrap().contains_key(&normalized_root) {
             return true;
         }
+        self.covering_workspace_root(&normalized_root).is_some()
+    }
+
+    /// 返回实际覆盖子项目的父工作区根；精确 watcher 不视为继承覆盖。
+    pub fn covering_workspace_root(&self, project_root: &str) -> Option<String> {
+        let normalized_root = normalize_project_path(
+            &PathBuf::from(project_root)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(project_root))
+                .to_string_lossy(),
+        );
         self.nested_project_map
             .lock()
             .unwrap()
-            .values()
-            .flatten()
-            .any(|project| project.absolute_path == normalized_root)
+            .iter()
+            .find_map(|(parent, projects)| {
+                projects
+                    .iter()
+                    .any(|project| project.absolute_path == normalized_root)
+                    .then(|| parent.clone())
+            })
     }
 }
 
@@ -864,6 +911,25 @@ mod tests {
         let paths = vec![PathBuf::from("C:/proj/src/main.rs")];
         let res = WatcherManager::determine_affected_projects(parent, &paths, &nested);
         assert!(res.is_empty());
+    }
+
+    #[test]
+    fn workspace_parent_reports_child_as_inherited_coverage() {
+        let manager = WatcherManager::new();
+        manager.nested_project_map.lock().unwrap().insert(
+            "C:/workspace".to_string(),
+            vec![NestedWatchInfo {
+                absolute_path: "C:/workspace/server".to_string(),
+                relative_path: "server".to_string(),
+            }],
+        );
+
+        assert_eq!(
+            manager.covering_workspace_root("C:/workspace/server"),
+            Some("C:/workspace".to_string())
+        );
+        assert!(manager.is_path_covered("C:/workspace/server"));
+        assert!(!manager.is_path_covered("C:/workspace/admin-ui"));
     }
 
     #[test]

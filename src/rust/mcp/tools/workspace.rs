@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -118,7 +119,107 @@ pub(crate) fn resolve_workspace(root: &Path, user_excludes: &[String]) -> Result
 }
 
 pub(crate) fn normalize_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    let mut normalized = path.to_string_lossy().replace('\\', "/");
+    if normalized.starts_with("//?/") {
+        normalized.drain(..4);
+    }
+    normalized
+}
+
+/// 仅折叠由非 Git 工作区父根明确覆盖的子项目，避免父子 watcher 重复监听。
+pub(crate) fn collapse_workspace_watch_roots(
+    roots: Vec<String>,
+    user_excludes: &[String],
+) -> Vec<String> {
+    let mut normalized_roots = Vec::new();
+    let mut seen = HashSet::new();
+    for root in roots {
+        let trimmed = root.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let path = PathBuf::from(trimmed);
+        let canonical = path.canonicalize().unwrap_or(path);
+        let normalized = normalize_path(&canonical);
+        if seen.insert(path_key(&normalized)) {
+            normalized_roots.push(normalized);
+        }
+    }
+
+    let mut covered_children = HashSet::new();
+    for root in &normalized_roots {
+        let Ok(layout) = resolve_workspace(Path::new(root), user_excludes) else {
+            continue;
+        };
+        if !layout.is_workspace {
+            continue;
+        }
+        covered_children.extend(
+            layout
+                .projects
+                .iter()
+                .map(|project| path_key(&normalize_path(&project.root))),
+        );
+    }
+
+    normalized_roots.retain(|root| !covered_children.contains(&path_key(root)));
+    normalized_roots.sort_by_key(|root| path_key(root));
+    normalized_roots
+}
+
+pub(crate) fn workspace_watch_covering_root(
+    roots: &[String],
+    project_root: &str,
+    user_excludes: &[String],
+) -> Option<String> {
+    let project_path = PathBuf::from(project_root);
+    let project_path = project_path.canonicalize().unwrap_or(project_path);
+    let project_key = path_key(&normalize_path(&project_path));
+    for root in roots {
+        let Ok(layout) = resolve_workspace(Path::new(root), user_excludes) else {
+            continue;
+        };
+        if layout.is_workspace
+            && layout
+                .projects
+                .iter()
+                .any(|project| path_key(&normalize_path(&project.root)) == project_key)
+        {
+            return Some(normalize_path(&layout.root));
+        }
+    }
+    None
+}
+
+pub(crate) fn workspace_watch_scope_roots(
+    project_root: &str,
+    user_excludes: &[String],
+) -> Vec<String> {
+    let path = PathBuf::from(project_root);
+    let path = path.canonicalize().unwrap_or(path);
+    let normalized_root = normalize_path(&path);
+    let Ok(layout) = resolve_workspace(&path, user_excludes) else {
+        return vec![normalized_root];
+    };
+    if !layout.is_workspace {
+        return vec![normalized_root];
+    }
+    let mut roots = vec![normalize_path(&layout.root)];
+    roots.extend(
+        layout
+            .projects
+            .iter()
+            .map(|project| normalize_path(&project.root)),
+    );
+    roots
+}
+
+fn path_key(path: &str) -> String {
+    if cfg!(windows) {
+        path.to_ascii_lowercase()
+    } else {
+        path.to_string()
+    }
 }
 
 fn single_project_layout(root: PathBuf) -> WorkspaceLayout {
@@ -228,5 +329,50 @@ mod tests {
 
         assert_eq!(layout.projects.len(), 1);
         assert_eq!(layout.projects[0].relative_path, "included");
+    }
+
+    #[test]
+    fn workspace_watch_roots_keep_only_the_routing_parent() {
+        let temp = tempdir().expect("应创建临时目录");
+        let mut roots = Vec::new();
+        for project in ["admin-ui", "debt-business", "server"] {
+            let root = temp.path().join(project);
+            fs::create_dir_all(root.join(".git")).expect("应创建子项目 Git 标记");
+            roots.push(normalize_path(&root));
+        }
+        roots.push(normalize_path(temp.path()));
+
+        let collapsed = collapse_workspace_watch_roots(roots, &[]);
+
+        assert_eq!(collapsed, vec![normalize_path(temp.path())]);
+        assert_eq!(
+            workspace_watch_covering_root(
+                &[normalize_path(temp.path())],
+                &normalize_path(&temp.path().join("server")),
+                &[],
+            ),
+            Some(normalize_path(temp.path()))
+        );
+        assert_eq!(
+            workspace_watch_scope_roots(&normalize_path(temp.path()), &[]).len(),
+            4
+        );
+    }
+
+    #[test]
+    fn git_parent_does_not_hide_an_independent_nested_watch_root() {
+        let temp = tempdir().expect("应创建临时目录");
+        fs::create_dir_all(temp.path().join(".git")).expect("应创建父项目 Git 标记");
+        let nested = temp.path().join("vendor/nested");
+        fs::create_dir_all(nested.join(".git")).expect("应创建嵌套项目 Git 标记");
+
+        let collapsed = collapse_workspace_watch_roots(
+            vec![normalize_path(temp.path()), normalize_path(&nested)],
+            &[],
+        );
+
+        assert_eq!(collapsed.len(), 2);
+        assert!(collapsed.contains(&normalize_path(temp.path())));
+        assert!(collapsed.contains(&normalize_path(&nested)));
     }
 }

@@ -5,6 +5,7 @@ import { computed } from 'vue'
 interface Props {
   project: ProjectIndexStatus
   isWatching: boolean
+  watchInherited?: boolean
   // 目录是否存在
   directoryExists?: boolean
 }
@@ -21,6 +22,7 @@ interface Emits {
 
 const props = withDefaults(defineProps<Props>(), {
   directoryExists: true,
+  watchInherited: false,
 })
 const emit = defineEmits<Emits>()
 
@@ -30,6 +32,8 @@ const staleNotice = computed(() => {
     return ''
   return props.project.stale_reason || '检测到 ACE 配置已变更，等待重新索引'
 })
+const workspaceResolutionNotice = computed(() => props.project.workspace_resolution_error || '')
+const deleteActionLabel = computed(() => props.project.is_workspace ? '移除工作区监听与聚合视图' : '删除索引记录')
 
 // 状态配置映射
 const statusConfig = computed(() => {
@@ -217,6 +221,26 @@ function formatAbsoluteTime(timeStr: string | null): string {
         <span>{{ staleNotice }}</span>
       </div>
 
+      <div v-if="workspaceResolutionNotice" class="resolution-error-section">
+        <div class="i-carbon-warning-filled stale-section__icon" />
+        <span>工作区解析失败：{{ workspaceResolutionNotice }}</span>
+      </div>
+
+      <div
+        v-if="project.is_workspace && ((project.workspace_indexing_project_count || 0) > 0 || (project.workspace_paused_project_count || 0) > 0 || (project.workspace_failed_project_count || 0) > 0)"
+        class="workspace-health"
+      >
+        <n-tag v-if="(project.workspace_indexing_project_count || 0) > 0" size="small" :bordered="false" type="info">
+          {{ project.workspace_indexing_project_count }} 个索引中
+        </n-tag>
+        <n-tag v-if="(project.workspace_paused_project_count || 0) > 0" size="small" :bordered="false" type="warning">
+          {{ project.workspace_paused_project_count }} 个等待恢复
+        </n-tag>
+        <n-tag v-if="(project.workspace_failed_project_count || 0) > 0" size="small" :bordered="false" type="error">
+          {{ project.workspace_failed_project_count }} 个失败
+        </n-tag>
+      </div>
+
       <div v-if="recentIndexedFiles.length > 0" class="recent-files-section">
         <div class="recent-files-header">
           <div class="i-carbon-upload text-green-500" />
@@ -312,6 +336,7 @@ function formatAbsoluteTime(timeStr: string | null): string {
               <n-switch
                 :value="isWatching"
                 size="small"
+                :disabled="watchInherited"
                 @update:value="emit('toggle-watching')"
               >
                 <template #checked>
@@ -321,10 +346,10 @@ function formatAbsoluteTime(timeStr: string | null): string {
                   <div class="i-carbon-view-off text-[10px]" />
                 </template>
               </n-switch>
-              <span class="watch-label">监听</span>
+              <span class="watch-label">{{ watchInherited ? '工作区监听' : '监听' }}</span>
             </div>
           </template>
-          {{ isWatching ? '停止 MCP 持久监听' : '开启 MCP 持久监听' }}
+          {{ watchInherited ? '由父工作区统一监听并路由到当前子项目' : isWatching ? '停止 MCP 持久监听' : '开启 MCP 持久监听' }}
         </n-tooltip>
 
         <div class="flex-1" />
@@ -370,7 +395,7 @@ function formatAbsoluteTime(timeStr: string | null): string {
               </template>
             </n-button>
           </template>
-          删除索引记录
+          {{ deleteActionLabel }}
         </n-tooltip>
       </div>
     </div>
@@ -502,6 +527,31 @@ function formatAbsoluteTime(timeStr: string | null): string {
 .stale-section__icon {
   flex-shrink: 0;
   margin-top: 1px;
+}
+
+.resolution-error-section {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid rgba(239, 68, 68, 0.24);
+  border-radius: 8px;
+  color: #b91c1c;
+  background: rgba(239, 68, 68, 0.1);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+:root.dark .resolution-error-section {
+  border-color: rgba(248, 113, 113, 0.3);
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.16);
+}
+
+.workspace-health {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 :root.dark .stale-section {

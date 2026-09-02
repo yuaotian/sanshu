@@ -3,7 +3,7 @@
  * 代码搜索工具 (Acemcp/Sou) 配置组件
  * 包含：基础配置、高级配置、日志调试、索引管理
  */
-import type { IndexStatus, ProjectIndexStatus, ProjectsIndexStatus } from '../../types/tauri'
+import type { IndexStatus, LocalIndexStatus, ProjectIndexStatus, ProjectsIndexStatus } from '../../types/tauri'
 import type { ProxyConfig } from '../../composables/useProxyConfig'
 import type { RerankerDownloadSelection } from '../../types/rerankerDownload'
 import { invoke } from '@tauri-apps/api/core'
@@ -48,8 +48,6 @@ const config = ref({
   proxy_type: 'http' as 'http' | 'https' | 'socks5',
   proxy_username: '',
   proxy_password: '',
-  // 嵌套项目索引配置
-  index_nested_projects: true, // 是否自动索引嵌套的 Git 子项目（默认启用）
   // sou 多后端配置
   sou_default_backend: 'auto' as 'auto' | 'ace' | 'fast_context' | 'local' | 'both',
   sou_auto_order: ['ace', 'fast_context', 'local'] as string[],
@@ -130,51 +128,6 @@ interface DebugSearchResult {
   reranker_duration_ms?: number
   reranker_top_score?: number
   fusion?: string
-}
-
-interface LocalIndexScopeStatus {
-  name: string
-  relative_path: string
-  project_root: string
-  index_path: string
-  state: 'missing' | 'building' | 'ready' | 'partial' | 'error'
-  indexed_files: number
-  indexed_chunks: number
-  lexical_sync_running: boolean
-  pending_changes: boolean
-  semantic_state: 'disabled' | 'missing' | 'building' | 'syncing' | 'ready' | 'partial' | 'error'
-  semantic_indexed_chunks: number
-  semantic_pending_chunks: number
-  last_error?: string
-}
-
-interface LocalIndexStatus {
-  is_workspace: boolean
-  project_count: number
-  scopes: LocalIndexScopeStatus[]
-  project_root: string
-  index_path: string
-  state: 'missing' | 'building' | 'ready' | 'partial' | 'error'
-  indexed_files: number
-  indexed_chunks: number
-  sync_running: boolean
-  lexical_sync_running: boolean
-  semantic_sync_running: boolean
-  pending_changes: boolean
-  last_error?: string
-  semantic_state: 'disabled' | 'missing' | 'building' | 'syncing' | 'ready' | 'partial' | 'error'
-  semantic_model?: string
-  semantic_indexed_chunks: number
-  semantic_pending_chunks: number
-  semantic_last_error?: string
-  semantic_requested_provider?: 'auto' | 'cuda' | 'cpu' | string
-  semantic_execution_provider?: 'cuda' | 'cpu' | string
-  semantic_provider_fallback_reason?: string
-  semantic_cuda_runtime_available?: boolean
-  semantic_cuda_runtime_dir?: string
-  semantic_cuda_runtime_error?: string
-  semantic_batch_size?: number
-  semantic_intra_threads?: number
 }
 
 interface EmbeddingModelStatus {
@@ -1136,8 +1089,6 @@ async function loadAcemcpConfig() {
       proxy_type: res.proxy_type || 'http',
       proxy_username: res.proxy_username || '',
       proxy_password: res.proxy_password || '',
-      // 嵌套项目索引配置
-      index_nested_projects: res.index_nested_projects ?? true,
       // sou 多后端配置
       sou_default_backend: res.sou_default_backend || 'auto',
       sou_auto_order: souAutoOrder,
@@ -1287,8 +1238,6 @@ async function saveConfig(showFeedback = true): Promise<boolean> {
         proxyType: config.value.proxy_type,
         proxyUsername: config.value.proxy_username,
         proxyPassword: config.value.proxy_password,
-        // 嵌套项目索引配置
-        indexNestedProjects: config.value.index_nested_projects,
         // sou 多后端配置
         souDefaultBackend: config.value.sou_default_backend,
         souAutoOrder: config.value.sou_auto_order,

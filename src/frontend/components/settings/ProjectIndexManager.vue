@@ -31,6 +31,13 @@ function normalizePath(path: string): string {
   return p.replace(/\\/g, '/')
 }
 
+function pathKey(path: string): string {
+  const normalized = normalizePath(path)
+  return /^[A-Z]:\//i.test(normalized) || normalized.startsWith('//')
+    ? normalized.toLowerCase()
+    : normalized
+}
+
 // 本地状态
 const loading = ref(true)
 const allProjects = ref<Record<string, ProjectIndexStatus>>({})
@@ -177,11 +184,30 @@ const projectList = computed(() => {
   return list
 })
 
+const watchingProjectKeys = computed(() => new Set(watchingProjects.value.map(pathKey)))
+
+function isProjectWatching(project: ProjectIndexStatus): boolean {
+  if (watchingProjectKeys.value.has(pathKey(project.project_root)))
+    return true
+  return isProjectWatchInherited(project)
+}
+
+function isProjectWatchInherited(project: ProjectIndexStatus): boolean {
+  const projectKey = pathKey(project.project_root)
+  return Object.values(allProjects.value).some((workspace) => {
+    return !!workspace.is_workspace
+      && watchingProjectKeys.value.has(pathKey(workspace.project_root))
+      && (workspace.workspace_children || []).some(child => pathKey(child) === projectKey)
+  })
+}
+
 // 统计信息
 const stats = computed(() => {
-  const projects = Object.values(allProjects.value)
+  const allEntries = Object.values(allProjects.value)
+  const projects = allEntries.filter(project => !project.is_workspace)
   return {
     total: projects.length,
+    workspaces: allEntries.filter(project => project.is_workspace).length,
     indexing: projects.filter(p => p.status === 'indexing').length,
     paused: projects.filter(p => p.status === 'paused').length,
     stale: projects.filter(p => p.is_stale && p.status !== 'indexing').length,
@@ -293,7 +319,7 @@ async function copyPath(path: string) {
     await navigator.clipboard.writeText(path)
     message.success('路径已复制到剪贴板')
   }
-  catch (err) {
+  catch {
     message.error('复制失败')
   }
 }
@@ -302,7 +328,7 @@ async function copyPath(path: string) {
 async function toggleWatching(projectRoot: string) {
   // 规范化路径，去除 Windows 扩展前缀
   const normalizedPath = normalizePath(projectRoot)
-  const currentlyWatching = watchingProjects.value.some(p => normalizePath(p) === normalizedPath)
+  const currentlyWatching = watchingProjectKeys.value.has(pathKey(normalizedPath))
   try {
     if (currentlyWatching) {
       await invoke('stop_project_watching', { projectRootPath: normalizedPath })
@@ -374,15 +400,16 @@ async function handleDrawerResync() {
 // 检测目录是否存在
 async function checkDirectoryExists(projectRoot: string): Promise<boolean> {
   const normalizedPath = normalizePath(projectRoot)
+  const cacheKey = pathKey(normalizedPath)
   // 优先使用缓存
-  if (normalizedPath in directoryExistsCache.value) {
-    return directoryExistsCache.value[normalizedPath]
+  if (cacheKey in directoryExistsCache.value) {
+    return directoryExistsCache.value[cacheKey]
   }
   try {
     const exists = await invoke<boolean>('check_directory_exists', {
       directoryPath: normalizedPath,
     })
-    directoryExistsCache.value[normalizedPath] = exists
+    directoryExistsCache.value[cacheKey] = exists
     return exists
   }
   catch (err) {
@@ -401,20 +428,22 @@ async function checkAllDirectoriesExist() {
     }),
   )
   results.forEach(({ projectRoot, exists }) => {
-    const normalizedPath = normalizePath(projectRoot)
-    directoryExistsCache.value[normalizedPath] = exists
+    directoryExistsCache.value[pathKey(projectRoot)] = exists
   })
 }
 
 // 删除项目索引记录（带二次确认）
-function handleDeleteProject(projectRoot: string) {
-  const normalizedPath = normalizePath(projectRoot)
+function handleDeleteProject(project: ProjectIndexStatus) {
+  const normalizedPath = normalizePath(project.project_root)
   const projectName = normalizedPath.split('/').pop() || normalizedPath
+  const isWorkspace = !!project.is_workspace
 
   dialog.warning({
-    title: '确认删除',
-    content: `确定要删除项目索引记录吗？\n\n项目: ${projectName}\n路径: ${normalizedPath}\n\n此操作将从列表中移除该项目，不会删除实际文件。`,
-    positiveText: '删除',
+    title: isWorkspace ? '确认移除工作区' : '确认删除',
+    content: isWorkspace
+      ? `确定要移除工作区监听与聚合视图吗？\n\n工作区: ${projectName}\n路径: ${normalizedPath}\n\n该工作区下的持久监听会一并移除；子项目索引记录和实际文件都会保留。`
+      : `确定要删除项目索引记录吗？\n\n项目: ${projectName}\n路径: ${normalizedPath}\n\n此操作将从列表中移除该项目，不会删除实际文件。`,
+    positiveText: isWorkspace ? '移除' : '删除',
     negativeText: '取消',
     onPositiveClick: async () => {
       try {
@@ -423,9 +452,9 @@ function handleDeleteProject(projectRoot: string) {
           projectRootPath: normalizedPath,
         })
         console.debug('[handleDeleteProject] 删除命令执行结果:', result)
-        message.success('已删除项目索引记录')
+        message.success(isWorkspace ? '已移除工作区监听与聚合视图' : '已删除项目索引记录')
         // 从本地缓存中移除
-        delete directoryExistsCache.value[normalizedPath]
+        delete directoryExistsCache.value[pathKey(normalizedPath)]
         // 刷新列表
         console.debug('[handleDeleteProject] 开始刷新列表')
         await loadAllData()
@@ -441,9 +470,8 @@ function handleDeleteProject(projectRoot: string) {
 
 // 获取指定项目的目录存在状态
 function getDirectoryExists(projectRoot: string): boolean {
-  const normalizedPath = normalizePath(projectRoot)
   // 如果还没检测过，默认返回 true
-  return directoryExistsCache.value[normalizedPath] ?? true
+  return directoryExistsCache.value[pathKey(projectRoot)] ?? true
 }
 </script>
 
@@ -456,6 +484,10 @@ function getDirectoryExists(projectRoot: string): boolean {
         <div class="stat-chip">
           <div class="i-carbon-folder" />
           <span>{{ stats.total }} 个项目</span>
+        </div>
+        <div v-if="stats.workspaces > 0" class="stat-chip">
+          <div class="i-carbon-folder-details" />
+          <span>{{ stats.workspaces }} 个工作区</span>
         </div>
         <div v-if="stats.indexing > 0" class="stat-chip is-indexing">
           <div class="i-carbon-in-progress animate-spin" />
@@ -557,13 +589,14 @@ function getDirectoryExists(projectRoot: string): boolean {
         v-for="project in projectList"
         :key="project.project_root"
         :project="project"
-        :is-watching="watchingProjects.includes(project.project_root)"
+        :is-watching="isProjectWatching(project)"
+        :watch-inherited="isProjectWatchInherited(project)"
         :directory-exists="getDirectoryExists(project.project_root)"
         @view-tree="viewProjectTree(project.project_root)"
         @reindex="handleReindex(project.project_root)"
         @toggle-watching="toggleWatching(project.project_root)"
         @copy-path="copyPath"
-        @delete="handleDeleteProject(project.project_root)"
+        @delete="handleDeleteProject(project)"
       />
     </div>
 

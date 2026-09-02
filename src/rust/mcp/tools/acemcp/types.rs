@@ -97,6 +97,18 @@ pub struct ProjectIndexStatus {
     /// 工作区子项目根路径；单项目为空。
     #[serde(default)]
     pub workspace_children: Vec<String>,
+    /// 工作区中正在索引的子项目数量。
+    #[serde(default)]
+    pub workspace_indexing_project_count: usize,
+    /// 工作区中等待恢复的子项目数量。
+    #[serde(default)]
+    pub workspace_paused_project_count: usize,
+    /// 工作区中失败的子项目数量。
+    #[serde(default)]
+    pub workspace_failed_project_count: usize,
+    /// 工作区发现或路径解析失败原因。
+    #[serde(default)]
+    pub workspace_resolution_error: Option<String>,
     /// 项目根路径（规范化后）
     pub project_root: String,
     /// 当前索引状态
@@ -158,6 +170,10 @@ impl Default for ProjectIndexStatus {
             is_workspace: false,
             workspace_project_count: 0,
             workspace_children: Vec::new(),
+            workspace_indexing_project_count: 0,
+            workspace_paused_project_count: 0,
+            workspace_failed_project_count: 0,
+            workspace_resolution_error: None,
             project_root: String::new(),
             status: IndexStatus::Idle,
             progress: 0,
