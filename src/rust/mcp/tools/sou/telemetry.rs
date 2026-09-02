@@ -301,7 +301,9 @@ fn query_nvidia_smi() -> Result<GpuSnapshot, String> {
     if !output.status.success() {
         return Err("nvidia-smi 未返回可用 GPU 指标".to_string());
     }
-    let line = String::from_utf8_lossy(&output.stdout)
+    // line 与后续字段切片会持续借用解码结果，因此需将其保留到解析结束。
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
         .lines()
         .find(|value| !value.trim().is_empty())
         .ok_or_else(|| "nvidia-smi 输出为空".to_string())?;
