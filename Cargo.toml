@@ -93,7 +93,9 @@ tiny-skia = "0.11"
 tauri-build = { version = "2.0", features = [] }
 
 [features]
-default = []
+default = ["cuda"]
+# CUDA 仅启用 ORT 的动态 provider 接口；运行时 DLL 仍由用户机器或应用数据目录提供。
+cuda = ["ort/cuda"]
 # 使用 tauri 的 custom-protocol，避免依赖 devUrl 加载前端资源
 custom-protocol = [ "tauri/custom-protocol" ]
 

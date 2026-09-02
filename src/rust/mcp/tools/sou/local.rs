@@ -151,6 +151,13 @@ pub struct LocalIndexStatus {
     pub semantic_indexed_chunks: u64,
     pub semantic_pending_chunks: u64,
     pub semantic_last_error: Option<String>,
+    pub semantic_requested_provider: String,
+    pub semantic_execution_provider: String,
+    pub semantic_provider_fallback_reason: Option<String>,
+    pub semantic_cuda_runtime_available: bool,
+    pub semantic_cuda_runtime_dir: Option<String>,
+    pub semantic_batch_size: usize,
+    pub semantic_intra_threads: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -267,6 +274,7 @@ impl ProjectIndex {
     }
 
     fn status(&self, semantic_settings: &LocalSemanticSettings) -> LocalIndexStatus {
+        let embedding_snapshot = crate::mcp::embedding::snapshot(&semantic_settings.model_dir);
         LocalIndexStatus {
             project_root: normalize_path(&self.root),
             index_path: normalize_path(&self.db_path),
@@ -287,6 +295,16 @@ impl ProjectIndex {
                 .lock()
                 .ok()
                 .and_then(|value| value.clone()),
+            semantic_requested_provider: embedding_snapshot.requested_provider,
+            semantic_execution_provider: embedding_snapshot.execution_provider,
+            semantic_provider_fallback_reason: embedding_snapshot.provider_fallback_reason,
+            semantic_cuda_runtime_available: embedding_snapshot.cuda_runtime_available,
+            semantic_cuda_runtime_dir: embedding_snapshot
+                .cuda_runtime_dir
+                .as_deref()
+                .map(normalize_path),
+            semantic_batch_size: embedding_snapshot.batch_size,
+            semantic_intra_threads: embedding_snapshot.intra_threads,
         }
     }
 }
@@ -422,7 +440,10 @@ async fn search_with_index(
         } else {
             Instant::now() + Duration::from_secs(2)
         };
-        if !crate::mcp::embedding::assets_have_expected_sizes(&options.semantic.model_dir) {
+        if !crate::mcp::embedding::assets_available_for_provider(
+            &options.semantic.model_dir,
+            crate::mcp::embedding::configured_provider(),
+        ) {
             index
                 .semantic_state
                 .store(SEMANTIC_MISSING, Ordering::Release);
@@ -832,7 +853,10 @@ fn sync_all(
             .semantic_state
             .store(SEMANTIC_DISABLED, Ordering::Release);
         SemanticSyncOutcome::Disabled
-    } else if !crate::mcp::embedding::assets_have_expected_sizes(&semantic_settings.model_dir) {
+    } else if !crate::mcp::embedding::assets_available_for_provider(
+        &semantic_settings.model_dir,
+        crate::mcp::embedding::configured_provider(),
+    ) {
         SemanticSyncOutcome::Missing("BGE 模型资产未就绪".to_string())
     } else {
         index

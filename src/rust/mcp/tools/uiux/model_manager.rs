@@ -100,6 +100,22 @@ pub struct UiuxModelStatus {
     pub runtime_dir: String,
     pub runtime_downloaded_bytes: u64,
     pub runtime_total_bytes: u64,
+    #[serde(default)]
+    pub requested_provider: String,
+    #[serde(default)]
+    pub execution_provider: String,
+    #[serde(default)]
+    pub provider_fallback_reason: Option<String>,
+    #[serde(default)]
+    pub cuda_runtime_available: bool,
+    #[serde(default)]
+    pub cuda_runtime_dir: Option<String>,
+    #[serde(default)]
+    pub runtime_path: Option<String>,
+    #[serde(default)]
+    pub batch_size: usize,
+    #[serde(default)]
+    pub intra_threads: Option<usize>,
     pub indexed_documents: usize,
     pub total_documents: usize,
     pub progress_percent: f64,
@@ -505,6 +521,11 @@ fn rank_documents_blocking(
 
 fn ensure_runtime_started(directory: &Path) {
     let directory = directory.to_path_buf();
+    let provider = embedding::configured_provider();
+    if embedding::assets_available_for_provider(&directory, provider) {
+        // 中文说明：先让共享 embedding runtime 处理 provider 切换，再决定 UIUX 缓存是否继续复用。
+        embedding::ensure_started(&directory);
+    }
     let mut runtime = match RUNTIME.lock() {
         Ok(value) => value,
         Err(error) => {
@@ -517,13 +538,12 @@ fn ensure_runtime_started(directory: &Path) {
     {
         return;
     }
-    if !assets_have_expected_sizes(&directory) {
+    if !embedding::assets_available_for_provider(&directory, provider) {
         runtime.directory = Some(directory);
         runtime.phase = RuntimePhase::Empty;
         runtime.embeddings.clear();
         return;
     }
-    embedding::ensure_started(&directory);
     runtime.directory = Some(directory.clone());
     runtime.phase = RuntimePhase::Loading;
     runtime.embeddings.clear();
@@ -571,7 +591,13 @@ fn load_runtime(directory: &Path) -> Result<Vec<Vec<f32>>, String> {
     // GUI 与 MCP 是独立进程；模型加载、缓存生成和删除必须共享同一把文件锁。
     let _index_lease = wait_for_index_lease(&index_lock_path, &cache_path, &corpus_hash)?;
     verify_model_files(directory)?;
-    verify_runtime_assets()?;
+    let provider = embedding::configured_provider();
+    if !embedding::assets_available_for_provider(directory, provider) {
+        return Err("ONNX Runtime CPU 或 CUDA 资产尚未就绪".to_string());
+    }
+    if runtime_assets_have_expected_sizes() {
+        verify_runtime_assets()?;
+    }
     embedding::ensure_started(directory);
 
     if let Ok(embeddings) = read_embedding_cache(&cache_path, &corpus_hash) {
@@ -580,7 +606,10 @@ fn load_runtime(directory: &Path) -> Result<Vec<Vec<f32>>, String> {
 
     let documents = structured_search::semantic_documents();
     let mut embeddings = Vec::with_capacity(documents.len());
-    for (batch_index, batch) in documents.chunks(32).enumerate() {
+    for (batch_index, batch) in documents
+        .chunks(embedding::EMBEDDING_BATCH_SIZE)
+        .enumerate()
+    {
         let texts = batch
             .iter()
             .map(|document| document.text.clone())
@@ -593,7 +622,8 @@ fn load_runtime(directory: &Path) -> Result<Vec<Vec<f32>>, String> {
         let mut status = status_for(directory, "indexing", "正在建立 UIUX 语义索引");
         mark_download_complete(&mut status);
         status.indexed_documents = embeddings.len();
-        status.index_progress_percent = ((batch_index + 1) * 32).min(documents.len()) as f64
+        status.index_progress_percent = ((batch_index + 1) * embedding::EMBEDDING_BATCH_SIZE)
+            .min(documents.len()) as f64
             / documents.len().max(1) as f64
             * 100.0;
         let _ = write_status(&status);
@@ -1044,6 +1074,7 @@ fn status_for(directory: &Path, phase: &str, message: &str) -> UiuxModelStatus {
     let model_downloaded_bytes = quick_model_downloaded_bytes(directory);
     let runtime_downloaded_bytes = quick_runtime_downloaded_bytes();
     let downloaded_bytes = model_downloaded_bytes + runtime_downloaded_bytes;
+    let embedding_snapshot = embedding::snapshot(directory);
     UiuxModelStatus {
         phase: phase.to_string(),
         model_name: MODEL_NAME.to_string(),
@@ -1056,10 +1087,23 @@ fn status_for(directory: &Path, phase: &str, message: &str) -> UiuxModelStatus {
         completed_files: quick_completed_files(directory),
         total_files: MODEL_FILES.len() + 1,
         runtime_version: ORT_VERSION.to_string(),
-        runtime_ready: runtime_assets_have_expected_sizes(),
+        runtime_ready: runtime_assets_have_expected_sizes()
+            || embedding_snapshot.cuda_runtime_available,
         runtime_dir: effective_runtime_dir().to_string_lossy().to_string(),
         runtime_downloaded_bytes,
         runtime_total_bytes: ORT_ARCHIVE_BYTES,
+        requested_provider: embedding_snapshot.requested_provider,
+        execution_provider: embedding_snapshot.execution_provider,
+        provider_fallback_reason: embedding_snapshot.provider_fallback_reason,
+        cuda_runtime_available: embedding_snapshot.cuda_runtime_available,
+        cuda_runtime_dir: embedding_snapshot
+            .cuda_runtime_dir
+            .map(|value| value.to_string_lossy().to_string()),
+        runtime_path: embedding_snapshot
+            .runtime_path
+            .map(|value| value.to_string_lossy().to_string()),
+        batch_size: embedding_snapshot.batch_size,
+        intra_threads: embedding_snapshot.intra_threads,
         indexed_documents: 0,
         total_documents: structured_search::semantic_documents().len(),
         progress_percent: downloaded_bytes as f64 / DOWNLOAD_TOTAL_BYTES as f64 * 100.0,
@@ -1209,7 +1253,7 @@ fn runtime_assets_have_expected_sizes() -> bool {
 }
 
 fn assets_have_expected_sizes(directory: &Path) -> bool {
-    model_files_have_expected_sizes(directory) && runtime_assets_have_expected_sizes()
+    embedding::assets_available_for_provider(directory, embedding::configured_provider())
 }
 
 fn model_files_have_expected_sizes(directory: &Path) -> bool {

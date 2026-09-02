@@ -138,6 +138,9 @@ pub struct SaveAcemcpConfigArgs {
     pub sou_local_semantic_mode: Option<String>,
     #[serde(alias = "localEmbeddingModelDir", alias = "local_embedding_model_dir")]
     pub local_embedding_model_dir: Option<String>,
+    #[serde(alias = "souEmbeddingProvider", alias = "sou_embedding_provider")]
+    #[serde(default)]
+    pub sou_embedding_provider: Option<String>,
     #[serde(alias = "souRerankerModelDir", alias = "sou_reranker_model_dir")]
     pub sou_reranker_model_dir: Option<String>,
     #[serde(alias = "souLocalIndexDir", alias = "sou_local_index_dir")]
@@ -283,6 +286,16 @@ pub async fn save_acemcp_config(
             Some(base_url)
         }
     };
+    let normalized_embedding_provider = match args.sou_embedding_provider.as_deref() {
+        Some(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            if !matches!(normalized.as_str(), "auto" | "cuda" | "cpu") {
+                return Err(format!("未知的嵌入推理 provider: {}", value));
+            }
+            Some(normalized)
+        }
+        None => None,
+    };
 
     {
         let mut config = state
@@ -352,6 +365,9 @@ pub async fn save_acemcp_config(
                 .clone()
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
+        }
+        if let Some(value) = normalized_embedding_provider.clone() {
+            config.mcp_config.sou_embedding_provider = Some(value);
         }
         if args.sou_reranker_model_dir.is_some() {
             config.mcp_config.sou_reranker_model_dir = args
@@ -1227,6 +1243,7 @@ pub struct AcemcpConfigResponse {
     pub sou_local_enabled: bool,
     pub sou_local_semantic_enabled: bool,
     pub sou_local_semantic_mode: String,
+    pub sou_embedding_provider: String,
     pub local_embedding_model_dir: Option<String>,
     pub effective_local_embedding_model_dir: String,
     pub sou_reranker_model_dir: Option<String>,
@@ -1395,6 +1412,10 @@ pub async fn get_acemcp_config(state: State<'_, AppState>) -> Result<AcemcpConfi
         sou_local_enabled: config.mcp_config.sou_local_enabled.unwrap_or(true),
         sou_local_semantic_enabled: sou_local_semantic_mode != "off",
         sou_local_semantic_mode: sou_local_semantic_mode.to_string(),
+        sou_embedding_provider: crate::config::effective_sou_embedding_provider(
+            config.mcp_config.sou_embedding_provider.as_deref(),
+        )
+        .to_string(),
         local_embedding_model_dir: config.mcp_config.local_embedding_model_dir.clone(),
         effective_local_embedding_model_dir: crate::mcp::embedding::effective_model_dir(
             config.mcp_config.local_embedding_model_dir.as_deref(),
@@ -1729,6 +1750,14 @@ pub struct LocalEmbeddingModelStatus {
     pub progress_percent: f64,
     pub message: String,
     pub error: Option<String>,
+    pub requested_provider: String,
+    pub execution_provider: String,
+    pub provider_fallback_reason: Option<String>,
+    pub cuda_runtime_available: bool,
+    pub cuda_runtime_dir: Option<String>,
+    pub runtime_path: Option<String>,
+    pub batch_size: usize,
+    pub intra_threads: Option<usize>,
 }
 
 #[tauri::command]
@@ -1745,8 +1774,14 @@ pub fn get_local_embedding_model_status(
             config.mcp_config.uiux_model_dir.as_deref(),
         )
     };
-    let assets_ready = crate::mcp::embedding::assets_have_expected_sizes(&model_dir);
+    let requested_provider = crate::mcp::embedding::configured_provider();
+    let assets_ready =
+        crate::mcp::embedding::assets_available_for_provider(&model_dir, requested_provider);
+    if assets_ready {
+        crate::mcp::embedding::ensure_started(&model_dir);
+    }
     let snapshot = crate::mcp::embedding::snapshot(&model_dir);
+    let snapshot_error = snapshot.error.clone();
     let (phase, message, error) = if !assets_ready {
         (
             "missing".to_string(),
@@ -1760,14 +1795,22 @@ pub fn get_local_embedding_model_status(
                 "BGE 共享模型正在按需加载".to_string(),
                 None,
             ),
+            crate::mcp::embedding::RuntimePhase::Missing => (
+                "missing".to_string(),
+                "BGE 共享模型运行时资产尚未就绪".to_string(),
+                None,
+            ),
             crate::mcp::embedding::RuntimePhase::Error => (
                 "error".to_string(),
                 "BGE 共享模型初始化异常".to_string(),
-                snapshot.error,
+                snapshot_error,
             ),
-            _ => (
+            crate::mcp::embedding::RuntimePhase::Ready => (
                 "ready".to_string(),
-                "固定 BGE 模型资产已就绪".to_string(),
+                format!(
+                    "固定 BGE 模型资产已就绪，实际 provider={}",
+                    snapshot.execution_provider
+                ),
                 None,
             ),
         }
@@ -1779,6 +1822,18 @@ pub fn get_local_embedding_model_status(
         progress_percent: if assets_ready { 100.0 } else { 0.0 },
         message,
         error,
+        requested_provider: snapshot.requested_provider,
+        execution_provider: snapshot.execution_provider,
+        provider_fallback_reason: snapshot.provider_fallback_reason,
+        cuda_runtime_available: snapshot.cuda_runtime_available,
+        cuda_runtime_dir: snapshot
+            .cuda_runtime_dir
+            .map(|value| value.to_string_lossy().to_string()),
+        runtime_path: snapshot
+            .runtime_path
+            .map(|value| value.to_string_lossy().to_string()),
+        batch_size: snapshot.batch_size,
+        intra_threads: snapshot.intra_threads,
     })
 }
 

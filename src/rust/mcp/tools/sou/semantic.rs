@@ -15,7 +15,6 @@ pub(super) const FUSION_NAME: &str = "weighted_rrf_0.65_0.35_k60";
 pub(super) const SEMANTIC_ONLY_THRESHOLD: f32 = 0.37;
 const CACHE_PROJECT_LIMIT: usize = 2;
 const CACHE_BYTE_LIMIT: usize = 256 * 1024 * 1024;
-const EMBEDDING_BATCH_SIZE: usize = 32;
 
 #[derive(Debug, Clone)]
 pub(super) struct SemanticHit {
@@ -161,7 +160,7 @@ where
     let mut indexed = total.saturating_sub(pending.len() as u64);
     on_progress(indexed, pending.len() as u64);
 
-    for batch in pending.chunks_mut(EMBEDDING_BATCH_SIZE) {
+    for batch in pending.chunks_mut(embedding::EMBEDDING_BATCH_SIZE) {
         let documents = batch
             .iter()
             .map(|chunk| format!("{}\n{}", chunk.relative_path, chunk.excerpt))

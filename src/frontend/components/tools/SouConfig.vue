@@ -57,6 +57,7 @@ const config = ref({
   sou_include_failed_backend_errors: true,
   sou_local_enabled: true,
   sou_local_semantic_mode: 'off' as 'off' | 'balanced' | 'accurate',
+  sou_embedding_provider: 'auto' as 'auto' | 'cuda' | 'cpu',
   local_embedding_model_dir: '',
   sou_reranker_model_dir: '',
   sou_local_index_dir: '',
@@ -145,6 +146,13 @@ interface LocalIndexStatus {
   semantic_indexed_chunks: number
   semantic_pending_chunks: number
   semantic_last_error?: string
+  semantic_requested_provider?: 'auto' | 'cuda' | 'cpu' | string
+  semantic_execution_provider?: 'cuda' | 'cpu' | string
+  semantic_provider_fallback_reason?: string
+  semantic_cuda_runtime_available?: boolean
+  semantic_cuda_runtime_dir?: string
+  semantic_batch_size?: number
+  semantic_intra_threads?: number
 }
 
 interface EmbeddingModelStatus {
@@ -171,6 +179,14 @@ interface EmbeddingModelStatus {
   message: string
   error?: string
   updated_at: string
+  requested_provider?: 'auto' | 'cuda' | 'cpu' | string
+  execution_provider?: 'cuda' | 'cpu' | string
+  provider_fallback_reason?: string
+  cuda_runtime_available?: boolean
+  cuda_runtime_dir?: string
+  runtime_path?: string
+  batch_size?: number
+  intra_threads?: number
 }
 
 interface RerankerModelStatus {
@@ -523,6 +539,12 @@ const semanticModeOptions = [
   { label: '准确（实验）', value: 'accurate' },
 ]
 
+const embeddingProviderOptions = [
+  { label: '自动（CUDA → CPU）', value: 'auto' },
+  { label: 'CUDA', value: 'cuda' },
+  { label: 'CPU', value: 'cpu' },
+]
+
 const selectedExtensionSet = computed(() => new Set(config.value.text_extensions || []))
 const selectedPresetCount = computed(() =>
   allPresetExtensions.filter(ext => selectedExtensionSet.value.has(ext)).length,
@@ -675,6 +697,37 @@ const embeddingTagType = computed<'default' | 'info' | 'success' | 'warning' | '
     case 'indexing': return 'info'
     default: return 'default'
   }
+})
+
+function formatProviderLabel(provider?: string | null): string {
+  const normalized = provider?.trim().toLowerCase()
+  if (normalized === 'cuda')
+    return 'CUDA'
+  if (normalized === 'cpu')
+    return 'CPU'
+  if (normalized === 'auto')
+    return '自动'
+  return provider?.trim() || '未知'
+}
+
+const embeddingExecutionProviderLabel = computed(() =>
+  formatProviderLabel(embeddingModelStatus.value?.execution_provider || 'cpu'),
+)
+
+const embeddingRequestedProviderLabel = computed(() => {
+  const provider = embeddingModelStatus.value?.requested_provider || config.value.sou_embedding_provider
+  return formatProviderLabel(provider)
+})
+})
+
+const embeddingProviderTagType = computed<'default' | 'info' | 'success' | 'warning' | 'error'>(() => {
+  if (embeddingModelStatus.value?.provider_fallback_reason)
+    return 'warning'
+  if (embeddingModelStatus.value?.execution_provider === 'cuda')
+    return 'success'
+  if (embeddingModelStatus.value?.execution_provider === 'cpu')
+    return 'info'
+  return 'default'
 })
 
 const embeddingTaskActive = computed(() =>
@@ -1034,6 +1087,9 @@ async function loadAcemcpConfig() {
     const semanticMode = ['off', 'balanced', 'accurate'].includes(res.sou_local_semantic_mode)
       ? res.sou_local_semantic_mode
       : (res.sou_local_semantic_enabled ? 'balanced' : 'off')
+    const embeddingProvider = ['auto', 'cuda', 'cpu'].includes(res.sou_embedding_provider)
+      ? res.sou_embedding_provider
+      : 'auto'
     const souAutoOrder = Array.isArray(res.sou_auto_order)
       ? [...res.sou_auto_order]
       : ['ace', 'fast_context', 'local']
@@ -1064,6 +1120,7 @@ async function loadAcemcpConfig() {
       sou_include_failed_backend_errors: res.sou_include_failed_backend_errors ?? true,
       sou_local_enabled: res.sou_local_enabled ?? true,
       sou_local_semantic_mode: semanticMode,
+      sou_embedding_provider: embeddingProvider,
       local_embedding_model_dir: res.local_embedding_model_dir || '',
       sou_reranker_model_dir: res.sou_reranker_model_dir || '',
       sou_local_index_dir: res.sou_local_index_dir || '',
@@ -1215,6 +1272,7 @@ async function saveConfig(showFeedback = true): Promise<boolean> {
         souLocalEnabled: config.value.sou_local_enabled,
         souLocalSemanticEnabled: config.value.sou_local_semantic_mode !== 'off',
         souLocalSemanticMode: config.value.sou_local_semantic_mode,
+        souEmbeddingProvider: config.value.sou_embedding_provider,
         localEmbeddingModelDir: config.value.local_embedding_model_dir,
         souRerankerModelDir: config.value.sou_reranker_model_dir,
         souLocalIndexDir: config.value.sou_local_index_dir,
@@ -1354,6 +1412,12 @@ function formatRate(value?: number | null): string {
   if (!value || !Number.isFinite(value) || value <= 0)
     return '等待采样'
   return `${formatBytes(value)}/s`
+}
+
+function formatChunkRate(value?: number | null): string {
+  if (!value || !Number.isFinite(value) || value <= 0)
+    return '等待采样'
+  return `${value >= 100 ? value.toFixed(0) : value.toFixed(1)} chunk/s`
 }
 
 async function refreshLocalIndexStatus(showFeedback = false, silent = false) {
@@ -2435,6 +2499,25 @@ defineExpose({ saveConfig })
                     />
                   </n-radio-group>
                 </n-form-item>
+                <n-form-item label="嵌入推理设备">
+                  <n-radio-group
+                    v-model:value="config.sou_embedding_provider"
+                    :disabled="!config.sou_local_enabled || embeddingTaskActive || localIndexTaskActive || storageConfigSaving"
+                    size="small"
+                  >
+                    <n-radio-button
+                      v-for="option in embeddingProviderOptions"
+                      :key="option.value"
+                      :value="option.value"
+                      :label="option.label"
+                    />
+                  </n-radio-group>
+                  <template #feedback>
+                    <span class="form-feedback">
+                      自动优先尝试 CUDA；缺少 CUDA provider 或初始化失败时回退 CPU。外部 CUDA 运行时目录可通过 SANSHU_ORT_CUDA_DIR 指定，切换 provider 后需重启 Sanshu 进程。
+                    </span>
+                  </template>
+                </n-form-item>
                 <n-alert :type="accurateModeActive ? 'warning' : 'info'" :bordered="false">
                   {{ semanticModeDescription }}
                 </n-alert>
@@ -2548,11 +2631,17 @@ defineExpose({ saveConfig })
                   <div class="sou-metrics">
                     <span>{{ localIndexStatus.semantic_indexed_chunks }} 已索引</span>
                     <span>{{ localIndexStatus.semantic_pending_chunks }} 待处理</span>
-                    <span>吞吐 {{ formatRate(localIndexThroughput) }}</span>
-                    <span>均值 {{ formatRate(localIndexThroughputSummary.average) }}</span>
-                    <span>峰值 {{ formatRate(localIndexThroughputSummary.peak) }}</span>
+                    <span>吞吐 {{ formatChunkRate(localIndexThroughput) }}</span>
+                    <span>均值 {{ formatChunkRate(localIndexThroughputSummary.average) }}</span>
+                    <span>峰值 {{ formatChunkRate(localIndexThroughputSummary.peak) }}</span>
                     <span>耗时 {{ formatElapsed(localIndexElapsedMs) }}</span>
                   </div>
+                  <div class="form-feedback">
+                    推理设备：{{ formatProviderLabel(localIndexStatus.semantic_execution_provider || 'cpu') }} · 请求 {{ formatProviderLabel(localIndexStatus.semantic_requested_provider || config.sou_embedding_provider) }} · batch {{ localIndexStatus.semantic_batch_size || 32 }} · intra_threads {{ localIndexStatus.semantic_intra_threads || '默认' }}
+                  </div>
+                  <n-alert v-if="localIndexStatus.semantic_provider_fallback_reason" type="warning" :bordered="false">
+                    {{ localIndexStatus.semantic_provider_fallback_reason }}
+                  </n-alert>
                   <div class="sou-history-line">
                     预计剩余：{{ localIndexEtaLabel }}
                   </div>
@@ -2577,6 +2666,9 @@ defineExpose({ saveConfig })
                       </n-tag>
                       <n-tag :type="embeddingTagType" :bordered="false">
                         {{ embeddingPhaseLabel }}
+                      </n-tag>
+                      <n-tag :type="embeddingProviderTagType" :bordered="false">
+                        {{ embeddingExecutionProviderLabel }}
                       </n-tag>
                       <n-tag :type="embeddingIntegrityTagType" :bordered="false">
                         {{ embeddingIntegrityLabel }}
@@ -2606,6 +2698,15 @@ defineExpose({ saveConfig })
                   <div class="sou-history-line">
                     {{ embeddingStatusReadError ? `状态读取失败，保留最近数据：${embeddingStatusReadError}` : '近 30 秒速度窗口仅保存在当前页面' }}
                   </div>
+                  <div class="form-feedback">
+                    推理设备：{{ embeddingExecutionProviderLabel }} · 请求 {{ embeddingRequestedProviderLabel }} · batch {{ embeddingModelStatus?.batch_size || 32 }} · intra_threads {{ embeddingModelStatus?.intra_threads || '默认' }}
+                  </div>
+                  <div class="form-feedback">
+                    CUDA 运行时：{{ embeddingModelStatus?.cuda_runtime_available ? (embeddingModelStatus?.cuda_runtime_dir || '已发现') : '未发现' }}
+                  </div>
+                  <n-alert v-if="embeddingModelStatus?.provider_fallback_reason" type="warning" :bordered="false">
+                    {{ embeddingModelStatus.provider_fallback_reason }}
+                  </n-alert>
                   <div v-if="embeddingModelStatus?.route" class="form-feedback">
                     下载路由：{{ embeddingModelStatus.route }}
                   </div>
@@ -2814,7 +2915,7 @@ defineExpose({ saveConfig })
                         进程资源
                       </div>
                       <div class="form-feedback">
-                        持续采样当前 Sanshu 进程；GPU 指标按本机可用能力显示
+                        持续采样当前 Sanshu 进程；GPU 与显存为 nvidia-smi 系统级采样，不代表 BGE 已使用 CUDA，实际 provider 以共享嵌入模型状态为准
                       </div>
                     </div>
                     <n-tooltip trigger="hover">

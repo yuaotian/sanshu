@@ -154,6 +154,9 @@ pub struct McpConfig {
     /// Local 检索模式：off | balanced | accurate。
     pub sou_local_semantic_mode: Option<String>,
     pub local_embedding_model_dir: Option<String>, // UIUX 与 sou 共享的 BGE 模型目录
+    /// 共享 BGE 推理 provider：auto | cuda | cpu。
+    #[serde(default)]
+    pub sou_embedding_provider: Option<String>,
     /// Accurate 模式使用的 BGE reranker 模型目录。
     pub sou_reranker_model_dir: Option<String>,
     /// Local FTS5 与向量索引目录。
@@ -381,6 +384,9 @@ pub fn default_audio_config() -> AudioConfig {
 pub const SOU_SEMANTIC_MODE_OFF: &str = "off";
 pub const SOU_SEMANTIC_MODE_BALANCED: &str = "balanced";
 pub const SOU_SEMANTIC_MODE_ACCURATE: &str = "accurate";
+pub const SOU_EMBEDDING_PROVIDER_AUTO: &str = "auto";
+pub const SOU_EMBEDDING_PROVIDER_CUDA: &str = "cuda";
+pub const SOU_EMBEDDING_PROVIDER_CPU: &str = "cpu";
 
 /// 新模式字段优先；缺失或取值异常时按旧布尔字段迁移，确保历史配置行为稳定。
 pub fn effective_sou_semantic_mode(
@@ -397,6 +403,19 @@ pub fn effective_sou_semantic_mode(
         Some(SOU_SEMANTIC_MODE_ACCURATE) => SOU_SEMANTIC_MODE_ACCURATE,
         _ if legacy_enabled.unwrap_or(false) => SOU_SEMANTIC_MODE_BALANCED,
         _ => SOU_SEMANTIC_MODE_OFF,
+    }
+}
+
+/// 规范化共享嵌入 provider；未知值回到自动探测，保持旧配置可读取。
+pub fn effective_sou_embedding_provider(configured: Option<&str>) -> &'static str {
+    match configured
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some(SOU_EMBEDDING_PROVIDER_CUDA) => SOU_EMBEDDING_PROVIDER_CUDA,
+        Some(SOU_EMBEDDING_PROVIDER_CPU) => SOU_EMBEDDING_PROVIDER_CPU,
+        _ => SOU_EMBEDDING_PROVIDER_AUTO,
     }
 }
 
@@ -501,6 +520,7 @@ pub fn default_mcp_config() -> McpConfig {
         sou_local_semantic_enabled: Some(false),
         sou_local_semantic_mode: Some(SOU_SEMANTIC_MODE_OFF.to_string()),
         local_embedding_model_dir: None,
+        sou_embedding_provider: Some(SOU_EMBEDDING_PROVIDER_AUTO.to_string()),
         sou_reranker_model_dir: None,
         sou_local_index_dir: None,
         // Fast Context 默认配置：协议与本地命令执行已迁移为 Rust 原生实现
