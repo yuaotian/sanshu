@@ -1152,6 +1152,12 @@ fn verify_model_files(directory: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 校验共享嵌入模型与随附 ONNX Runtime 资产，供配置页执行一次性完整性检查。
+pub fn verify_integrity(directory: &Path) -> Result<(), String> {
+    verify_model_files(directory)?;
+    verify_runtime_assets()
+}
+
 fn verify_file(path: &Path, spec: &ModelFileSpec) -> Result<(), String> {
     verify_sized_sha(path, spec.size, spec.sha256)
 }

@@ -1808,6 +1808,89 @@ pub async fn get_sou_resource_usage(
         .map_err(|error| format!("资源采样任务异常: {}", error))
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct SouModelIntegrityResult {
+    pub valid: bool,
+    pub state: String,
+    pub model_dir: String,
+    pub checked_at: String,
+    pub message: String,
+}
+
+fn integrity_result(
+    directory: &std::path::Path,
+    result: Result<(), String>,
+) -> SouModelIntegrityResult {
+    let checked_at = chrono::Utc::now().to_rfc3339();
+    match result {
+        Ok(()) => SouModelIntegrityResult {
+            valid: true,
+            state: "valid".to_string(),
+            model_dir: directory.to_string_lossy().to_string(),
+            checked_at,
+            message: "模型文件与运行时资产校验通过".to_string(),
+        },
+        Err(error) => SouModelIntegrityResult {
+            valid: false,
+            state: "invalid".to_string(),
+            model_dir: directory.to_string_lossy().to_string(),
+            checked_at,
+            message: error,
+        },
+    }
+}
+
+/// 一次性校验共享嵌入模型，不写入状态文件，也不改变下载任务。
+#[tauri::command]
+pub async fn verify_uiux_model_integrity(
+    state: State<'_, AppState>,
+) -> Result<SouModelIntegrityResult, String> {
+    let directory = {
+        let config = state
+            .config
+            .lock()
+            .map_err(|error| format!("获取配置失败: {}", error))?;
+        crate::mcp::embedding::effective_model_dir(
+            config.mcp_config.local_embedding_model_dir.as_deref(),
+            config.mcp_config.uiux_model_dir.as_deref(),
+        )
+    };
+    let check_directory = directory.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        integrity_result(
+            &check_directory,
+            crate::mcp::tools::uiux::model_manager::verify_integrity(&check_directory),
+        )
+    })
+    .await
+    .map_err(|error| format!("共享模型完整性校验任务异常: {}", error))
+}
+
+/// 一次性校验准确模式重排模型，不写入状态文件，也不改变下载任务。
+#[tauri::command]
+pub async fn verify_sou_reranker_model_integrity(
+    state: State<'_, AppState>,
+) -> Result<SouModelIntegrityResult, String> {
+    let directory = {
+        let config = state
+            .config
+            .lock()
+            .map_err(|error| format!("获取配置失败: {}", error))?;
+        crate::config::effective_sou_reranker_model_dir(
+            config.mcp_config.sou_reranker_model_dir.as_deref(),
+        )
+    };
+    let check_directory = directory.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        integrity_result(
+            &check_directory,
+            crate::mcp::tools::sou::reranker::verify_integrity(&check_directory),
+        )
+    })
+    .await
+    .map_err(|error| format!("准确模式模型完整性校验任务异常: {}", error))
+}
+
 #[tauri::command]
 pub async fn select_sou_storage_directory(
     app_handle: AppHandle,

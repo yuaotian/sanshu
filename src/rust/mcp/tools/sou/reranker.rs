@@ -674,6 +674,11 @@ fn verify_assets(directory: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 校验准确模式重排模型的固定文件与 SHA-256，避免把尺寸正确的损坏文件标记为可用。
+pub fn verify_integrity(directory: &Path) -> Result<(), String> {
+    verify_assets(directory)
+}
+
 fn verify_file(path: &Path, spec: &ModelFileSpec) -> Result<(), String> {
     let metadata = fs::metadata(path)
         .map_err(|error| format!("读取模型文件 {} 失败: {}", path.display(), error))?;
