@@ -26,7 +26,9 @@ const MODEL_FILES: &[(&str, u64)] = &[
 ];
 const ORT_DLL_FILE_NAME: &str = "onnxruntime.dll";
 const ORT_DLL_BYTES: u64 = 15_809_848;
+#[cfg(feature = "cuda")]
 const CUDA_PROVIDER_DLL_FILE_NAME: &str = "onnxruntime_providers_cuda.dll";
+#[cfg(feature = "cuda")]
 const CUDA_RUNTIME_ENV: &str = "SANSHU_ORT_CUDA_DIR";
 const CUDA_INTRA_THREADS: usize = 4;
 const CUDA_PREFLIGHT_CACHE_TTL: Duration = Duration::from_secs(5);
@@ -272,6 +274,7 @@ pub fn cpu_runtime_assets_have_expected_sizes() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(feature = "cuda")]
 fn cuda_runtime_assets_have_expected_sizes(directory: &Path) -> bool {
     [ORT_DLL_FILE_NAME, CUDA_PROVIDER_DLL_FILE_NAME]
         .into_iter()
@@ -905,20 +908,20 @@ fn create_embedding_model(
             .unwrap_or(1),
         ExecutionProvider::Cuda => CUDA_INTRA_THREADS,
     };
-    let mut options = InitOptionsUserDefined::new()
+    let options = InitOptionsUserDefined::new()
         .with_max_length(512)
         .with_intra_threads(threads);
+    #[cfg(feature = "cuda")]
+    let options = if provider == ExecutionProvider::Cuda {
+        options
+            .with_execution_providers(vec![ort::ep::CUDA::default().build().error_on_failure()])
+            .with_disable_cpu_fallback(true)
+    } else {
+        options
+    };
+    #[cfg(not(feature = "cuda"))]
     if provider == ExecutionProvider::Cuda {
-        #[cfg(feature = "cuda")]
-        {
-            options = options
-                .with_execution_providers(vec![ort::ep::CUDA::default().build().error_on_failure()])
-                .with_disable_cpu_fallback(true);
-        }
-        #[cfg(not(feature = "cuda"))]
-        {
-            return Err("当前构建未启用 ORT CUDA provider".to_string());
-        }
+        return Err("当前构建未启用 ORT CUDA provider".to_string());
     }
 
     let model = user_defined_model(directory)?;
