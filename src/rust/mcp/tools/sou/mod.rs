@@ -1796,18 +1796,20 @@ fn flush_sou_section(
 
 fn is_ace_unavailable_text(text: &str) -> bool {
     let normalized = text.trim();
+    // 仅识别响应开头的错误信封，避免代码片段中的业务错误文案误判为 ACE 不可用。
     normalized.is_empty()
         || normalized.starts_with("Acemcp搜索失败:")
         || normalized.starts_with("搜索失败:")
         || normalized.starts_with("索引更新失败:")
         || normalized.starts_with("代码搜索失败:")
-        || normalized.contains("未配置 base_url")
-        || normalized.contains("未配置 token")
-        || normalized.contains("认证失败")
-        || normalized.contains("尚未建立索引")
-        || normalized.contains("正在后台索引")
-        || normalized.contains("索引尚未就绪")
-        || normalized.contains("配置已变更")
+        || normalized.starts_with("代码搜索失败：")
+        || normalized.starts_with("未配置 base_url")
+        || normalized.starts_with("未配置 token")
+        || normalized.starts_with("认证失败")
+        || normalized.starts_with("尚未建立索引")
+        || normalized.starts_with("正在后台索引")
+        || normalized.starts_with("索引尚未就绪")
+        || normalized.starts_with("配置已变更")
 }
 
 fn backend_success_result(
@@ -1949,7 +1951,7 @@ fn format_backend_errors(prefix: &str, errors: &[BackendRunError]) -> String {
         lines.push(format!(
             "- {}: {}",
             backend_display(&err.backend),
-            err.message
+            diagnostic_summary(&err.message)
         ));
     }
     lines.join("\n")
@@ -2104,6 +2106,50 @@ reqwest = { version = "0.11", features = ["socks"] }
         assert!(!sections[0].excerpt.contains("```"));
         assert_eq!(sections[1].location, "Cargo.toml:49-54");
         assert!(sections[1].excerpt.contains("reqwest ="));
+    }
+
+    #[test]
+    fn ace_availability_check_ignores_error_words_inside_code_sections() {
+        let text = r#"## server/src/IdentityVerifyDO.java
+Score: 0.688
+Confidence: high
+Lines: 25-83
+
+```text
+/** 认证状态：0未认证，1认证中，2认证成功，3认证失败 */
+private Integer status;
+private String message = "未配置 token";
+```
+"#;
+
+        assert!(!is_ace_unavailable_text(text));
+    }
+
+    #[test]
+    fn ace_availability_check_keeps_known_error_envelopes() {
+        for message in [
+            "Acemcp搜索失败: 请求超时",
+            "代码搜索失败：ACE API Token 已失效",
+            "未配置 token",
+            "索引尚未就绪",
+        ] {
+            assert!(is_ace_unavailable_text(message), "未识别错误: {message}");
+        }
+        assert!(is_ace_unavailable_text("   "));
+    }
+
+    #[test]
+    fn backend_errors_are_summarized_before_metadata_output() {
+        let errors = vec![BackendRunError {
+            backend: BACKEND_ACE.to_string(),
+            message: format!("第一行\n第二行 {}", "x".repeat(400)),
+        }];
+
+        let formatted = format_backend_errors("", &errors);
+
+        assert!(!formatted.contains('\n'));
+        assert!(formatted.ends_with("..."));
+        assert!(formatted.chars().count() <= 330);
     }
 
     #[test]

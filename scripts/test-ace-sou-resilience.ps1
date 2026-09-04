@@ -21,6 +21,10 @@ function Invoke-CheckedCommand {
 }
 
 try {
+    Invoke-CheckedCommand -Title '检查 sou Rust 格式' -Command 'rustfmt' -Arguments @(
+        '--edition', '2021', '--check', '--config', 'skip_children=true',
+        'src/rust/mcp/tools/sou/mod.rs'
+    )
     Invoke-CheckedCommand -Title '检查 ACE/sou 变更空白字符' -Command 'git' -Arguments @(
         'diff', '--check', '--',
         'src/rust/mcp/tools/acemcp/mcp.rs',
@@ -32,6 +36,9 @@ try {
     )
     Invoke-CheckedCommand -Title '运行 ACE 网络重试分类单元测试' -Command 'cargo' -Arguments @(
         'test', '--lib', 'mcp::tools::acemcp::mcp::retry_tests'
+    )
+    Invoke-CheckedCommand -Title '执行 Rust library 编译检查' -Command 'cargo' -Arguments @(
+        'check', '--lib', '-j', '1'
     )
 
     Write-Host ""
