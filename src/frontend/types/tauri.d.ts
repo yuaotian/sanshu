@@ -29,6 +29,8 @@ export interface ProjectIndexStatus {
   workspace_resolution_error?: string | null
   project_root: string
   status: IndexStatus
+  /** 已有部分 blob 可搜索，但仍有未确认内容。 */
+  is_partial?: boolean
   progress: number
   total_files: number
   indexed_files: number

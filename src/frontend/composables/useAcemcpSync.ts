@@ -72,6 +72,8 @@ export function useAcemcpSync() {
     const status = currentProjectStatus.value
     if (!status)
       return '未索引'
+    if (status.is_partial)
+      return `部分可用 ${status.indexed_files}/${status.total_files}`
 
     switch (status.status) {
       case 'idle':
@@ -92,6 +94,8 @@ export function useAcemcpSync() {
   // 状态图标类名
   const statusIcon = computed(() => {
     const status = currentProjectStatus.value?.status
+    if (currentProjectStatus.value?.is_partial)
+      return 'i-carbon-warning-alt text-amber-500'
     switch (status) {
       case 'idle':
         return 'i-carbon-circle-dash text-gray-400'

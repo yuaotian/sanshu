@@ -379,6 +379,8 @@ const nestedProjects = computed(() => nestedStatus.value?.nested_projects ?? [])
 
 // 获取子项目状态图标
 function getNestedStatusIcon(np: NestedProjectInfo): string {
+  if (np.index_status?.is_partial)
+    return 'i-carbon-warning-alt text-amber-400'
   if (np.index_status?.is_stale && np.index_status.status !== 'indexing')
     return 'i-carbon-warning-alt text-amber-400'
 
@@ -404,6 +406,8 @@ function getNestedStatusText(np: NestedProjectInfo): string {
     return '未索引'
   if (status.is_stale && status.status !== 'indexing')
     return '待重建'
+  if (status.is_partial)
+    return `${status.indexed_files}/${status.total_files}（部分可用）`
   if (status.status === 'paused')
     return `${status.indexed_files}/${status.total_files}（等待恢复）`
   return `${status.indexed_files}/${status.total_files}`

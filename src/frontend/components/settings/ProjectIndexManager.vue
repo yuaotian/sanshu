@@ -91,6 +91,8 @@ const selectedStatusSummary = computed(() => {
     return '未索引'
   if (status.is_stale && status.status !== 'indexing')
     return '配置已变更'
+  if (status.is_partial)
+    return `部分可用 ${status.indexed_files}/${status.total_files}`
   switch (status.status) {
     case 'idle':
       return '空闲'
@@ -111,6 +113,8 @@ const selectedStatusSummary = computed(() => {
 const selectedStatusIcon = computed(() => {
   const selected = selectedProjectStatus.value
   if (selected?.is_stale && selected.status !== 'indexing')
+    return 'i-carbon-warning-alt text-amber-500'
+  if (selected?.is_partial)
     return 'i-carbon-warning-alt text-amber-500'
 
   const status = selected?.status

@@ -37,6 +37,15 @@ const deleteActionLabel = computed(() => props.project.is_workspace ? '移除工
 
 // 状态配置映射
 const statusConfig = computed(() => {
+  if (props.project.is_partial) {
+    return {
+      text: '部分可用',
+      type: 'warning' as const,
+      icon: 'i-carbon-warning-alt',
+      glowColor: 'rgba(245, 158, 11, 0.3)',
+      borderColor: 'border-amber-500/40',
+    }
+  }
   if (isStale.value) {
     return {
       text: '待重建',

@@ -11,8 +11,10 @@
 
 use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use md5::{Digest, Md5};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -143,12 +145,41 @@ struct WatchHandle {
     _watcher: RecommendedWatcher,
     /// 用于通知后台 debounce 任务停止
     cancel_tx: tokio::sync::oneshot::Sender<()>,
+    /// 跨 MCP 进程 watcher 所有权租约；进程退出时由操作系统释放。
+    _lease: File,
 }
 
 impl WatchHandle {
     fn shutdown(self) {
         // _watcher 在 drop 时会停止底层监听
         let _ = self.cancel_tx.send(());
+    }
+}
+
+fn watcher_lease_path(project_root: &str) -> PathBuf {
+    let jobs_file = super::jobs::home_index_jobs_file();
+    let lease_dir = jobs_file
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("watcher_leases");
+    let digest = Md5::digest(project_root.as_bytes());
+    lease_dir.join(format!("{}.lock", hex::encode(digest)))
+}
+
+fn try_acquire_watcher_lease(project_root: &str) -> Result<Option<File>> {
+    let path = watcher_lease_path(project_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(error) => Err(anyhow::anyhow!("获取 watcher 租约失败: {}", error)),
     }
 }
 
@@ -303,6 +334,14 @@ impl WatcherManager {
             }
         }
 
+        let Some(lease) = try_acquire_watcher_lease(&normalized_root)? else {
+            log_debug!(
+                "项目 {} 已由其他 MCP 进程监听，当前进程跳过 watcher",
+                normalized_root
+            );
+            return Ok(());
+        };
+
         let quiet_ms = debounce_ms.unwrap_or(DEFAULT_DEBOUNCE_MS);
         let max_wait_ms = max_wait_ms.unwrap_or(DEFAULT_MAX_WAIT_MS);
         log_important!(
@@ -387,6 +426,7 @@ impl WatcherManager {
                 WatchHandle {
                     _watcher: watcher,
                     cancel_tx,
+                    _lease: lease,
                 },
             );
         }

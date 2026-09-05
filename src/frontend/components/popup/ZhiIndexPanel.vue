@@ -102,6 +102,8 @@ const nestedProjects = computed(() => nestedStatus.value?.nested_projects ?? [])
 
 // 状态图标类名
 const statusIcon = computed(() => {
+  if (props.projectStatus?.is_partial)
+    return 'i-carbon-warning-alt text-amber-400'
   const status = props.projectStatus?.status
   switch (status) {
     case 'idle':
@@ -123,6 +125,8 @@ const statusIcon = computed(() => {
 
 // 状态文案
 const statusText = computed(() => {
+  if (props.projectStatus?.is_partial)
+    return `部分可用 ${props.projectStatus?.indexed_files || 0}/${props.projectStatus?.total_files || 0}`
   const status = props.projectStatus?.status
   switch (status) {
     case 'idle':

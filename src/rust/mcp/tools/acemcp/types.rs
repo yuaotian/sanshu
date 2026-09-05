@@ -113,6 +113,9 @@ pub struct ProjectIndexStatus {
     pub project_root: String,
     /// 当前索引状态
     pub status: IndexStatus,
+    /// 已有部分 blob 可用于搜索，但仍存在未确认内容。
+    #[serde(default)]
+    pub is_partial: bool,
     /// 索引进度百分比（0-100）
     pub progress: u8,
     /// 总文件数
@@ -176,6 +179,7 @@ impl Default for ProjectIndexStatus {
             workspace_resolution_error: None,
             project_root: String::new(),
             status: IndexStatus::Idle,
+            is_partial: false,
             progress: 0,
             total_files: 0,
             indexed_files: 0,

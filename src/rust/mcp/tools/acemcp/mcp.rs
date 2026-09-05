@@ -233,7 +233,8 @@ impl AcemcpTool {
             }
             InitialIndexState::Partial => {
                 // 中文说明：部分 blob 已确认可用时直接搜索，避免每次 sou 请求重新上传整库。
-                hint_message = "\n\n💡 提示：当前使用已确认的部分索引，未确认文件不会阻塞搜索。".to_string();
+                hint_message =
+                    "\n\n💡 提示：当前使用已确认的部分索引，未确认文件不会阻塞搜索。".to_string();
                 log_debug!("项目索引部分可用，跳过自动重试");
             }
         }
@@ -870,6 +871,7 @@ fn aggregate_workspace_project_status(
         workspace_resolution_error: None,
         project_root,
         status,
+        is_partial: children.iter().any(|(_, status)| status.is_partial),
         progress,
         total_files,
         indexed_files,
@@ -1569,6 +1571,10 @@ pub async fn ensure_initial_index_background(
     project_root: &str,
 ) -> anyhow::Result<()> {
     let project_status = get_project_status(project_root);
+    if !jobs::automatic_retry_allowed(project_root) {
+        log_debug!("跳过后台索引自动重试: project_root={}", project_root);
+        return Ok(());
+    }
     if should_hold_on_auth_failure(config, project_root, &project_status) {
         log_important!(
             info,
@@ -1674,6 +1680,14 @@ pub async fn resume_index_jobs() -> anyhow::Result<()> {
             .await?;
             continue;
         }
+        if !jobs::automatic_retry_allowed(&job.project_root) {
+            log_important!(
+                info,
+                "恢复索引任务暂缓：仍在自动重试冷却或协议熔断中，project_root={}",
+                job.project_root
+            );
+            continue;
+        }
         let _ = start_background_index_with_mode(
             &config,
             &job.project_root,
@@ -1709,6 +1723,15 @@ struct BlobItem {
     path: String,
     content: String,
 }
+
+#[derive(Debug, Deserialize)]
+struct BatchUploadResponse {
+    /// 当前 ACE 客户端契约：返回已确认的本地 blob hash 列表。
+    blob_names: Option<Vec<String>>,
+}
+
+/// 单次索引允许驻留的正文上限；超过后让调用方走本地/显式分批路径，避免进程堆无限放大。
+const MAX_IN_MEMORY_INDEX_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Default)]
 pub(crate) struct ProjectsFile(pub HashMap<String, Vec<String>>);
@@ -2173,6 +2196,7 @@ fn reconcile_project_status_with_job(status: &mut ProjectIndexStatus) {
         status.pending_files = job.total_blobs.saturating_sub(status.indexed_files);
         status.progress = calculate_index_progress(status.indexed_files, status.total_files);
     }
+    status.is_partial = status.indexed_files > 0 && status.indexed_files < status.total_files;
     match job.status.as_str() {
         JOB_QUEUED | JOB_COLLECTING | JOB_UPLOADING => {
             status.status = IndexStatus::Indexing;
@@ -2411,6 +2435,7 @@ fn collect_blobs(
     let mut scanned_files = 0;
     let mut indexed_files = 0;
     let mut excluded_count = 0;
+    let mut collected_bytes = 0u64;
 
     while let Some(dir) = dirs_stack.pop() {
         let entries = match fs::read_dir(&dir) {
@@ -2477,6 +2502,13 @@ fn collect_blobs(
                 .to_string_lossy()
                 .replace('\\', "/");
             if let Some(content) = read_file_with_encoding(&p) {
+                collected_bytes = collected_bytes.saturating_add(content.len() as u64);
+                if collected_bytes > MAX_IN_MEMORY_INDEX_BYTES {
+                    anyhow::bail!(
+                        "索引正文超过单次内存上限 {} MiB，请缩小项目范围或使用本地搜索",
+                        MAX_IN_MEMORY_INDEX_BYTES / (1024 * 1024)
+                    );
+                }
                 let parts = split_content(&rel, &content, max_lines_per_blob);
                 let blob_count = parts.len();
                 indexed_files += 1;
@@ -2691,6 +2723,21 @@ fn mark_index_job_error(
 ) {
     let error_message = message.to_string();
     let resumable_failure = failed_batch.is_some() && auth_scope_hash.is_none();
+    let failure_class = if auth_scope_hash.is_some() {
+        "auth"
+    } else if message.contains("blob_names") || message.contains("响应中缺少") {
+        "protocol"
+    } else if message.contains("HTTP 4") {
+        "deterministic"
+    } else {
+        "transient"
+    };
+    let retry_count = jobs::get_job(normalized_root)
+        .map(|job| job.retry_count.saturating_add(1))
+        .unwrap_or(1);
+    let cooldown_seconds = 15u64.saturating_mul(1u64 << retry_count.min(5));
+    let next_retry_at = (!matches!(failure_class, "protocol" | "deterministic"))
+        .then(|| chrono::Utc::now() + chrono::Duration::seconds(cooldown_seconds.min(300) as i64));
     let event_type = if resumable_failure {
         "paused"
     } else {
@@ -2707,6 +2754,9 @@ fn mark_index_job_error(
                 JOB_FAILED.to_string()
             };
             job.last_error = Some(error_message.clone());
+            job.failure_class = Some(failure_class.to_string());
+            job.retry_count = retry_count;
+            job.next_retry_at = next_retry_at;
             if let Some(batch) = failed_batch {
                 if !job.failed_batches.contains(&batch) {
                     job.failed_batches.push(batch);
@@ -2731,6 +2781,7 @@ fn mark_index_job_error(
             status.pending_files = job.total_blobs.saturating_sub(status.indexed_files);
             status.progress = calculate_index_progress(status.indexed_files, status.total_files);
         }
+        status.is_partial = status.indexed_files > 0 && status.indexed_files < status.total_files;
         status.failed_files = failed_blobs;
         status.last_error = Some(error_message.clone());
         status.last_failure_time = Some(chrono::Utc::now());
@@ -2785,6 +2836,7 @@ async fn update_index_with_mode(
     .ok_or_else(|| anyhow::anyhow!("ACE 索引任务检查点不存在"))?;
     let _ = update_project_status(project_root_path, |status| {
         status.status = IndexStatus::Indexing;
+        status.is_partial = false;
         status.progress = 0;
         status.last_error = None;
         status.last_failure_scope_hash = None;
@@ -2913,7 +2965,7 @@ async fn update_index_with_mode(
     );
 
     let client = create_acemcp_client(config)?;
-    let mut uploaded_this_run = Vec::new();
+    let mut recent_files = Vec::new();
     for (batch_offset, batch_entries) in new_entries.chunks(batch_size).enumerate() {
         let batch_number = completed_batch_count + batch_offset + 1;
         let batch = batch_entries
@@ -2948,7 +3000,7 @@ async fn update_index_with_mode(
                     let body = response.text().await.unwrap_or_default();
                     anyhow::bail!("HTTP {} {}", status, body);
                 }
-                Ok(response.json::<serde_json::Value>().await?)
+                Ok(response.json::<BatchUploadResponse>().await?)
             },
             3,
             1.0,
@@ -2956,16 +3008,7 @@ async fn update_index_with_mode(
         .await;
 
         let returned_names = match response {
-            Ok(value) => value
-                .get("blob_names")
-                .and_then(|value| value.as_array())
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(|value| value.as_str().map(str::to_string))
-                        .collect::<Vec<_>>()
-                })
-                .filter(|names| !names.is_empty()),
+            Ok(value) => value.blob_names.filter(|names| !names.is_empty()),
             Err(error) => {
                 let error_message = error.to_string();
                 let auth_failure = is_ace_auth_failure_error(&error_message);
@@ -3022,12 +3065,17 @@ async fn update_index_with_mode(
             .iter()
             .cloned()
             .collect::<HashSet<_>>();
-        uploaded_this_run.extend(
-            batch_entries
-                .iter()
-                .filter(|(hash, _)| confirmed_batch_set.contains(hash))
-                .map(|(_, blob)| blob.clone()),
-        );
+        if recent_files.len() < 5 {
+            recent_files.extend(
+                batch_entries
+                    .iter()
+                    .filter(|(hash, _)| confirmed_batch_set.contains(hash))
+                    .map(|(_, blob)| strip_chunk_suffix(&blob.path).to_string()),
+            );
+            recent_files.sort();
+            recent_files.dedup();
+            recent_files.truncate(5);
+        }
         let missing_blobs = batch_hashes
             .len()
             .saturating_sub(confirmed_batch_hashes.len());
@@ -3137,14 +3185,6 @@ async fn update_index_with_mode(
     let is_first_success = get_project_status(project_root_path)
         .last_success_time
         .is_none();
-    let mut recent_files = uploaded_this_run
-        .iter()
-        .map(|blob| strip_chunk_suffix(&blob.path).to_string())
-        .collect::<Vec<_>>();
-    recent_files.sort();
-    recent_files.dedup();
-    recent_files.truncate(5);
-
     jobs::update_job(
         &normalized_root,
         "completed",
@@ -3153,12 +3193,16 @@ async fn update_index_with_mode(
             job.status = JOB_COMPLETED.to_string();
             job.completed_blobs = total_blobs;
             job.last_error = None;
+            job.failure_class = None;
+            job.retry_count = 0;
+            job.next_retry_at = None;
             job.failed_batches.clear();
         },
     )?
     .ok_or_else(|| anyhow::anyhow!("ACE 索引任务在完成时丢失"))?;
     let _ = update_project_status(project_root_path, |status| {
         status.status = IndexStatus::Synced;
+        status.is_partial = false;
         status.progress = 100;
         status.total_files = total_blobs;
         status.indexed_files = total_blobs;

@@ -1844,7 +1844,8 @@ function projectOptionLabel(status: ProjectIndexStatus): string {
     ? ` ${Math.round(status.progress || 0)}%`
     : ''
   const stale = status.is_stale && status.status !== 'indexing' ? ' · 待重建' : ''
-  return `${getProjectName(status.project_root)} · ${projectStatusLabel[status.status] || '未知'}${progress} · ${indexed}/${total} 文件${stale}`
+  const partial = status.is_partial ? ' · 部分可用' : ''
+  return `${getProjectName(status.project_root)} · ${projectStatusLabel[status.status] || '未知'}${progress} · ${indexed}/${total} 文件${partial}${stale}`
 }
 
 /** 加载调试用项目选择列表；数据源与索引管理页保持一致。 */

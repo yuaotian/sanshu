@@ -58,7 +58,7 @@ pub(crate) struct IndexJob {
     /// 已经收到 ACE 成功响应的本地 blob 哈希。
     #[serde(default)]
     pub completed_blob_hashes: Vec<String>,
-    /// ACE 返回的远端 blob 名称，允许每批成功后立即写入 projects.json。
+    /// ACE 返回的 blob 名称；当前实测协议与本地 hash 相同，每批成功后立即写入 projects.json。
     #[serde(default)]
     pub uploaded_blob_names: Vec<String>,
     #[serde(default)]
@@ -68,6 +68,15 @@ pub(crate) struct IndexJob {
     pub rerun_mode: Option<String>,
     #[serde(default)]
     pub last_error: Option<String>,
+    /// 最近一次失败的分类，用于区分协议错误与可重试网络错误。
+    #[serde(default)]
+    pub failure_class: Option<String>,
+    /// 自动重试次数；显式强制重建会重新开始计数。
+    #[serde(default)]
+    pub retry_count: u32,
+    /// 自动重试冷却截止时间。
+    #[serde(default)]
+    pub next_retry_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
@@ -98,6 +107,9 @@ impl IndexJob {
             failed_batches: Vec::new(),
             rerun_mode: None,
             last_error: None,
+            failure_class: None,
+            retry_count: 0,
+            next_retry_at: None,
             created_at: now.clone(),
             updated_at: now,
             events: Vec::new(),
@@ -107,7 +119,9 @@ impl IndexJob {
     pub(crate) fn is_resumable(&self) -> bool {
         matches!(self.status.as_str(), JOB_QUEUED | JOB_COLLECTING | JOB_UPLOADING)
             // 中文说明：已有部分确认结果的暂停任务可直接服务搜索，启动时不再反复重传；显式强制重建仍可接管。
-            || (self.status == JOB_PAUSED && self.completed_blobs == 0)
+            || (self.status == JOB_PAUSED
+                && self.completed_blobs == 0
+                && !matches!(self.failure_class.as_deref(), Some("protocol" | "deterministic")))
     }
 }
 
@@ -249,6 +263,22 @@ pub(crate) fn resumable_jobs() -> Vec<IndexJob> {
         .into_values()
         .filter(IndexJob::is_resumable)
         .collect()
+}
+
+/// 自动入口是否允许再次启动任务；显式 force 路径不调用此门禁。
+pub(crate) fn automatic_retry_allowed(project_root: &str) -> bool {
+    let Some(job) = get_job(project_root) else {
+        return true;
+    };
+    if matches!(
+        job.failure_class.as_deref(),
+        Some("protocol" | "deterministic")
+    ) {
+        return false;
+    }
+    job.next_retry_at
+        .map(|retry_at| retry_at <= Utc::now())
+        .unwrap_or(true)
 }
 
 pub(crate) fn create_job(
