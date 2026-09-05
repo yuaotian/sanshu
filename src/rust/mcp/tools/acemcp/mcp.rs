@@ -231,6 +231,11 @@ impl AcemcpTool {
                 // 已完成索引，直接搜索
                 log_debug!("项目索引已完成，直接执行搜索");
             }
+            InitialIndexState::Partial => {
+                // 中文说明：部分 blob 已确认可用时直接搜索，避免每次 sou 请求重新上传整库。
+                hint_message = "\n\n💡 提示：当前使用已确认的部分索引，未确认文件不会阻塞搜索。".to_string();
+                log_debug!("项目索引部分可用，跳过自动重试");
+            }
         }
 
         // 3. 执行搜索或返回索引中提示
@@ -1070,6 +1075,8 @@ pub enum InitialIndexState {
     Indexing,
     /// 上次索引失败
     Failed,
+    /// 已有部分 blob 可检索，但仍有未确认内容
+    Partial,
 }
 
 /// 获取项目的初始索引状态
@@ -1081,9 +1088,14 @@ pub fn get_initial_index_state(project_root: &str) -> InitialIndexState {
         IndexStatus::Idle => InitialIndexState::Missing,
         IndexStatus::Synced => InitialIndexState::Synced,
         IndexStatus::Indexing => InitialIndexState::Indexing,
-        // 可恢复暂停与普通失败都允许再次触发；具体是否续传由 index_jobs.json 决定。
-        IndexStatus::Paused => InitialIndexState::Failed,
-        IndexStatus::Failed => InitialIndexState::Failed,
+        // 中文说明：部分上传已经持久化时保留当前索引供搜索使用，避免每次请求重启整轮收集。
+        IndexStatus::Paused | IndexStatus::Failed
+            if status.indexed_files > 0 && status.indexed_files < status.total_files =>
+        {
+            InitialIndexState::Partial
+        }
+        // 没有任何已确认内容时仍保留原有失败语义，允许显式/启动恢复路径接管。
+        IndexStatus::Paused | IndexStatus::Failed => InitialIndexState::Failed,
     }
 }
 
@@ -1364,6 +1376,7 @@ fn launch_index_worker(
             | InitialIndexState::Idle
             | InitialIndexState::Failed
             | InitialIndexState::Synced
+            | InitialIndexState::Partial
             | InitialIndexState::Indexing => {}
         }
     }
@@ -1575,6 +1588,10 @@ pub async fn ensure_initial_index_background(
         | InitialIndexState::Indexing => {
             // 启动函数会先核对 manifest；存在未完成任务时即使状态为 indexing 也会恢复。
             let _ = start_background_index(config, project_root, false).await?;
+        }
+        InitialIndexState::Partial => {
+            // 中文说明：已有可用索引时不因单个缺口重新收集整库，显式强制重建仍可接管。
+            log_debug!("跳过部分索引的自动恢复: project_root={}", project_root);
         }
     }
     Ok(())

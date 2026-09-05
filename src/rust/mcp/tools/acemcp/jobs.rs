@@ -105,10 +105,9 @@ impl IndexJob {
     }
 
     pub(crate) fn is_resumable(&self) -> bool {
-        matches!(
-            self.status.as_str(),
-            JOB_QUEUED | JOB_COLLECTING | JOB_UPLOADING | JOB_PAUSED
-        )
+        matches!(self.status.as_str(), JOB_QUEUED | JOB_COLLECTING | JOB_UPLOADING)
+            // 中文说明：已有部分确认结果的暂停任务可直接服务搜索，启动时不再反复重传；显式强制重建仍可接管。
+            || (self.status == JOB_PAUSED && self.completed_blobs == 0)
     }
 }
 
