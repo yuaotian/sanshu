@@ -30,6 +30,7 @@ const ORT_DLL_BYTES: u64 = 15_809_848;
 const CUDA_PROVIDER_DLL_FILE_NAME: &str = "onnxruntime_providers_cuda.dll";
 #[cfg(feature = "cuda")]
 const CUDA_RUNTIME_ENV: &str = "SANSHU_ORT_CUDA_DIR";
+const CPU_INTRA_THREADS_ENV: &str = "SANSHU_ORT_CPU_INTRA_THREADS";
 const CUDA_INTRA_THREADS: usize = 4;
 const CUDA_PREFLIGHT_CACHE_TTL: Duration = Duration::from_secs(5);
 
@@ -903,9 +904,7 @@ fn create_embedding_model(
     }
 
     let threads = match provider {
-        ExecutionProvider::Cpu => std::thread::available_parallelism()
-            .map(|value| value.get())
-            .unwrap_or(1),
+        ExecutionProvider::Cpu => cpu_intra_threads(),
         ExecutionProvider::Cuda => CUDA_INTRA_THREADS,
     };
     let options = InitOptionsUserDefined::new()
@@ -928,6 +927,19 @@ fn create_embedding_model(
     let embedding = TextEmbedding::try_new_from_user_defined(model, options)
         .map_err(|error| format!("创建 BGE ONNX 会话失败: {}", error))?;
     Ok((embedding, threads))
+}
+
+// 中文说明：默认保持全部逻辑处理器；仅在显式设置正整数时限制 CPU BGE 会话线程，避免改变现有默认吞吐。
+fn cpu_intra_threads() -> usize {
+    let available = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+    std::env::var(CPU_INTRA_THREADS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(available))
+        .unwrap_or(available)
 }
 
 #[cfg(feature = "cuda")]

@@ -2489,7 +2489,7 @@ defineExpose({ saveConfig })
                   </n-radio-group>
                   <template #feedback>
                     <span class="form-feedback">
-                      自动优先尝试 CUDA，失败时回退 CPU；显式 CUDA/CPU 为强制模式。外部 CUDA 运行时目录可通过 SANSHU_ORT_CUDA_DIR 指定，需使用匹配 ORT 1.28.0 的 CUDA/cuDNN 依赖，切换 provider 后需重启 Sanshu 进程。
+                      自动优先尝试 CUDA，失败时回退 CPU；显式 CUDA/CPU 为强制模式。外部 CUDA 运行时目录可通过 SANSHU_ORT_CUDA_DIR 指定，需使用匹配 ORT 1.28.0 的 CUDA/cuDNN 依赖。CPU 回退时可通过 SANSHU_ORT_CPU_INTRA_THREADS 限制 BGE 推理线程数；两个环境变量均需重启 Sanshu 进程生效。
                     </span>
                   </template>
                 </n-form-item>
