@@ -185,7 +185,10 @@ interface RerankerModelStatus {
 
 interface ResourceUsageSnapshot {
   cpu_percent: number | null
+  system_cpu_percent: number | null
   memory_bytes: number | null
+  memory_available_bytes: number | null
+  memory_total_bytes: number | null
   gpu_percent: number | null
   gpu_memory_bytes: number | null
   gpu_memory_total_bytes: number | null
@@ -2489,7 +2492,7 @@ defineExpose({ saveConfig })
                   </n-radio-group>
                   <template #feedback>
                     <span class="form-feedback">
-                      自动优先尝试 CUDA，失败时回退 CPU；显式 CUDA/CPU 为强制模式。外部 CUDA 运行时目录可通过 SANSHU_ORT_CUDA_DIR 指定，需使用匹配 ORT 1.28.0 的 CUDA/cuDNN 依赖。CPU 回退时可通过 SANSHU_ORT_CPU_INTRA_THREADS 限制 BGE 推理线程数；两个环境变量均需重启 Sanshu 进程生效。
+                      自动优先尝试 CUDA，失败时回退 CPU；显式 CUDA/CPU 为强制模式。外部 CUDA 运行时目录可通过 SANSHU_ORT_CUDA_DIR 指定，需使用匹配 ORT 1.28.0 的 CUDA/cuDNN 依赖。CPU 回退时默认按当前资源保守限制线程和 batch，也可通过 SANSHU_ORT_CPU_INTRA_THREADS 进一步收紧上限；两个环境变量均需重启 Sanshu 进程生效。资源压力过高时语义索引会让路给 rg，BGE 闲置 5 分钟后按需释放。
                     </span>
                   </template>
                 </n-form-item>

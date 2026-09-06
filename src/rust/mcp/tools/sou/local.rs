@@ -662,6 +662,7 @@ async fn search_with_index(
                         }
                     }
                     Err(error) => {
+                        let resource_limited = error.starts_with("resource:");
                         let failure_state = if error.starts_with("loading:") {
                             SEMANTIC_BUILDING
                         } else if error.starts_with("missing:") {
@@ -673,20 +674,50 @@ async fn search_with_index(
                         if let Ok(mut last_error) = index.semantic_last_error.lock() {
                             *last_error = Some(error.clone());
                         }
-                        append_fallback(
-                            &mut fallback_reason,
-                            &format!("BGE 查询失败，本次保留 FTS5 结果: {}", error),
-                        );
+                        if resource_limited {
+                            let (fallback_hits, fallback_engine) =
+                                run_immediate_search(&root, &options, &terms).await?;
+                            hits = fallback_hits;
+                            engine = fallback_engine;
+                            degraded = true;
+                            append_fallback(
+                                &mut fallback_reason,
+                                "资源压力较高，本次语义查询降级为 rg/Rust 全局项目匹配",
+                            );
+                        } else {
+                            append_fallback(
+                                &mut fallback_reason,
+                                &format!("BGE 查询失败，本次保留 FTS5 结果: {}", error),
+                            );
+                        }
                     }
                 }
             } else {
-                append_fallback(
-                    &mut fallback_reason,
-                    &format!(
-                        "语义索引状态为 {}，本次保留 FTS5 结果",
-                        index.semantic_state_name(true)
-                    ),
-                );
+                let resource_limited = index
+                    .semantic_last_error
+                    .lock()
+                    .ok()
+                    .and_then(|error| error.clone())
+                    .is_some_and(|error| error.starts_with("resource:"));
+                if resource_limited {
+                    let (fallback_hits, fallback_engine) =
+                        run_immediate_search(&root, &options, &terms).await?;
+                    hits = fallback_hits;
+                    engine = fallback_engine;
+                    degraded = true;
+                    append_fallback(
+                        &mut fallback_reason,
+                        "资源压力较高，本次语义索引让路，使用 rg/Rust 全局项目匹配",
+                    );
+                } else {
+                    append_fallback(
+                        &mut fallback_reason,
+                        &format!(
+                            "语义索引状态为 {}，本次保留 FTS5 结果",
+                            index.semantic_state_name(true)
+                        ),
+                    );
+                }
             }
         }
     }

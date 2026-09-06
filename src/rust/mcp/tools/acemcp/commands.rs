@@ -1826,6 +1826,11 @@ pub fn get_local_embedding_model_status(
                 "BGE 共享模型运行时资产尚未就绪".to_string(),
                 None,
             ),
+            crate::mcp::embedding::RuntimePhase::Unloaded => (
+                "unloaded".to_string(),
+                "BGE 共享模型因闲置已释放，下次语义请求将按需重载".to_string(),
+                None,
+            ),
             crate::mcp::embedding::RuntimePhase::Error => (
                 "error".to_string(),
                 "BGE 共享模型初始化异常".to_string(),

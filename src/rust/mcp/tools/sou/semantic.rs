@@ -111,6 +111,7 @@ pub(super) fn inspect(db_path: &Path) -> Result<SemanticIndexStats> {
 struct SemanticSyncTuning {
     embedding_batch_size: usize,
     commit_each_batch: bool,
+    dynamic_resources: bool,
 }
 
 impl Default for SemanticSyncTuning {
@@ -118,6 +119,7 @@ impl Default for SemanticSyncTuning {
         Self {
             embedding_batch_size: embedding::EMBEDDING_BATCH_SIZE,
             commit_each_batch: true,
+            dynamic_resources: true,
         }
     }
 }
@@ -195,9 +197,16 @@ where
     let mut indexed = total.saturating_sub(pending.len() as u64);
     on_progress(indexed, pending.len() as u64);
 
-    let batch_size = tuning.embedding_batch_size.max(1);
     if tuning.commit_each_batch {
-        for batch in pending.chunks_mut(batch_size) {
+        while !pending.is_empty() {
+            let batch_size = if tuning.dynamic_resources {
+                embedding::prepare_semantic_batch(model_dir)
+                    .map_err(|error| anyhow::anyhow!("resource: {}", error))?
+            } else {
+                tuning.embedding_batch_size.max(1)
+            };
+            let batch_count = batch_size.min(pending.len());
+            let batch = pending.drain(..batch_count).collect::<Vec<_>>();
             let documents = batch
                 .iter()
                 .map(|chunk| format!("{}\n{}", chunk.relative_path, chunk.excerpt))
@@ -210,15 +219,23 @@ where
             )
             .map_err(|error| anyhow::anyhow!("{}: {}", error.state, error.message))?;
             let transaction = connection.transaction()?;
-            insert_vector_batch(&transaction, batch, embeddings, &key)?;
+            insert_vector_batch(&transaction, &batch, embeddings, &key)?;
             transaction.commit()?;
             indexed += batch.len() as u64;
-            on_progress(indexed, total.saturating_sub(indexed));
+            on_progress(indexed, pending.len() as u64);
         }
     } else {
         // 中文说明：基准变体把所有向量写入一个事务，用于量化 SQLite commit 开销；生产默认仍逐批提交。
         let transaction = connection.transaction()?;
-        for batch in pending.chunks_mut(batch_size) {
+        while !pending.is_empty() {
+            let batch_size = if tuning.dynamic_resources {
+                embedding::prepare_semantic_batch(model_dir)
+                    .map_err(|error| anyhow::anyhow!("resource: {}", error))?
+            } else {
+                tuning.embedding_batch_size.max(1)
+            };
+            let batch_count = batch_size.min(pending.len());
+            let batch = pending.drain(..batch_count).collect::<Vec<_>>();
             let documents = batch
                 .iter()
                 .map(|chunk| format!("{}\n{}", chunk.relative_path, chunk.excerpt))
@@ -230,9 +247,9 @@ where
                 batch_size,
             )
             .map_err(|error| anyhow::anyhow!("{}: {}", error.state, error.message))?;
-            insert_vector_batch(&transaction, batch, embeddings, &key)?;
+            insert_vector_batch(&transaction, &batch, embeddings, &key)?;
             indexed += batch.len() as u64;
-            on_progress(indexed, total.saturating_sub(indexed));
+            on_progress(indexed, pending.len() as u64);
         }
         transaction.commit()?;
     }
@@ -484,6 +501,13 @@ fn cached_vectors(db_path: &Path) -> Result<Arc<Vec<CachedVector>>> {
 pub(super) fn invalidate_cache(db_path: &Path) {
     if let Ok(mut cache) = VECTOR_CACHE.lock() {
         remove_cache_entries(&mut cache, db_path);
+    }
+}
+
+pub(crate) fn clear_cache() {
+    if let Ok(mut cache) = VECTOR_CACHE.lock() {
+        cache.entries.clear();
+        cache.bytes = 0;
     }
 }
 
@@ -1274,6 +1298,7 @@ mod tests {
                 SemanticSyncTuning {
                     embedding_batch_size: batch_size,
                     commit_each_batch,
+                    dynamic_resources: false,
                 },
             )
             .expect("吞吐基准同步应成功");

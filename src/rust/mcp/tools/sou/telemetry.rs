@@ -8,7 +8,10 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, Serialize)]
 pub struct ResourceUsageSnapshot {
     pub cpu_percent: Option<f64>,
+    pub system_cpu_percent: Option<f64>,
     pub memory_bytes: Option<u64>,
+    pub memory_available_bytes: Option<u64>,
+    pub memory_total_bytes: Option<u64>,
     pub gpu_percent: Option<f64>,
     pub gpu_memory_bytes: Option<u64>,
     pub gpu_memory_total_bytes: Option<u64>,
@@ -18,10 +21,24 @@ pub struct ResourceUsageSnapshot {
     pub message: String,
 }
 
+/// 中文说明：供 embedding 资源策略使用的轻量快照，不把系统指标写入持久状态。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ResourcePressureSnapshot {
+    pub process_cpu_percent: Option<f64>,
+    pub system_cpu_percent: Option<f64>,
+    pub process_memory_bytes: Option<u64>,
+    pub memory_available_bytes: Option<u64>,
+    pub memory_total_bytes: Option<u64>,
+    pub gpu_percent: Option<f64>,
+    pub gpu_memory_bytes: Option<u64>,
+    pub gpu_memory_total_bytes: Option<u64>,
+}
+
 #[derive(Clone, Copy)]
 struct CpuTimes {
     process_ticks: u64,
     system_ticks: u64,
+    system_total_ticks: u64,
 }
 
 static LAST_CPU_TIMES: Lazy<Mutex<Option<CpuTimes>>> = Lazy::new(|| Mutex::new(None));
@@ -38,71 +55,107 @@ struct GpuSnapshot {
 }
 
 pub fn snapshot() -> ResourceUsageSnapshot {
-    let (cpu_percent, cpu_provider) = sample_cpu_percent();
-    let memory_bytes = process_memory_bytes();
-    let gpu = sample_gpu();
+    let pressure = pressure_snapshot();
     let mut unavailable = Vec::new();
-    if cpu_percent.is_none() {
+    if pressure.process_cpu_percent.is_none() {
         unavailable.push("CPU");
     }
-    if memory_bytes.is_none() {
+    if pressure.process_memory_bytes.is_none() {
         unavailable.push("内存");
     }
-    if gpu.percent.is_none() {
+    if pressure.gpu_percent.is_none() {
         unavailable.push("GPU");
     }
 
     let message = if unavailable.is_empty() {
         format!(
             "已采样 CPU、进程内存和 {} GPU",
-            gpu.provider.as_deref().unwrap_or("可用")
+            if pressure.gpu_memory_total_bytes.is_some() {
+                "nvidia-smi"
+            } else {
+                "可用"
+            }
         )
     } else {
         format!(
             "已采样可用进程指标；{} 未提供 ({})",
             unavailable.join("、"),
-            gpu.message
+            if pressure.gpu_percent.is_some() {
+                "部分 GPU 指标可用"
+            } else {
+                "未检测到 nvidia-smi"
+            }
         )
     };
 
     ResourceUsageSnapshot {
-        cpu_percent,
-        memory_bytes,
-        gpu_percent: gpu.percent,
-        gpu_memory_bytes: gpu.memory_bytes,
-        gpu_memory_total_bytes: gpu.memory_total_bytes,
-        cpu_provider,
-        gpu_provider: gpu.provider,
+        cpu_percent: pressure.process_cpu_percent,
+        system_cpu_percent: pressure.system_cpu_percent,
+        memory_bytes: pressure.process_memory_bytes,
+        memory_available_bytes: pressure.memory_available_bytes,
+        memory_total_bytes: pressure.memory_total_bytes,
+        gpu_percent: pressure.gpu_percent,
+        gpu_memory_bytes: pressure.gpu_memory_bytes,
+        gpu_memory_total_bytes: pressure.gpu_memory_total_bytes,
+        cpu_provider: Some(cpu_provider().to_string()),
+        gpu_provider: pressure
+            .gpu_memory_total_bytes
+            .is_some()
+            .then(|| "nvidia-smi".to_string()),
         sampled_at: chrono::Utc::now().to_rfc3339(),
         message,
     }
 }
 
-fn sample_cpu_percent() -> (Option<f64>, Option<String>) {
+pub(crate) fn pressure_snapshot() -> ResourcePressureSnapshot {
+    let (process_cpu_percent, system_cpu_percent) = sample_cpu_percent();
+    let (memory_available_bytes, memory_total_bytes) = system_memory_bytes();
+    let gpu = sample_gpu();
+    ResourcePressureSnapshot {
+        process_cpu_percent,
+        system_cpu_percent,
+        process_memory_bytes: process_memory_bytes(),
+        memory_available_bytes,
+        memory_total_bytes,
+        gpu_percent: gpu.percent,
+        gpu_memory_bytes: gpu.memory_bytes,
+        gpu_memory_total_bytes: gpu.memory_total_bytes,
+    }
+}
+
+fn sample_cpu_percent() -> (Option<f64>, Option<f64>) {
     let current = match read_cpu_times() {
         Some(value) => value,
         None => return (None, None),
     };
-    let percent = LAST_CPU_TIMES.lock().ok().and_then(|mut previous| {
+    let percentages = LAST_CPU_TIMES.lock().ok().and_then(|mut previous| {
         let result = previous.and_then(|last| {
             let process_delta = current.process_ticks.saturating_sub(last.process_ticks);
-            let system_delta = current.system_ticks.saturating_sub(last.system_ticks);
-            if system_delta == 0 {
+            let active_delta = current.system_ticks.saturating_sub(last.system_ticks);
+            let total_delta = current
+                .system_total_ticks
+                .saturating_sub(last.system_total_ticks);
+            if active_delta == 0 || total_delta == 0 {
                 None
             } else {
                 let cpu_count = std::thread::available_parallelism()
                     .map(|value| value.get() as f64)
                     .unwrap_or(1.0);
-                Some(
-                    ((process_delta as f64 / system_delta as f64) * 100.0 * cpu_count)
-                        .clamp(0.0, 100.0),
-                )
+                let process_percent =
+                    ((process_delta as f64 / active_delta as f64) * 100.0 * cpu_count)
+                        .clamp(0.0, 100.0);
+                let system_percent =
+                    ((active_delta as f64 / total_delta as f64) * 100.0).clamp(0.0, 100.0);
+                Some((process_percent, system_percent))
             }
         });
         *previous = Some(current);
         result
     });
-    (percent, Some(cpu_provider().to_string()))
+    let (process_percent, system_percent) = percentages
+        .map(|(process, system)| (Some(process), Some(system)))
+        .unwrap_or((None, None));
+    (process_percent, system_percent)
 }
 
 fn cpu_provider() -> &'static str {
@@ -143,6 +196,20 @@ struct ProcessMemoryCounters {
 }
 
 #[cfg(windows)]
+#[repr(C)]
+struct MemoryStatusEx {
+    dw_length: u32,
+    dw_memory_load: u32,
+    ull_total_phys: u64,
+    ull_avail_phys: u64,
+    ull_total_page_file: u64,
+    ull_avail_page_file: u64,
+    ull_total_virtual: u64,
+    ull_avail_virtual: u64,
+    ull_avail_extended_virtual: u64,
+}
+
+#[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
     fn GetCurrentProcess() -> *mut std::ffi::c_void;
@@ -154,6 +221,7 @@ extern "system" {
         user: *mut FileTime,
     ) -> i32;
     fn GetSystemTimes(idle: *mut FileTime, kernel: *mut FileTime, user: *mut FileTime) -> i32;
+    fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> i32;
 }
 
 #[cfg(windows)]
@@ -189,11 +257,12 @@ fn read_cpu_times() -> Option<CpuTimes> {
             return None;
         }
         let system_total = file_time_value(&system_kernel)
-            .saturating_add(file_time_value(&system_user))
-            .saturating_sub(file_time_value(&idle));
+            .saturating_add(file_time_value(&system_user));
+        let system_active = system_total.saturating_sub(file_time_value(&idle));
         Some(CpuTimes {
             process_ticks: file_time_value(&kernel).saturating_add(file_time_value(&user)),
-            system_ticks: system_total,
+            system_ticks: system_active,
+            system_total_ticks: system_total,
         })
     }
 }
@@ -219,6 +288,7 @@ fn read_cpu_times() -> Option<CpuTimes> {
     Some(CpuTimes {
         process_ticks: user_ticks.saturating_add(system_ticks),
         system_ticks: total.saturating_sub(idle),
+        system_total_ticks: total,
     })
 }
 
@@ -266,6 +336,51 @@ fn process_memory_bytes() -> Option<u64> {
 #[cfg(not(any(windows, target_os = "linux")))]
 fn process_memory_bytes() -> Option<u64> {
     None
+}
+
+#[cfg(windows)]
+fn system_memory_bytes() -> (Option<u64>, Option<u64>) {
+    // 中文说明：使用系统可用物理内存判断是否应暂停后台语义索引。
+    unsafe {
+        let mut status = MemoryStatusEx {
+            dw_length: std::mem::size_of::<MemoryStatusEx>() as u32,
+            dw_memory_load: 0,
+            ull_total_phys: 0,
+            ull_avail_phys: 0,
+            ull_total_page_file: 0,
+            ull_avail_page_file: 0,
+            ull_total_virtual: 0,
+            ull_avail_virtual: 0,
+            ull_avail_extended_virtual: 0,
+        };
+        if GlobalMemoryStatusEx(&mut status) == 0 {
+            return (None, None);
+        }
+        (Some(status.ull_avail_phys), Some(status.ull_total_phys))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn system_memory_bytes() -> (Option<u64>, Option<u64>) {
+    let content = match std::fs::read_to_string("/proc/meminfo") {
+        Ok(value) => value,
+        Err(_) => return (None, None),
+    };
+    let parse_kib = |name: &str| {
+        content.lines().find_map(|line| {
+            let value = line.strip_prefix(name)?.split_whitespace().next()?;
+            value
+                .parse::<u64>()
+                .ok()
+                .map(|value| value.saturating_mul(1024))
+        })
+    };
+    (parse_kib("MemAvailable:"), parse_kib("MemTotal:"))
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn system_memory_bytes() -> (Option<u64>, Option<u64>) {
+    (None, None)
 }
 
 fn sample_gpu() -> GpuSnapshot {

@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::mcp::tools::sou::telemetry::ResourcePressureSnapshot;
+
 pub const MODEL_NAME: &str = "Xenova/bge-small-zh-v1.5";
 pub const MODEL_REVISION: &str = "75c43b069aac4d136ba6bc1122f995fedcfd2781";
 pub const MODEL_DIMENSION: usize = 512;
@@ -31,8 +33,15 @@ const CUDA_PROVIDER_DLL_FILE_NAME: &str = "onnxruntime_providers_cuda.dll";
 #[cfg(feature = "cuda")]
 const CUDA_RUNTIME_ENV: &str = "SANSHU_ORT_CUDA_DIR";
 const CPU_INTRA_THREADS_ENV: &str = "SANSHU_ORT_CPU_INTRA_THREADS";
+const CPU_DEFAULT_INTRA_THREADS: usize = 4;
+const CPU_WARNING_INTRA_THREADS: usize = 2;
+const CPU_DEFAULT_BATCH_SIZE: usize = 16;
+const CPU_WARNING_BATCH_SIZE: usize = 8;
 const CUDA_INTRA_THREADS: usize = 4;
 const CUDA_PREFLIGHT_CACHE_TTL: Duration = Duration::from_secs(5);
+const MODEL_IDLE_RELEASE: Duration = Duration::from_secs(300);
+const RESOURCE_WARNING_DELAY: Duration = Duration::from_millis(100);
+const GIB: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderPreference {
@@ -115,6 +124,7 @@ pub enum RuntimePhase {
     Missing,
     Loading,
     Ready,
+    Unloaded,
     Error,
 }
 
@@ -124,6 +134,7 @@ impl RuntimePhase {
             Self::Missing => "missing",
             Self::Loading => "loading",
             Self::Ready => "ready",
+            Self::Unloaded => "unloaded",
             Self::Error => "error",
         }
     }
@@ -157,6 +168,7 @@ struct LoadedModel {
     provider_fallback_reason: Option<String>,
     runtime_path: PathBuf,
     intra_threads: usize,
+    batch_size: usize,
 }
 
 struct RuntimeSlot {
@@ -169,6 +181,8 @@ struct RuntimeSlot {
     provider_fallback_reason: Option<String>,
     runtime_path: Option<PathBuf>,
     intra_threads: Option<usize>,
+    batch_size: usize,
+    last_used_at: Option<Instant>,
 }
 
 impl Default for RuntimeSlot {
@@ -183,6 +197,8 @@ impl Default for RuntimeSlot {
             provider_fallback_reason: None,
             runtime_path: None,
             intra_threads: None,
+            batch_size: CPU_DEFAULT_BATCH_SIZE,
+            last_used_at: None,
         }
     }
 }
@@ -441,7 +457,7 @@ fn snapshot_with_availability(
                 cuda_runtime_dir: availability.cuda.directory.clone(),
                 cuda_runtime_error: availability.cuda.error.clone(),
                 runtime_path: runtime.runtime_path.clone(),
-                batch_size: EMBEDDING_BATCH_SIZE,
+                batch_size: runtime.batch_size,
                 intra_threads: runtime.intra_threads,
             }
         }
@@ -461,7 +477,7 @@ fn snapshot_with_availability(
             cuda_runtime_dir: availability.cuda.directory.clone(),
             cuda_runtime_error: availability.cuda.error.clone(),
             runtime_path: None,
-            batch_size: EMBEDDING_BATCH_SIZE,
+            batch_size: CPU_DEFAULT_BATCH_SIZE,
             intra_threads: None,
         },
         Err(error) => RuntimeSnapshot {
@@ -480,7 +496,7 @@ fn snapshot_with_availability(
             cuda_runtime_dir: availability.cuda.directory.clone(),
             cuda_runtime_error: availability.cuda.error.clone(),
             runtime_path: None,
-            batch_size: EMBEDDING_BATCH_SIZE,
+            batch_size: CPU_DEFAULT_BATCH_SIZE,
             intra_threads: None,
         },
     }
@@ -589,6 +605,8 @@ pub fn ensure_started(directory: &Path) {
         runtime.provider_fallback_reason = None;
         runtime.runtime_path = None;
         runtime.intra_threads = None;
+        runtime.batch_size = CPU_DEFAULT_BATCH_SIZE;
+        runtime.last_used_at = None;
         return;
     }
 
@@ -601,10 +619,13 @@ pub fn ensure_started(directory: &Path) {
     runtime.provider_fallback_reason = None;
     runtime.runtime_path = None;
     runtime.intra_threads = None;
+    runtime.batch_size = CPU_DEFAULT_BATCH_SIZE;
+    runtime.last_used_at = None;
     drop(runtime);
 
     std::thread::spawn(move || match load_model(&directory, requested_provider) {
         Ok(loaded) => {
+            let batch_size = loaded.batch_size;
             if let Ok(mut runtime) = RUNTIME.lock() {
                 if runtime.directory.as_deref() == Some(directory.as_path())
                     && runtime.requested_provider == requested_provider
@@ -616,14 +637,17 @@ pub fn ensure_started(directory: &Path) {
                     runtime.provider_fallback_reason = loaded.provider_fallback_reason;
                     runtime.runtime_path = Some(loaded.runtime_path);
                     runtime.intra_threads = Some(loaded.intra_threads);
+                    runtime.batch_size = batch_size;
+                    runtime.last_used_at = Some(Instant::now());
                     log::info!(
                         "[embedding] BGE 共享模型运行时已就绪，provider={}，batch={}，intra_threads={}",
                         runtime.execution_provider.as_str(),
-                        EMBEDDING_BATCH_SIZE,
+                        runtime.batch_size,
                         loaded.intra_threads
                     );
                 }
             }
+            schedule_idle_release(directory);
         }
         Err(error) => {
             if let Ok(mut runtime) = RUNTIME.lock() {
@@ -646,6 +670,12 @@ pub async fn embed_query(
 ) -> Result<Vec<f32>, EmbeddingUnavailable> {
     ensure_started(directory);
     wait_until_ready(directory, wait_budget).await?;
+    if let Some(reason) = resource_block_reason(directory) {
+        return Err(EmbeddingUnavailable {
+            state: "resource".to_string(),
+            message: reason,
+        });
+    }
     let directory = directory.to_path_buf();
     let query = format!("{}{}", QUERY_PREFIX, query.trim());
     tokio::task::spawn_blocking(move || embed_texts_ready(&directory, vec![query], 1))
@@ -801,6 +831,7 @@ fn embed_texts_ready(
             message: "BGE 共享模型运行时尚未就绪".to_string(),
         });
     }
+    runtime.last_used_at = Some(Instant::now());
     let model = runtime.model.as_mut().ok_or_else(|| EmbeddingUnavailable {
         state: "error".to_string(),
         message: "BGE 共享模型实例缺失".to_string(),
@@ -834,13 +865,14 @@ fn load_model(
         match ensure_ort_runtime(ProviderPreference::Cuda) {
             Ok(runtime) => {
                 match create_embedding_model(directory, ExecutionProvider::Cuda, &runtime) {
-                    Ok((model, intra_threads)) => {
+                    Ok((model, intra_threads, batch_size)) => {
                         return Ok(LoadedModel {
                             model,
                             execution_provider: ExecutionProvider::Cuda,
                             provider_fallback_reason: None,
                             runtime_path: runtime.runtime_path,
                             intra_threads,
+                            batch_size,
                         });
                     }
                     Err(error) if requested_provider.allows_cpu_fallback() => {
@@ -850,7 +882,7 @@ fn load_model(
                             "[embedding] CUDA provider 初始化失败，将在同一 ORT 核心回退 CPU: {}",
                             error
                         );
-                        let (model, intra_threads) =
+                        let (model, intra_threads, batch_size) =
                             create_embedding_model(directory, ExecutionProvider::Cpu, &runtime)?;
                         return Ok(LoadedModel {
                             model,
@@ -858,6 +890,7 @@ fn load_model(
                             provider_fallback_reason: fallback_reason,
                             runtime_path: runtime.runtime_path,
                             intra_threads,
+                            batch_size,
                         });
                     }
                     Err(error) => return Err(format!("CUDA 初始化失败: {}", error)),
@@ -878,7 +911,7 @@ fn load_model(
             .map(|reason| format!("{}；CPU 初始化失败: {}", reason, error))
             .unwrap_or(error)
     })?;
-    let (model, intra_threads) =
+    let (model, intra_threads, batch_size) =
         create_embedding_model(directory, ExecutionProvider::Cpu, &runtime).map_err(|error| {
             fallback_reason
                 .as_ref()
@@ -891,6 +924,7 @@ fn load_model(
         provider_fallback_reason: fallback_reason,
         runtime_path: runtime.runtime_path,
         intra_threads,
+        batch_size,
     })
 }
 
@@ -898,7 +932,7 @@ fn create_embedding_model(
     directory: &Path,
     provider: ExecutionProvider,
     runtime: &OrtRuntimeInfo,
-) -> Result<(TextEmbedding, usize), String> {
+) -> Result<(TextEmbedding, usize, usize), String> {
     if provider == ExecutionProvider::Cuda && !runtime.cuda_capable {
         return Err("当前 ONNX Runtime 核心不含可用 CUDA provider".to_string());
     }
@@ -907,6 +941,7 @@ fn create_embedding_model(
         ExecutionProvider::Cpu => cpu_intra_threads(),
         ExecutionProvider::Cuda => CUDA_INTRA_THREADS,
     };
+    let batch_size = batch_size_for(provider, resource_pressure(provider).0);
     let options = InitOptionsUserDefined::new()
         .with_max_length(512)
         .with_intra_threads(threads);
@@ -926,20 +961,193 @@ fn create_embedding_model(
     let model = user_defined_model(directory)?;
     let embedding = TextEmbedding::try_new_from_user_defined(model, options)
         .map_err(|error| format!("创建 BGE ONNX 会话失败: {}", error))?;
-    Ok((embedding, threads))
+    Ok((embedding, threads, batch_size))
 }
 
-// 中文说明：默认保持全部逻辑处理器；仅在显式设置正整数时限制 CPU BGE 会话线程，避免改变现有默认吞吐。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResourcePressure {
+    Normal,
+    Warning,
+    Critical,
+}
+
+fn resource_pressure(provider: ExecutionProvider) -> (ResourcePressure, ResourcePressureSnapshot) {
+    let snapshot = crate::mcp::tools::sou::telemetry::pressure_snapshot();
+    let process_memory_critical = snapshot
+        .process_memory_bytes
+        .is_some_and(|value| value >= 2 * GIB);
+    let process_memory_warning = snapshot
+        .process_memory_bytes
+        .is_some_and(|value| value >= 3 * GIB / 2);
+    let available_memory_critical = snapshot
+        .memory_available_bytes
+        .is_some_and(|value| value < 2 * GIB);
+    let available_memory_warning = snapshot
+        .memory_available_bytes
+        .is_some_and(|value| value < 4 * GIB);
+    let system_cpu_critical = snapshot
+        .system_cpu_percent
+        .is_some_and(|value| value >= 92.0);
+    let system_cpu_warning = snapshot
+        .system_cpu_percent
+        .is_some_and(|value| value >= 80.0);
+    let process_cpu_critical = snapshot
+        .process_cpu_percent
+        .is_some_and(|value| value >= 75.0);
+    let process_cpu_warning = snapshot
+        .process_cpu_percent
+        .is_some_and(|value| value >= 50.0);
+    let gpu_critical = provider == ExecutionProvider::Cuda
+        && snapshot
+            .gpu_memory_total_bytes
+            .zip(snapshot.gpu_memory_bytes)
+            .is_some_and(|(total, used)| total.saturating_sub(used) < GIB);
+    let gpu_warning = provider == ExecutionProvider::Cuda
+        && snapshot
+            .gpu_memory_total_bytes
+            .zip(snapshot.gpu_memory_bytes)
+            .is_some_and(|(total, used)| total.saturating_sub(used) < 2 * GIB);
+
+    let level = if process_memory_critical
+        || available_memory_critical
+        || system_cpu_critical
+        || process_cpu_critical
+        || gpu_critical
+    {
+        ResourcePressure::Critical
+    } else if process_memory_warning
+        || available_memory_warning
+        || system_cpu_warning
+        || process_cpu_warning
+        || gpu_warning
+    {
+        ResourcePressure::Warning
+    } else {
+        ResourcePressure::Normal
+    };
+    (level, snapshot)
+}
+
+fn batch_size_for(provider: ExecutionProvider, pressure: ResourcePressure) -> usize {
+    match (provider, pressure) {
+        (ExecutionProvider::Cpu, ResourcePressure::Normal) => CPU_DEFAULT_BATCH_SIZE,
+        (ExecutionProvider::Cpu, _) => CPU_WARNING_BATCH_SIZE,
+        (ExecutionProvider::Cuda, ResourcePressure::Normal) => EMBEDDING_BATCH_SIZE,
+        (ExecutionProvider::Cuda, _) => CPU_DEFAULT_BATCH_SIZE,
+    }
+}
+
+// 中文说明：默认采用保守线程数；显式环境变量只允许进一步收紧上限，避免配置缺失时占满用户 CPU。
 fn cpu_intra_threads() -> usize {
     let available = std::thread::available_parallelism()
         .map(|value| value.get())
         .unwrap_or(1);
+    let default_threads = match resource_pressure(ExecutionProvider::Cpu).0 {
+        ResourcePressure::Normal => CPU_DEFAULT_INTRA_THREADS,
+        ResourcePressure::Warning => CPU_WARNING_INTRA_THREADS,
+        ResourcePressure::Critical => 1,
+    }
+    .min(available);
     std::env::var(CPU_INTRA_THREADS_ENV)
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
-        .map(|value| value.min(available))
-        .unwrap_or(available)
+        .map(|value| value.min(default_threads))
+        .unwrap_or(default_threads)
+}
+
+pub fn prepare_semantic_batch(directory: &Path) -> Result<usize, String> {
+    let provider = RUNTIME
+        .lock()
+        .ok()
+        .filter(|runtime| runtime.directory.as_deref() == Some(directory))
+        .map(|runtime| runtime.execution_provider)
+        .unwrap_or(ExecutionProvider::Cpu);
+    let (pressure, snapshot) = resource_pressure(provider);
+    if pressure == ResourcePressure::Critical {
+        return Err(format!(
+            "当前资源压力过高，已暂停语义索引：system_cpu={:?}%, process_cpu={:?}%, rss={:?} MiB, available_memory={:?} MiB",
+            snapshot.system_cpu_percent,
+            snapshot.process_cpu_percent,
+            snapshot.process_memory_bytes.map(|value| value / 1024 / 1024),
+            snapshot.memory_available_bytes.map(|value| value / 1024 / 1024),
+        ));
+    }
+    if pressure == ResourcePressure::Warning {
+        std::thread::sleep(RESOURCE_WARNING_DELAY);
+    }
+    let batch_size = batch_size_for(provider, pressure);
+    if let Ok(mut runtime) = RUNTIME.lock() {
+        if runtime.directory.as_deref() == Some(directory) {
+            runtime.batch_size = batch_size;
+            runtime.last_used_at = Some(Instant::now());
+        }
+    }
+    Ok(batch_size)
+}
+
+fn resource_block_reason(directory: &Path) -> Option<String> {
+    let provider = RUNTIME
+        .lock()
+        .ok()
+        .filter(|runtime| runtime.directory.as_deref() == Some(directory))
+        .map(|runtime| runtime.execution_provider)
+        .unwrap_or(ExecutionProvider::Cpu);
+    let (pressure, snapshot) = resource_pressure(provider);
+    if pressure != ResourcePressure::Critical {
+        return None;
+    }
+    Some(format!(
+        "resource: 当前资源压力过高，已跳过语义查询：system_cpu={:?}%, process_cpu={:?}%, rss={:?} MiB, available_memory={:?} MiB",
+        snapshot.system_cpu_percent,
+        snapshot.process_cpu_percent,
+        snapshot.process_memory_bytes.map(|value| value / 1024 / 1024),
+        snapshot.memory_available_bytes.map(|value| value / 1024 / 1024),
+    ))
+}
+
+fn schedule_idle_release(directory: PathBuf) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(30));
+        let should_exit = match RUNTIME.lock() {
+            Ok(mut runtime) => {
+                if runtime.directory.as_deref() != Some(directory.as_path())
+                    || runtime.phase != RuntimePhase::Ready
+                    || runtime.model.is_none()
+                {
+                    true
+                } else if runtime
+                    .last_used_at
+                    .is_some_and(|value| value.elapsed() >= MODEL_IDLE_RELEASE)
+                {
+                    runtime.model = None;
+                    runtime.phase = RuntimePhase::Unloaded;
+                    runtime.intra_threads = None;
+                    runtime.batch_size = CPU_DEFAULT_BATCH_SIZE;
+                    runtime.last_used_at = None;
+                    log::info!(
+                        "[embedding] BGE 共享模型闲置释放，目录={}，下次语义请求将按需重载",
+                        directory.display()
+                    );
+                    false
+                } else {
+                    false
+                }
+            }
+            Err(_) => true,
+        };
+        if should_exit {
+            return;
+        }
+        if RUNTIME
+            .lock()
+            .ok()
+            .is_some_and(|runtime| runtime.phase == RuntimePhase::Unloaded)
+        {
+            crate::mcp::tools::sou::semantic::clear_cache();
+            return;
+        }
+    });
 }
 
 #[cfg(feature = "cuda")]
