@@ -972,7 +972,9 @@ enum ResourcePressure {
 }
 
 fn resource_pressure(provider: ExecutionProvider) -> (ResourcePressure, ResourcePressureSnapshot) {
-    let snapshot = crate::mcp::tools::sou::telemetry::pressure_snapshot();
+    let snapshot = crate::mcp::tools::sou::telemetry::pressure_snapshot(
+        provider == ExecutionProvider::Cuda,
+    );
     let process_memory_critical = snapshot
         .process_memory_bytes
         .is_some_and(|value| value >= 2 * GIB);

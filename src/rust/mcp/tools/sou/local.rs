@@ -482,6 +482,7 @@ async fn search_with_index(
     #[cfg(test)]
     let mut reranker_input_diagnostics = None;
     let mut fusion = None;
+    let mut semantic_fallback_used = false;
     if options.semantic.enabled() && engine == "fts5" {
         let semantic_deadline = if semantic_mode.accurate() {
             started_at + accurate_query_budget()
@@ -506,12 +507,26 @@ async fn search_with_index(
                     options.exclude_paths.clone(),
                     options.semantic.clone(),
                 );
-                while matches!(
-                    index.semantic_state.load(Ordering::Acquire),
-                    SEMANTIC_BUILDING | SEMANTIC_SYNCING
-                ) && Instant::now() < semantic_deadline
-                {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                if index.sync_running.load(Ordering::Acquire) {
+                    // 中文说明：语义同步是后台任务，查询路径直接让路给 rg，避免 accurate 预算阻塞用户。
+                    let (fallback_hits, fallback_engine) =
+                        run_immediate_search(&root, &options, &terms).await?;
+                    hits = fallback_hits;
+                    engine = fallback_engine;
+                    degraded = true;
+                    semantic_fallback_used = true;
+                    append_fallback(
+                        &mut fallback_reason,
+                        "语义索引正在后台同步，本次直接使用 rg/Rust 全局项目匹配",
+                    );
+                } else {
+                    while matches!(
+                        index.semantic_state.load(Ordering::Acquire),
+                        SEMANTIC_BUILDING | SEMANTIC_SYNCING
+                    ) && Instant::now() < semantic_deadline
+                    {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
                 }
             }
 
@@ -692,7 +707,7 @@ async fn search_with_index(
                         }
                     }
                 }
-            } else {
+            } else if !semantic_fallback_used {
                 let resource_limited = index
                     .semantic_last_error
                     .lock()

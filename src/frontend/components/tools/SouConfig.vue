@@ -762,6 +762,29 @@ const resourceGpuMemoryLabel = computed(() => {
   return `${formatBytes(usage.gpu_memory_bytes)}${total}`
 })
 
+const resourceSystemCpuLabel = computed(() =>
+  resourceUsage.value?.system_cpu_percent != null
+    ? `${resourceUsage.value.system_cpu_percent.toFixed(1)}%`
+    : '未提供',
+)
+
+const resourceAvailableMemoryLabel = computed(() =>
+  resourceUsage.value?.memory_available_bytes != null
+    ? formatBytes(resourceUsage.value.memory_available_bytes)
+    : '未提供',
+)
+
+const semanticPolicyLabel = computed(() => {
+  const status = localIndexStatus.value
+  if (!status)
+    return '策略待采样'
+  if (status.semantic_last_error?.startsWith('resource:'))
+    return '资源临界 · 已降级 rg'
+  if (status.semantic_state === 'building' || status.semantic_state === 'syncing')
+    return `后台让路中 · batch ${status.semantic_batch_size || 16}`
+  return `batch ${status.semantic_batch_size || 16} · intra_threads ${status.semantic_intra_threads || '默认'}`
+})
+
 const resourceSampleLabel = computed(() =>
   resourceUsage.value?.sampled_at
     ? `最近采样 ${formatDebugTime(resourceUsage.value.sampled_at)}`
@@ -2951,9 +2974,19 @@ defineExpose({ saveConfig })
                       <small>{{ resourceUsage?.cpu_provider || '能力未提供' }}</small>
                     </div>
                     <div class="sou-resource-item">
+                      <span class="sou-resource-label">系统 CPU</span>
+                      <strong>{{ resourceSystemCpuLabel }}</strong>
+                      <small>全机活动负载</small>
+                    </div>
+                    <div class="sou-resource-item">
                       <span class="sou-resource-label">进程 RSS</span>
                       <strong>{{ resourceMemoryLabel }}</strong>
                       <small>工作集采样</small>
+                    </div>
+                    <div class="sou-resource-item">
+                      <span class="sou-resource-label">可用内存</span>
+                      <strong>{{ resourceAvailableMemoryLabel }}</strong>
+                      <small>系统物理内存</small>
                     </div>
                     <div class="sou-resource-item">
                       <span class="sou-resource-label">GPU</span>
@@ -2968,6 +3001,9 @@ defineExpose({ saveConfig })
                   </div>
                   <div class="form-feedback">
                     {{ resourceUsage?.message || '等待首次采样' }} · {{ resourceSampleLabel }}
+                  </div>
+                  <div class="form-feedback">
+                    语义策略：{{ semanticPolicyLabel }}
                   </div>
                   <div class="sou-history-line">
                     {{ resourceHistoryLabel }}

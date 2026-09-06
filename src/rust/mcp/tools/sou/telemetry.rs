@@ -55,7 +55,7 @@ struct GpuSnapshot {
 }
 
 pub fn snapshot() -> ResourceUsageSnapshot {
-    let pressure = pressure_snapshot();
+    let pressure = pressure_snapshot(true);
     let mut unavailable = Vec::new();
     if pressure.process_cpu_percent.is_none() {
         unavailable.push("CPU");
@@ -107,10 +107,20 @@ pub fn snapshot() -> ResourceUsageSnapshot {
     }
 }
 
-pub(crate) fn pressure_snapshot() -> ResourcePressureSnapshot {
+pub(crate) fn pressure_snapshot(include_gpu: bool) -> ResourcePressureSnapshot {
     let (process_cpu_percent, system_cpu_percent) = sample_cpu_percent();
     let (memory_available_bytes, memory_total_bytes) = system_memory_bytes();
-    let gpu = sample_gpu();
+    let gpu = if include_gpu {
+        sample_gpu()
+    } else {
+        GpuSnapshot {
+            percent: None,
+            memory_bytes: None,
+            memory_total_bytes: None,
+            provider: None,
+            message: "CPU provider 跳过 GPU 采样".to_string(),
+        }
+    };
     ResourcePressureSnapshot {
         process_cpu_percent,
         system_cpu_percent,
