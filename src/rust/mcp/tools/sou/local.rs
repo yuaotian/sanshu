@@ -1737,8 +1737,26 @@ fn hits_from_line_matches(
         line_numbers.sort_unstable();
         line_numbers.dedup();
         let full_path = root.join(&path);
-        let content = fs::read_to_string(&full_path)
-            .with_context(|| format!("读取即时搜索命中文件失败: {}", full_path.display()))?;
+        // 中文说明：即时回表复用索引同步的容错文本读取，避免单个异常文件拖垮整次搜索。
+        let content = match fs::metadata(&full_path)
+            .with_context(|| format!("即时搜索命中文件元数据读取失败: {}", full_path.display()))
+            .and_then(|metadata| {
+                read_text_file(&full_path, metadata.len())
+                    .with_context(|| format!("读取即时搜索命中文件失败: {}", full_path.display()))
+            }) {
+            Ok(Some(content)) => content,
+            Ok(None) => {
+                log::warn!(
+                    "[sou-local] 即时命中文件不可作为文本读取，已跳过: {}",
+                    full_path.display()
+                );
+                continue;
+            }
+            Err(error) => {
+                log::warn!("[sou-local] 即时命中文件回读失败，已跳过: {}", error);
+                continue;
+            }
+        };
         let all_lines = content.lines().collect::<Vec<_>>();
         for line_number in line_numbers.into_iter().take(2) {
             let start_line = line_number.saturating_sub(3).max(1);
