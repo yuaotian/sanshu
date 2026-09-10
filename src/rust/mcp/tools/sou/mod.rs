@@ -1463,7 +1463,7 @@ fn format_fast_context_text(
     response: &fast_context::SearchResult,
     include_header: bool,
 ) -> Result<String> {
-    let root = PathBuf::from(project_root);
+    let root = PathBuf::from(fast_context::normalize_windows_path_text(project_root));
     let mut parts = Vec::new();
     let mut code_sections = 0usize;
     if include_header {
@@ -1566,15 +1566,47 @@ fn format_fast_context_text(
 
 fn resolve_fast_context_file(root: &Path, file: &FastContextFile) -> Result<Option<PathBuf>> {
     let candidate = if let Some(full_path) = file.full_path.as_deref() {
-        PathBuf::from(full_path)
+        PathBuf::from(fast_context::normalize_windows_path_text(full_path))
     } else if let Some(path) = file.path.as_deref() {
-        root.join(path)
+        root.join(fast_context::normalize_windows_path_text(path))
     } else {
         return Ok(None);
     };
-    let absolute = candidate.canonicalize().unwrap_or(candidate);
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let absolute = match candidate.canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            log_important!(
+                warn,
+                "[sou] fast-context 文件路径规范化失败，已跳过: candidate={}, root={}, error={}",
+                candidate.display(),
+                root.display(),
+                error
+            );
+            return Ok(None);
+        }
+    };
+    let root = match root.canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            log_important!(
+                warn,
+                "[sou] fast-context 项目根路径规范化失败: root={}, error={}",
+                root.display(),
+                error
+            );
+            return Err(anyhow!(
+                "fast-context 项目根路径规范化失败: {}",
+                root.display()
+            ));
+        }
+    };
     if !absolute.starts_with(&root) {
+        log_important!(
+            warn,
+            "[sou] fast-context 拒绝项目外路径: candidate={}, root={}",
+            absolute.display(),
+            root.display()
+        );
         return Err(anyhow!(
             "fast-context 返回了项目外路径: {}",
             absolute.display()
@@ -1974,7 +2006,9 @@ fn canonical_project_root(path: &str) -> Result<String> {
     if !canonical.is_dir() {
         return Err(anyhow!("项目路径不是目录: {}", canonical.display()));
     }
-    Ok(normalize_path(&canonical))
+    Ok(fast_context::normalize_windows_path_text(
+        &canonical.to_string_lossy(),
+    ))
 }
 
 fn normalize_path(path: &Path) -> String {

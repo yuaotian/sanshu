@@ -1228,9 +1228,21 @@ fn parse_answer(
     let file_re =
         Regex::new(r#"(?s)<file\s+path=["']([^"']+)["']>(.*?)</file>"#).expect("valid regex");
     let range_re = Regex::new(r"<range>(\d+)-(\d+)</range>").expect("valid regex");
-    let root = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf());
+    let root = match PathBuf::from(normalize_windows_path_text(
+        &project_root.to_string_lossy(),
+    ))
+    .canonicalize()
+    {
+        Ok(root) => root,
+        Err(error) => {
+            log::warn!(
+                "[fast-context] ANSWER 项目根路径规范化失败，已跳过全部文件项: root={}, error={}",
+                project_root.display(),
+                error
+            );
+            return Ok(Vec::new());
+        }
+    };
     let mut files = Vec::new();
 
     for cap in file_re.captures_iter(xml_text) {
@@ -1254,7 +1266,7 @@ fn parse_answer(
 
         files.push(FastContextFile {
             path: Some(rel_path),
-            full_path: Some(normalize_path(&full_path)),
+            full_path: Some(normalize_windows_path_text(&full_path.to_string_lossy())),
             ranges,
         });
     }
@@ -1263,7 +1275,7 @@ fn parse_answer(
 }
 
 fn resolve_answer_path(vpath: &str, root: &Path) -> Option<(String, PathBuf)> {
-    let mut normalized = vpath.trim().replace('\\', "/");
+    let mut normalized = normalize_windows_path_text(vpath);
     if normalized.starts_with("/codebase") {
         normalized = normalized
             .trim_start_matches("/codebase")
@@ -1279,8 +1291,24 @@ fn resolve_answer_path(vpath: &str, root: &Path) -> Option<(String, PathBuf)> {
         }
         root.join(&normalized)
     };
-    let absolute = candidate.canonicalize().unwrap_or(candidate);
+    let absolute = match candidate.canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            log::warn!(
+                "[fast-context] ANSWER 文件路径规范化失败，已跳过: candidate={}, root={}, error={}",
+                candidate.display(),
+                root.display(),
+                error
+            );
+            return None;
+        }
+    };
     if !absolute.starts_with(root) {
+        log::warn!(
+            "[fast-context] ANSWER 文件路径超出项目根，已跳过: candidate={}, root={}",
+            absolute.display(),
+            root.display()
+        );
         return None;
     }
     let rel = absolute.strip_prefix(root).ok().map(normalize_path)?;
@@ -3193,6 +3221,17 @@ fn has_parent_dir(path: &Path) -> bool {
 
 fn normalize_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+/// 统一 FastContext 边界上的 Windows 路径表示，避免扩展前缀参与路径比较。
+pub(crate) fn normalize_windows_path_text(path: &str) -> String {
+    let mut normalized = path.trim().replace('\\', "/");
+    if normalized.starts_with("//?/UNC/") {
+        normalized = format!("//{}", &normalized[8..]);
+    } else if normalized.starts_with("//?/") {
+        normalized = normalized[4..].to_string();
+    }
+    normalized
 }
 
 fn ws_app_ver() -> String {
