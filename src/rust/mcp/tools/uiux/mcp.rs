@@ -597,6 +597,7 @@ async fn search_knowledge_via_fast_context(
         knowledge_base::ensure_materialized().map_err(|e| format!("知识库物化失败: {}", e))?;
 
     let sections = SouTool::search_sections(SouRequest {
+        intent: Default::default(),
         project_root_path: kb_dir,
         query: query.to_string(),
         backend: Some("fast_context".to_string()),
@@ -703,6 +704,7 @@ async fn search_sou_sections(
     query: &str,
 ) -> Result<Vec<SouSection>, String> {
     SouTool::search_sections(SouRequest {
+        intent: Default::default(),
         project_root_path: project_root_path.to_string(),
         query: query.to_string(),
         backend: None,

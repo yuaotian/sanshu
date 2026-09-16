@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use ignore::WalkBuilder;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
 use ring::digest::{Context as ShaContext, SHA256};
 use rusqlite::{params, Connection, OpenFlags};
@@ -13,8 +13,10 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
+use super::query::{QueryPlan, Relevance, SearchIntent};
 use super::{reranker, semantic};
 
 const INDEX_MISSING: u8 = 0;
@@ -30,7 +32,6 @@ const SEMANTIC_ERROR: u8 = 5;
 const CHUNK_LINES: usize = 80;
 const CHUNK_OVERLAP: usize = 20;
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
-const MAX_QUERY_TERMS: usize = 24;
 const ACCURATE_LEXICAL_LIMIT: usize = 10;
 const ACCURATE_SEMANTIC_LIMIT: usize = 50;
 const ACCURATE_CANDIDATE_LIMIT: usize = 60;
@@ -48,6 +49,7 @@ static PROJECT_INDEXES: Lazy<Mutex<HashMap<PathBuf, Arc<ProjectIndex>>>> =
 pub(super) struct LocalSearchOptions {
     pub project_root: PathBuf,
     pub query: String,
+    pub intent: SearchIntent,
     pub max_results: usize,
     pub exclude_paths: Vec<String>,
     pub index_dir: PathBuf,
@@ -123,6 +125,7 @@ pub(super) struct LocalSearchOutput {
     #[cfg(test)]
     pub reranker_input_diagnostics: Option<RerankerInputDiagnostics>,
     pub fusion: Option<String>,
+    pub retrieval: Value,
 }
 
 #[cfg(test)]
@@ -197,6 +200,7 @@ struct SearchHit {
     lexical_score: f64,
     semantic_score: Option<f32>,
     fusion_score: f64,
+    relevance: Relevance,
 }
 
 struct ProjectIndex {
@@ -263,7 +267,7 @@ impl ProjectIndex {
         }
     }
 
-    fn ensure_watcher(&self) -> Result<()> {
+    fn ensure_watcher(&self, excludes: &[String]) -> Result<()> {
         let mut guard = self
             .watcher
             .lock()
@@ -273,11 +277,14 @@ impl ProjectIndex {
         }
 
         let dirty = Arc::clone(&self.dirty);
+        let root = self.root.clone();
+        let excludes = excludes.to_vec();
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
-                Ok(_) => {
+                Ok(event) if relevant_event(&root, &event, &excludes) => {
                     dirty.store(true, Ordering::Release);
                 }
+                Ok(_) => {}
                 Err(error) => log::warn!("[sou-local] 文件监听事件失败: {}", error),
             })
             .context("创建本地索引文件监听器失败")?;
@@ -354,6 +361,9 @@ pub(super) async fn search(options: LocalSearchOptions) -> Result<LocalSearchOut
         return Err(anyhow!("本地搜索项目路径不是目录: {}", root.display()));
     }
 
+    if let Some(output) = search_named_files(&root, &options)? {
+        return Ok(output);
+    }
     let index = project_index(&root, &options.index_dir)?;
     search_with_index(options, root, index, true).await
 }
@@ -398,80 +408,90 @@ async fn search_with_index(
         return Err(anyhow!("本地搜索未提取到有效关键词"));
     }
 
+    refresh_profile(&index, &options.exclude_paths);
     if enable_watcher {
-        if let Err(error) = index.ensure_watcher() {
+        if let Err(error) = index.ensure_watcher(&options.exclude_paths) {
             log::warn!(
                 "[sou-local] watcher 启动失败，继续使用查询时对账: {}",
                 error
             );
         }
     }
-    refresh_profile(&index, &options.exclude_paths);
-
     let mut degraded = false;
     let mut fallback_reason = None;
     let mut notice = None;
-    let (mut hits, mut engine) = if index.state.load(Ordering::Acquire) == INDEX_READY {
-        let dirty = index.dirty.load(Ordering::Acquire);
-        let lexical_sync_running = index.lexical_sync_running.load(Ordering::Acquire);
-        let startup_reconcile_pending = index.startup_reconcile_pending.load(Ordering::Acquire);
-        if dirty || lexical_sync_running || startup_reconcile_pending {
-            notice = Some(if dirty {
-                "检测到文件变更，本次已使用即时搜索，后台词法索引正在同步".to_string()
-            } else if startup_reconcile_pending {
-                "进程启动后正在校验文件元数据，本次已使用即时搜索".to_string()
+    let (mut hits, mut engine, search_truncated) =
+        if index.state.load(Ordering::Acquire) == INDEX_READY {
+            let dirty = index.dirty.load(Ordering::Acquire);
+            let lexical_sync_running = index.lexical_sync_running.load(Ordering::Acquire);
+            let startup_reconcile_pending = index.startup_reconcile_pending.load(Ordering::Acquire);
+            if dirty || lexical_sync_running || startup_reconcile_pending {
+                schedule_sync(
+                    Arc::clone(&index),
+                    options.exclude_paths.clone(),
+                    options.semantic.clone(),
+                );
+                notice = Some(if dirty {
+                    if index.lexical_sync_running.load(Ordering::Acquire) {
+                        "检测到文件变更，本次已检索最新文件，词法索引正在后台同步".to_string()
+                    } else {
+                        "检测到文件变更，本次已检索最新文件，词法索引等待后台同步".to_string()
+                    }
+                } else if startup_reconcile_pending {
+                    "进程启动后正在校验文件元数据，本次已使用即时搜索".to_string()
+                } else {
+                    "后台词法索引正在同步，本次已使用即时搜索".to_string()
+                });
+                run_immediate_search(&root, &options, &terms).await?
             } else {
-                "后台词法索引正在同步，本次已使用即时搜索".to_string()
-            });
+                let db_path = index.db_path.clone();
+                let plan = QueryPlan::new(&options.query, options.intent);
+                let max_results = if semantic_mode.accurate() {
+                    ACCURATE_LEXICAL_LIMIT
+                } else if options.semantic.enabled() {
+                    options.max_results.saturating_mul(5).min(150)
+                } else {
+                    options.max_results
+                };
+                match tokio::task::spawn_blocking(move || {
+                    query_index_planned(&db_path, &plan, max_results)
+                })
+                .await
+                .context("等待 FTS5 查询任务失败")?
+                {
+                    Ok(hits) => (hits, "fts5".to_string(), false),
+                    Err(error) => {
+                        let reason = format!("FTS5 查询失败: {}", error);
+                        degraded = true;
+                        mark_index_error(&index, &reason);
+                        schedule_sync(
+                            Arc::clone(&index),
+                            options.exclude_paths.clone(),
+                            options.semantic.clone(),
+                        );
+                        fallback_reason = Some(reason);
+                        run_immediate_search(&root, &options, &terms).await?
+                    }
+                }
+            }
+        } else {
+            let state = index.state_name().to_string();
+            fallback_reason = Some(format!("本地索引状态为 {}", state));
             schedule_sync(
                 Arc::clone(&index),
                 options.exclude_paths.clone(),
                 options.semantic.clone(),
             );
             run_immediate_search(&root, &options, &terms).await?
-        } else {
-            let db_path = index.db_path.clone();
-            let query = options.query.clone();
-            let query_terms = terms.clone();
-            let max_results = if semantic_mode.accurate() {
-                ACCURATE_LEXICAL_LIMIT
-            } else if options.semantic.enabled() {
-                options.max_results.saturating_mul(5).min(150)
-            } else {
-                options.max_results
-            };
-            match tokio::task::spawn_blocking(move || {
-                query_index(&db_path, &query, &query_terms, max_results)
-            })
-            .await
-            .context("等待 FTS5 查询任务失败")?
-            {
-                Ok(hits) => (hits, "fts5".to_string()),
-                Err(error) => {
-                    let reason = format!("FTS5 查询失败: {}", error);
-                    degraded = true;
-                    mark_index_error(&index, &reason);
-                    schedule_sync(
-                        Arc::clone(&index),
-                        options.exclude_paths.clone(),
-                        options.semantic.clone(),
-                    );
-                    fallback_reason = Some(reason);
-                    run_immediate_search(&root, &options, &terms).await?
-                }
-            }
-        }
-    } else {
-        let state = index.state_name().to_string();
-        fallback_reason = Some(format!("本地索引状态为 {}", state));
-        schedule_sync(
-            Arc::clone(&index),
-            options.exclude_paths.clone(),
-            options.semantic.clone(),
-        );
-        run_immediate_search(&root, &options, &terms).await?
-    };
+        };
 
+    // 中文说明：查询期间到达的新事件也要立即消费，避免返回已知过期的词法片段。
+    if engine == "fts5" && index.dirty.load(Ordering::Acquire) {
+        let (current, current_engine, _) = run_immediate_search(&root, &options, &terms).await?;
+        hits = current;
+        engine = current_engine;
+        notice = Some("查询期间检测到文件变更，本次已检索最新文件".to_string());
+    }
     let mut semantic_top_score = None;
     let mut reranker_state = semantic_mode.accurate().then(|| "skipped".to_string());
     let reranker_model = semantic_mode
@@ -508,25 +528,9 @@ async fn search_with_index(
                     options.semantic.clone(),
                 );
                 if index.sync_running.load(Ordering::Acquire) {
-                    // 中文说明：语义同步是后台任务，查询路径直接让路给 rg，避免 accurate 预算阻塞用户。
-                    let (fallback_hits, fallback_engine) =
-                        run_immediate_search(&root, &options, &terms).await?;
-                    hits = fallback_hits;
-                    engine = fallback_engine;
-                    degraded = true;
+                    // 中文说明：词法快照已经通过新鲜度检查，语义同步不应使其退回全仓扫描。
                     semantic_fallback_used = true;
-                    append_fallback(
-                        &mut fallback_reason,
-                        "语义索引正在后台同步，本次直接使用 rg/Rust 全局项目匹配",
-                    );
-                } else {
-                    while matches!(
-                        index.semantic_state.load(Ordering::Acquire),
-                        SEMANTIC_BUILDING | SEMANTIC_SYNCING
-                    ) && Instant::now() < semantic_deadline
-                    {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                    }
+                    notice = Some("词法索引可用，语义索引在后台同步，本次保留词法结果".to_string());
                 }
             }
 
@@ -690,14 +694,10 @@ async fn search_with_index(
                             *last_error = Some(error.clone());
                         }
                         if resource_limited {
-                            let (fallback_hits, fallback_engine) =
-                                run_immediate_search(&root, &options, &terms).await?;
-                            hits = fallback_hits;
-                            engine = fallback_engine;
                             degraded = true;
                             append_fallback(
                                 &mut fallback_reason,
-                                "资源压力较高，本次语义查询降级为 rg/Rust 全局项目匹配",
+                                "资源压力较高，本次跳过语义查询并保留有效词法结果",
                             );
                         } else {
                             append_fallback(
@@ -715,14 +715,10 @@ async fn search_with_index(
                     .and_then(|error| error.clone())
                     .is_some_and(|error| error.starts_with("resource:"));
                 if resource_limited {
-                    let (fallback_hits, fallback_engine) =
-                        run_immediate_search(&root, &options, &terms).await?;
-                    hits = fallback_hits;
-                    engine = fallback_engine;
                     degraded = true;
                     append_fallback(
                         &mut fallback_reason,
-                        "资源压力较高，本次语义索引让路，使用 rg/Rust 全局项目匹配",
+                        "资源压力较高，本次跳过语义索引并保留有效词法结果",
                     );
                 } else {
                     append_fallback(
@@ -740,6 +736,14 @@ async fn search_with_index(
         hits.truncate(options.max_results.max(1));
     }
 
+    let plan = QueryPlan::new(&options.query, options.intent);
+    // 中文说明：语义融合后仍保留显式意图，精确文件和标识符的优先级不被覆盖。
+    if options.intent != SearchIntent::Auto {
+        for hit in &mut hits {
+            hit.relevance = plan.relevance(&hit.relative_path, &hit.excerpt);
+        }
+        hits = rank_and_limit(hits, options.max_results)?;
+    }
     let duration_ms = started_at.elapsed().as_millis() as u64;
     let state = index.state_name().to_string();
     let semantic_state = index
@@ -788,6 +792,7 @@ async fn search_with_index(
         #[cfg(test)]
         reranker_input_diagnostics,
         fusion,
+        retrieval: serde_json::json!({"intent": plan.intent, "local_only": false, "truncated": search_truncated || plan.terms_truncated}),
     })
 }
 
@@ -800,11 +805,14 @@ pub(super) async fn search_immediate(options: LocalSearchOptions) -> Result<Loca
     if !root.is_dir() {
         return Err(anyhow!("即时搜索项目路径不是目录: {}", root.display()));
     }
+    if let Some(output) = search_named_files(&root, &options)? {
+        return Ok(output);
+    }
     let terms = extract_query_terms(&options.query);
     if terms.is_empty() {
         return Err(anyhow!("本地搜索未提取到有效关键词"));
     }
-    let (hits, engine) = run_immediate_search(&root, &options, &terms).await?;
+    let (hits, engine, truncated) = run_immediate_search(&root, &options, &terms).await?;
     let duration_ms = started_at.elapsed().as_millis() as u64;
     let notice = "工作区直属文件使用即时词法搜索，不建立重复父级索引".to_string();
     let text = format_hits(
@@ -860,6 +868,8 @@ pub(super) async fn search_immediate(options: LocalSearchOptions) -> Result<Loca
         #[cfg(test)]
         reranker_input_diagnostics: None,
         fusion: None,
+        retrieval: serde_json::json!({"intent": QueryPlan::new(&options.query, options.intent).intent,
+            "local_only": false, "truncated": truncated}),
     })
 }
 
@@ -1178,6 +1188,10 @@ fn refresh_profile(index: &ProjectIndex, excludes: &[String]) {
         } else if *current != profile {
             *current = profile;
             index.dirty.store(true, Ordering::Release);
+            // 中文说明：过滤配置变化后重建 watcher，避免回调持有过期的排除规则。
+            if let Ok(mut watcher) = index.watcher.lock() {
+                watcher.take();
+            }
         }
     }
 }
@@ -1541,14 +1555,28 @@ fn index_counts(connection: &Connection) -> Result<(u64, u64)> {
     Ok((files, chunks))
 }
 
+#[cfg(test)]
 fn query_index(
     db_path: &Path,
     query: &str,
     terms: &[String],
     max_results: usize,
 ) -> Result<Vec<SearchHit>> {
-    let connection = open_database(db_path)?;
-    let match_query = terms
+    let mut plan = QueryPlan::new(query, SearchIntent::Auto);
+    plan.terms = terms.to_vec();
+    query_index_planned(db_path, &plan, max_results)
+}
+
+fn query_index_planned(
+    db_path: &Path,
+    plan: &QueryPlan,
+    max_results: usize,
+) -> Result<Vec<SearchHit>> {
+    // 中文说明：查询只读现有快照，建表及迁移统一由同步任务负责。
+    let connection = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.busy_timeout(Duration::from_millis(250))?;
+    let match_query = plan
+        .terms
         .iter()
         .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
         .collect::<Vec<_>>()
@@ -1575,14 +1603,13 @@ fn query_index(
     let mut hits = Vec::new();
     for row in rows {
         let (path, start_line, end_line, excerpt, lexical_score) = row?;
-        hits.push(score_hit(
+        hits.push(score_hit_planned(
             path,
             start_line,
             end_line,
             excerpt,
             lexical_score,
-            query,
-            terms,
+            plan,
         ));
     }
     rank_and_limit(hits, max_results)
@@ -1592,17 +1619,18 @@ async fn run_immediate_search(
     root: &Path,
     options: &LocalSearchOptions,
     terms: &[String],
-) -> Result<(Vec<SearchHit>, String)> {
+) -> Result<(Vec<SearchHit>, String, bool)> {
     match run_rg(
         root,
         &options.query,
         terms,
         options.max_results,
         &options.exclude_paths,
+        options.intent,
     )
     .await
     {
-        Ok(hits) => Ok((hits, "rg".to_string())),
+        Ok((hits, truncated)) => Ok((hits, "rg".to_string(), truncated)),
         Err(error) => {
             log::warn!("[sou-local] rg 即时搜索失败，切换 Rust 扫描: {}", error);
             let root = root.to_path_buf();
@@ -1610,12 +1638,24 @@ async fn run_immediate_search(
             let terms = terms.to_vec();
             let excludes = options.exclude_paths.clone();
             let max_results = options.max_results;
+            let intent = options.intent;
             let hits = tokio::task::spawn_blocking(move || {
-                scan_project(&root, &query, &terms, max_results, &excludes)
+                let mut hits = scan_project(
+                    &root,
+                    &query,
+                    &terms,
+                    max_results.saturating_mul(5),
+                    &excludes,
+                )?;
+                let plan = QueryPlan::new(&query, intent);
+                for hit in &mut hits {
+                    hit.relevance = plan.relevance(&hit.relative_path, &hit.excerpt);
+                }
+                rank_and_limit(hits, max_results)
             })
             .await
             .context("等待 Rust 本地扫描任务失败")??;
-            Ok((hits, "scan".to_string()))
+            Ok((hits, "scan".to_string(), false))
         }
     }
 }
@@ -1626,7 +1666,8 @@ async fn run_rg(
     terms: &[String],
     max_results: usize,
     excludes: &[String],
-) -> Result<Vec<SearchHit>> {
+    intent: SearchIntent,
+) -> Result<(Vec<SearchHit>, bool)> {
     let mut command = Command::new("rg");
     command
         .current_dir(root)
@@ -1637,12 +1678,20 @@ async fn run_rg(
         .arg("--fixed-strings")
         .arg("--no-messages")
         .arg("--max-count")
-        .arg("4")
+        .arg("1")
         .arg("--max-filesize")
         .arg("1M")
-        .arg("--glob")
-        .arg(code_glob());
-    for term in terms.iter().take(12) {
+        .arg("--type-add")
+        .arg(format!("sousource:{}", code_glob()))
+        .arg("--type")
+        .arg("sousource");
+    let plan = QueryPlan::new(query, intent);
+    let search_terms = if plan.identifiers.is_empty() {
+        terms
+    } else {
+        &plan.identifiers
+    };
+    for term in search_terms {
         command.arg("-e").arg(term);
     }
     for exclude in excludes {
@@ -1653,43 +1702,68 @@ async fn run_rg(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
 
-    let output = tokio::time::timeout(Duration::from_secs(3), command.output())
-        .await
-        .map_err(|_| anyhow!("rg 即时搜索超时"))?
-        .context("启动 rg 失败")?;
-    if !output.status.success() && output.status.code() != Some(1) {
-        return Err(anyhow!("rg 退出码异常: {:?}", output.status.code()));
-    }
-
+    let mut child = command.spawn().context("启动 rg 失败")?;
+    let stdout = child.stdout.take().context("rg stdout 未就绪")?;
+    let mut lines = BufReader::new(stdout).lines();
     let mut matches: HashMap<String, Vec<usize>> = HashMap::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let Ok(event) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if event.get("type").and_then(Value::as_str) != Some("match") {
-            continue;
-        }
-        let Some(data) = event.get("data") else {
-            continue;
-        };
-        let Some(path) = data
-            .get("path")
-            .and_then(|value| value.get("text"))
-            .and_then(Value::as_str)
-        else {
-            continue;
-        };
-        let Some(line_number) = data.get("line_number").and_then(Value::as_u64) else {
-            continue;
-        };
-        let path = normalize_relative(path);
-        let entry = matches.entry(path).or_default();
-        if entry.len() < 4 {
+    let mut truncated = false;
+    let mut output_bytes = 0;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(line) = lines.next_line().await? {
+            output_bytes += line.len();
+            if output_bytes > 8 * 1024 * 1024 {
+                truncated = true;
+                child.kill().await?;
+                break;
+            }
+            let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if event.get("type").and_then(Value::as_str) != Some("match") {
+                continue;
+            }
+            let Some(data) = event.get("data") else {
+                continue;
+            };
+            let Some(path) = data
+                .get("path")
+                .and_then(|value| value.get("text"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let Some(line_number) = data.get("line_number").and_then(Value::as_u64) else {
+                continue;
+            };
+            // 中文说明：统一 rg 的 ./ 前缀和索引相对路径，保证排序、去重与引用一致。
+            let path = normalize_relative(path);
+            if matches.len() >= 256 && !matches.contains_key(&path) {
+                truncated = true;
+                continue;
+            }
+            let entry = matches.entry(path).or_default();
             entry.push(line_number as usize);
         }
+        let status = child.wait().await?;
+        if !truncated && !status.success() && status.code() != Some(1) {
+            return Err(anyhow!("rg 退出码异常: {:?}", status.code()));
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .map_err(|_| anyhow!("rg 即时搜索超时"))??;
+    let mut hits = hits_from_line_matches(root, query, terms, matches, 256)?;
+    for hit in &mut hits {
+        hit.relevance = plan.relevance(&hit.relative_path, &hit.excerpt);
     }
-
-    hits_from_line_matches(root, query, terms, matches, max_results)
+    if truncated {
+        log::warn!(
+            "[sou-local] 即时搜索达到候选预算: files={}, output_bytes={}",
+            hits.len(),
+            output_bytes
+        );
+    }
+    Ok((rank_and_limit(hits, max_results)?, truncated))
 }
 
 fn scan_project(
@@ -1713,7 +1787,7 @@ fn scan_project(
             let lower = line.to_lowercase();
             if terms.iter().any(|term| lower.contains(term)) {
                 lines.push(index + 1);
-                if lines.len() == 4 {
+                if lines.len() == 1 {
                     break;
                 }
             }
@@ -1728,14 +1802,13 @@ fn scan_project(
 fn hits_from_line_matches(
     root: &Path,
     query: &str,
-    terms: &[String],
+    _terms: &[String],
     matches: HashMap<String, Vec<usize>>,
     max_results: usize,
 ) -> Result<Vec<SearchHit>> {
     let mut hits = Vec::new();
-    for (path, mut line_numbers) in matches {
-        line_numbers.sort_unstable();
-        line_numbers.dedup();
+    let plan = QueryPlan::new(query, SearchIntent::Auto);
+    for (path, _) in matches {
         let full_path = root.join(&path);
         // 中文说明：即时回表复用索引同步的容错文本读取，避免单个异常文件拖垮整次搜索。
         let content = match fs::metadata(&full_path)
@@ -1757,21 +1830,8 @@ fn hits_from_line_matches(
                 continue;
             }
         };
-        let all_lines = content.lines().collect::<Vec<_>>();
-        for line_number in line_numbers.into_iter().take(2) {
-            let start_line = line_number.saturating_sub(3).max(1);
-            let end_line = (line_number + 3).min(all_lines.len());
-            let excerpt = all_lines[start_line - 1..end_line].join("\n");
-            hits.push(score_hit(
-                path.clone(),
-                start_line,
-                end_line,
-                excerpt,
-                0.0,
-                query,
-                terms,
-            ));
-        }
+        // 中文说明：rg 仅负责定位文件，回读时在整个文件中选择最相关片段，避免前几个词截断核心实现。
+        hits.extend(best_file_hits(&path, &content, &plan));
     }
     rank_and_limit(hits, max_results)
 }
@@ -1785,6 +1845,27 @@ fn score_hit(
     query: &str,
     terms: &[String],
 ) -> SearchHit {
+    let mut plan = QueryPlan::new(query, SearchIntent::Auto);
+    plan.terms = terms.to_vec();
+    score_hit_planned(
+        relative_path,
+        start_line,
+        end_line,
+        excerpt,
+        lexical_score,
+        &plan,
+    )
+}
+
+fn score_hit_planned(
+    relative_path: String,
+    start_line: usize,
+    end_line: usize,
+    excerpt: String,
+    lexical_score: f64,
+    plan: &QueryPlan,
+) -> SearchHit {
+    let terms = &plan.terms;
     let lower_excerpt = excerpt.to_lowercase();
     let lower_path = relative_path.to_lowercase();
     let coverage = terms
@@ -1795,9 +1876,10 @@ fn score_hit(
         .iter()
         .filter(|term| lower_path.contains(term.as_str()))
         .count();
-    let normalized_query = query.trim().to_lowercase();
+    let normalized_query = plan.query.trim();
     let exact_match = !normalized_query.is_empty()
-        && (lower_excerpt.contains(&normalized_query) || lower_path.contains(&normalized_query));
+        && (lower_excerpt.contains(normalized_query) || lower_path.contains(normalized_query));
+    let relevance = plan.relevance(&relative_path, &excerpt);
     SearchHit {
         relative_path,
         start_line,
@@ -1809,14 +1891,15 @@ fn score_hit(
         lexical_score,
         semantic_score: None,
         fusion_score: 0.0,
+        relevance,
     }
 }
 
 fn rank_and_limit(mut hits: Vec<SearchHit>, max_results: usize) -> Result<Vec<SearchHit>> {
     hits.sort_by(|left, right| {
         right
-            .coverage
-            .cmp(&left.coverage)
+            .relevance
+            .cmp(&left.relevance)
             .then_with(|| right.exact_match.cmp(&left.exact_match))
             .then_with(|| right.path_matches.cmp(&left.path_matches))
             .then_with(|| {
@@ -1827,10 +1910,364 @@ fn rank_and_limit(mut hits: Vec<SearchHit>, max_results: usize) -> Result<Vec<Se
             .then_with(|| left.relative_path.cmp(&right.relative_path))
             .then_with(|| left.start_line.cmp(&right.start_line))
     });
+    Ok(diverse_hits(hits, max_results))
+}
+
+fn best_file_hits(path: &str, content: &str, plan: &QueryPlan) -> Vec<SearchHit> {
+    let lines = content.lines().collect::<Vec<_>>();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    // 中文说明：文件已命中标识符时只围绕这些锚点取窗口，避免为大量通用词重复构造上下文。
+    let lower_content = content.to_lowercase();
+    let window_terms = if plan
+        .identifiers
+        .iter()
+        .any(|identifier| lower_content.contains(identifier))
+    {
+        &plan.identifiers
+    } else {
+        &plan.terms
+    };
+    let mut windows = Vec::new();
+    for (line, text) in lines.iter().enumerate() {
+        let lower = text.to_lowercase();
+        if !window_terms.iter().any(|term| lower.contains(term)) {
+            continue;
+        }
+        let start = line.saturating_sub(8);
+        let end = (line + 13).min(lines.len());
+        let excerpt = lines[start..end].join("\n");
+        let candidate = (plan.relevance(path, &excerpt), start, end, excerpt);
+        let position = windows.partition_point(|existing: &(Relevance, usize, usize, String)| {
+            existing.0 > candidate.0 || (existing.0 == candidate.0 && existing.1 <= candidate.1)
+        });
+        if position < 64 {
+            windows.insert(position, candidate);
+            windows.truncate(64);
+        }
+    }
+    if windows.is_empty() && plan.matches_file(path) {
+        let end = lines.len().min(CHUNK_LINES);
+        let excerpt = lines[..end].join("\n");
+        windows.push((plan.relevance(path, &excerpt), 0, end, excerpt));
+    }
+    windows.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    let mut selected: Vec<SearchHit> = Vec::new();
+    for (relevance, start, end, excerpt) in windows {
+        // 中文说明：已找到完整标识符时，不再用仅含通用词的远处片段填充结果。
+        if selected
+            .first()
+            .is_some_and(|hit| hit.relevance.identifier_hits > 0)
+            && relevance.identifier_hits == 0
+        {
+            continue;
+        }
+        if selected
+            .iter()
+            .any(|hit| start < hit.end_line && end >= hit.start_line)
+        {
+            continue;
+        }
+        let mut hit = score_hit_planned(path.to_string(), start + 1, end, excerpt, 0.0, plan);
+        hit.relevance = relevance;
+        selected.push(hit);
+        if selected.len() == 2 {
+            break;
+        }
+    }
+    selected
+}
+
+fn diverse_hits(hits: Vec<SearchHit>, max_results: usize) -> Vec<SearchHit> {
+    let mut merged: Vec<SearchHit> = Vec::new();
+    for hit in hits {
+        if let Some(existing) = merged.iter_mut().find(|existing| {
+            existing.relative_path == hit.relative_path
+                && existing.start_line <= hit.end_line.saturating_add(1)
+                && hit.start_line <= existing.end_line.saturating_add(1)
+                && existing.end_line.max(hit.end_line) - existing.start_line.min(hit.start_line)
+                    < 160
+        }) {
+            // 中文说明：按真实行号合并重叠文本，保留最高排名，减少同文件重复占位。
+            let mut lines = std::collections::BTreeMap::new();
+            for (offset, line) in hit.excerpt.lines().enumerate() {
+                lines.insert(hit.start_line + offset, line);
+            }
+            for (offset, line) in existing.excerpt.lines().enumerate() {
+                lines.insert(existing.start_line + offset, line);
+            }
+            let excerpt = lines.values().copied().collect::<Vec<_>>().join("\n");
+            existing.start_line = existing.start_line.min(hit.start_line);
+            existing.end_line = existing.end_line.max(hit.end_line);
+            existing.excerpt = excerpt;
+        } else {
+            merged.push(hit);
+        }
+    }
     let mut seen = HashSet::new();
-    hits.retain(|hit| seen.insert((hit.relative_path.clone(), hit.start_line, hit.end_line)));
-    hits.truncate(max_results.max(1));
-    Ok(hits)
+    let mut extra = Vec::new();
+    let mut selected = Vec::new();
+    for hit in merged {
+        if seen.insert(hit.relative_path.clone()) {
+            selected.push(hit);
+        } else {
+            extra.push(hit);
+        }
+    }
+    selected.extend(extra);
+    selected.truncate(max_results.max(1));
+    selected
+}
+
+pub(super) fn path_ignored(root: &Path, path: &Path) -> bool {
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
+    let mut ancestors = path
+        .parent()
+        .into_iter()
+        .flat_map(Path::ancestors)
+        .take_while(|parent| parent.starts_with(root))
+        .collect::<Vec<_>>();
+    ancestors.reverse();
+    for parent in ancestors {
+        for name in [".gitignore", ".ignore", ".rgignore", ".codeiumignore"] {
+            let file = parent.join(name);
+            if file.is_file() {
+                builder.add(file);
+            }
+        }
+    }
+    builder
+        .build()
+        .map(|rules| {
+            rules
+                .matched_path_or_any_parents(path, path.is_dir())
+                .is_ignore()
+        })
+        .unwrap_or(false)
+}
+
+fn relevant_event(root: &Path, event: &Event, excludes: &[String]) -> bool {
+    if event.need_rescan() {
+        return true;
+    }
+    if !matches!(
+        event.kind,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) | EventKind::Any
+    ) {
+        return false;
+    }
+    event.paths.is_empty()
+        || event.paths.iter().any(|path| {
+            if !path.starts_with(root) || is_excluded(root, path, excludes) {
+                return false;
+            }
+            if path == root
+                && matches!(
+                    event.kind,
+                    EventKind::Modify(notify::event::ModifyKind::Metadata(_))
+                )
+            {
+                return false;
+            }
+            if matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some(".gitignore" | ".ignore" | ".rgignore" | ".codeiumignore")
+            ) {
+                return true;
+            }
+            if path.components().any(|part| {
+                matches!(
+                    part.as_os_str().to_str(),
+                    Some(".git" | "target" | "node_modules" | "dist" | "build" | ".vite")
+                )
+            }) {
+                return false;
+            }
+            if path_ignored(root, path) {
+                return false;
+            }
+            // 中文说明：删除及重命名事件中的目录可能已消失，未知目录变化仍要求对账。
+            is_supported_file(path)
+                || path.is_dir()
+                || path.extension().is_none()
+                || matches!(
+                    event.kind,
+                    EventKind::Remove(notify::event::RemoveKind::Folder)
+                        | EventKind::Create(notify::event::CreateKind::Folder)
+                        | EventKind::Modify(notify::event::ModifyKind::Name(_))
+                )
+        })
+}
+
+fn search_named_files(
+    root: &Path,
+    options: &LocalSearchOptions,
+) -> Result<Option<LocalSearchOutput>> {
+    let plan = QueryPlan::new(&options.query, options.intent);
+    if plan.files.is_empty() {
+        return Ok(None);
+    }
+    let started = Instant::now();
+    let mut paths = Vec::new();
+    for file in &plan.files {
+        let candidate = root.join(file);
+        if candidate.is_file() {
+            paths.push(candidate);
+        } else if Path::new(file).components().count() == 1 {
+            // 中文说明：先探测常见源码/文档入口，避免大型资源目录耗尽精确文件查找预算。
+            let directories: &[&str] = if super::query::is_document(&file.to_lowercase()) {
+                &["docs", "doc"]
+            } else {
+                &["src", "lib"]
+            };
+            for directory in directories {
+                let candidate = root.join(directory).join(file);
+                if candidate.is_file() {
+                    paths.push(candidate);
+                }
+            }
+        }
+    }
+    let mut truncated = false;
+    if paths.len() < plan.files.len() {
+        let walk_root = root.to_path_buf();
+        let excludes = options.exclude_paths.clone();
+        // 中文说明：只为点名文件定向穿过 ignore；构建、依赖及显式排除目录继续剪枝。
+        let walker = WalkBuilder::new(root)
+            .standard_filters(false)
+            .follow_links(false)
+            .filter_entry(move |entry| {
+                let name = entry.file_name().to_string_lossy();
+                !matches!(
+                    name.as_ref(),
+                    ".git"
+                        | "target"
+                        | "node_modules"
+                        | "dist"
+                        | "build"
+                        | "third_party"
+                        | "vendor"
+                ) && !is_excluded(&walk_root, entry.path(), &excludes)
+            })
+            .build();
+        for (count, entry) in walker.enumerate() {
+            if count >= 50_000 || started.elapsed() > Duration::from_millis(500) {
+                truncated = true;
+                break;
+            }
+            let Ok(entry) = entry else {
+                continue;
+            };
+            if entry.file_type().is_some_and(|kind| kind.is_file())
+                && plan.matches_file(&normalize_path(entry.path()))
+            {
+                paths.push(entry.into_path());
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    let mut hits = Vec::new();
+    let mut local_only = false;
+    for path in paths.into_iter().take(30) {
+        let Ok(path) = path.canonicalize() else {
+            continue;
+        };
+        if !path.starts_with(root) || is_excluded(root, &path, &options.exclude_paths) {
+            continue;
+        }
+        let Ok(metadata) = fs::metadata(&path) else {
+            continue;
+        };
+        let Ok(Some(content)) = read_text_file(&path, metadata.len()) else {
+            continue;
+        };
+        local_only |= path_ignored(root, &path);
+        let relative = relative_path(root, &path)?;
+        let mut file_hits = best_file_hits(&relative, &content, &plan);
+        if file_hits.is_empty() {
+            let excerpt = content
+                .lines()
+                .take(CHUNK_LINES)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !excerpt.is_empty() {
+                file_hits.push(score_hit(
+                    relative.clone(),
+                    1,
+                    excerpt.lines().count(),
+                    excerpt,
+                    0.0,
+                    &plan.query,
+                    &plan.terms,
+                ));
+            }
+        }
+        for hit in &mut file_hits {
+            hit.relevance.file_match = true;
+            hit.exact_match = true;
+        }
+        hits.extend(file_hits);
+    }
+    if hits.is_empty() {
+        if truncated {
+            log::warn!(
+                "[sou-local] 精确文件查找达到预算，继续常规检索: requested_files={}",
+                plan.files.len()
+            );
+        }
+        return Ok(None);
+    }
+    let hits = rank_and_limit(hits, options.max_results)?;
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let notice = if local_only {
+        Some("已在本地读取点名的忽略文件，该请求仅使用本地上下文".to_string())
+    } else {
+        None
+    };
+    Ok(Some(LocalSearchOutput {
+        text: format_hits(
+            root,
+            &hits,
+            "path",
+            "live",
+            duration_ms,
+            None,
+            notice.as_deref(),
+            "not_applicable",
+            0,
+            0,
+            None,
+            options.semantic.mode.as_str(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+        hit_count: hits.len(),
+        engine: "path".to_string(),
+        index_state: "live".to_string(),
+        degraded: false,
+        fallback_reason: None,
+        notice,
+        duration_ms,
+        semantic_state: "not_applicable".to_string(),
+        semantic_model: None,
+        semantic_indexed_chunks: 0,
+        semantic_pending_chunks: 0,
+        semantic_top_score: None,
+        semantic_mode: options.semantic.mode.as_str().to_string(),
+        reranker_state: None,
+        reranker_model: None,
+        reranker_duration_ms: None,
+        reranker_top_score: None,
+        #[cfg(test)]
+        reranker_input_diagnostics: None,
+        fusion: None,
+        retrieval: serde_json::json!({"intent": plan.intent, "local_only": local_only, "truncated": truncated, "exact_file": true}),
+    }))
 }
 
 fn fuse_hits(
@@ -1886,8 +2323,7 @@ fn fuse_hits(
             .then_with(|| left.relative_path.cmp(&right.relative_path))
             .then_with(|| left.start_line.cmp(&right.start_line))
     });
-    hits.truncate(max_results.max(1));
-    hits
+    diverse_hits(hits, max_results)
 }
 
 fn select_accurate_rerank_candidates(retrieval_candidates: Vec<SearchHit>) -> Vec<SearchHit> {
@@ -2224,29 +2660,10 @@ fn build_search_text(path: &str, content: &str) -> String {
 }
 
 pub(super) fn extract_query_terms(query: &str) -> Vec<String> {
-    let stopwords = [
-        "the", "and", "for", "from", "with", "this", "that", "what", "where", "when", "代码",
-        "项目", "搜索", "相关", "实现", "如何", "怎么", "什么", "是否",
-    ];
-    let mut terms = tokenize_text(query, usize::MAX)
-        .into_iter()
-        .filter(|term| term.len() >= 2 && !stopwords.contains(&term.as_str()))
-        .collect::<Vec<_>>();
-    // 混合长句优先保留代码标识符，其次保留中文二/三元词，避免自然语言前缀挤掉后置函数名。
-    terms.sort_by_key(|term| {
-        if term.is_ascii() {
-            0
-        } else if (2..=3).contains(&term.chars().count()) {
-            1
-        } else {
-            2
-        }
-    });
-    terms.truncate(MAX_QUERY_TERMS);
-    terms
+    QueryPlan::new(query, SearchIntent::Auto).terms
 }
 
-fn tokenize_text(text: &str, limit: usize) -> Vec<String> {
+pub(super) fn tokenize_text(text: &str, limit: usize) -> Vec<String> {
     let mut output = Vec::new();
     let mut seen = HashSet::new();
     let chars = text.chars().collect::<Vec<_>>();
@@ -2375,7 +2792,7 @@ fn relative_path(root: &Path, path: &Path) -> Result<String> {
 }
 
 fn normalize_relative(path: &str) -> String {
-    path.trim_start_matches("./").replace('\\', "/")
+    path.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
 fn normalize_path(path: &Path) -> String {
@@ -2637,6 +3054,123 @@ mod tests {
         assert!(terms.contains(&"workspace".to_string()));
         assert!(terms.contains(&"手机".to_string()));
         assert!(terms.contains(&"验证码".to_string()));
+    }
+
+    #[tokio::test]
+    async fn immediate_search_finds_late_implementation_and_respects_intent() {
+        let temp = tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("src")).unwrap();
+        fs::create_dir_all(temp.path().join("docs")).unwrap();
+        fs::create_dir_all(temp.path().join("scripts")).unwrap();
+        fs::write(
+            temp.path().join("scripts/queries.ps1"),
+            "'ensure_watcher local watcher 实现'\n",
+        )
+        .unwrap();
+        let source = format!(
+            "{}\nfn ensure_watcher() {{ /* local watcher */ }}\n",
+            "// local watcher\n".repeat(200)
+        );
+        fs::write(temp.path().join("src/watcher.rs"), source).unwrap();
+        fs::write(
+            temp.path().join("docs/watcher.md"),
+            "ensure_watcher local watcher 使用说明\n",
+        )
+        .unwrap();
+        let query = "ensure_watcher local watcher 实现";
+        let terms = extract_query_terms(query);
+        let (code, _) = run_rg(temp.path(), query, &terms, 5, &[], SearchIntent::Code)
+            .await
+            .unwrap();
+        assert_eq!(code[0].relative_path, "src/watcher.rs");
+        assert!(code[0].start_line > 180);
+        assert!(code[0].excerpt.contains("fn ensure_watcher"));
+        let (docs, _) = run_rg(temp.path(), query, &terms, 5, &[], SearchIntent::Docs)
+            .await
+            .unwrap();
+        assert_eq!(docs[0].relative_path, "docs/watcher.md");
+        let scan = scan_project(temp.path(), query, &terms, 5, &[]).unwrap();
+        assert_eq!(scan[0].relative_path, "src/watcher.rs");
+        assert_eq!(
+            code.iter()
+                .filter(|hit| hit.relative_path == "src/watcher.rs")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn named_ignored_document_stays_local_and_out_of_index_scope() {
+        let temp = tempdir().unwrap();
+        fs::create_dir_all(temp.path().join(".git")).unwrap();
+        fs::create_dir_all(temp.path().join("docs")).unwrap();
+        fs::write(temp.path().join(".gitignore"), "/docs/\n").unwrap();
+        fs::write(
+            temp.path().join("docs/plan-2026-09-16.md"),
+            "万剑归宗 实施计划与验收\n",
+        )
+        .unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let options = LocalSearchOptions {
+            project_root: root.clone(),
+            query: "plan-2026-09-16.md 万剑归宗 实施计划与验收".to_string(),
+            intent: SearchIntent::Auto,
+            max_results: 5,
+            exclude_paths: Vec::new(),
+            index_dir: temp.path().join("index"),
+            semantic: LocalSemanticSettings {
+                mode: LocalSemanticMode::Off,
+                model_dir: temp.path().join("model"),
+                reranker_model_dir: temp.path().join("reranker"),
+            },
+        };
+        let result = search_named_files(&root, &options).unwrap().unwrap();
+        assert_eq!(result.engine, "path");
+        assert_eq!(result.retrieval["local_only"], true);
+        assert!(result.text.contains("plan-2026-09-16.md"));
+        assert!(!collect_project_files(&root, &[])
+            .iter()
+            .any(|path| path.extension().is_some_and(|ext| ext == "md")));
+        assert!(!options.index_dir.exists());
+    }
+
+    #[test]
+    fn watcher_ignores_noise_but_tracks_removal_rename_and_ignore_rules() {
+        let root = PathBuf::from("project");
+        let modify = |path: &str| {
+            Event::new(EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Content,
+            )))
+            .add_path(root.join(path))
+        };
+        assert!(!relevant_event(&root, &modify("target/generated.rs"), &[]));
+        assert!(!relevant_event(
+            &root,
+            &modify("node_modules/module.ts"),
+            &[]
+        ));
+        assert!(!relevant_event(
+            &root,
+            &Event::new(EventKind::Access(notify::event::AccessKind::Read))
+                .add_path(root.join("src/main.rs")),
+            &[]
+        ));
+        assert!(relevant_event(&root, &modify("src/main.rs"), &[]));
+        assert!(relevant_event(&root, &modify(".gitignore"), &[]));
+        assert!(relevant_event(
+            &root,
+            &Event::new(EventKind::Remove(notify::event::RemoveKind::File))
+                .add_path(root.join("src/deleted.rs")),
+            &[]
+        ));
+        assert!(relevant_event(
+            &root,
+            &Event::new(EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::Both
+            )))
+            .add_path(root.join("old.module")),
+            &[]
+        ));
     }
 
     #[test]
@@ -2986,6 +3520,7 @@ mod tests {
         index.sync_running.store(true, Ordering::Release);
         let output = search_with_index(
             LocalSearchOptions {
+                intent: Default::default(),
                 project_root: root.clone(),
                 query: "CurrentFileValue".to_string(),
                 max_results: 5,
@@ -3051,6 +3586,7 @@ mod tests {
 
         let output = search_with_index(
             LocalSearchOptions {
+                intent: Default::default(),
                 project_root: root.clone(),
                 query: "LexicalIndexRemainsReady".to_string(),
                 max_results: 5,
@@ -3151,6 +3687,7 @@ mod tests {
             for query in &project.queries {
                 let lexical = search_with_index(
                     LocalSearchOptions {
+                        intent: Default::default(),
                         project_root: root.clone(),
                         query: query.query.clone(),
                         max_results: 5,
@@ -3170,6 +3707,7 @@ mod tests {
                 .expect("真实项目 lexical 查询应成功");
                 let hybrid = search_with_index(
                     LocalSearchOptions {
+                        intent: Default::default(),
                         project_root: root.clone(),
                         query: query.query.clone(),
                         max_results: 5,
@@ -3347,6 +3885,7 @@ mod tests {
             };
             let warmup = search_with_index(
                 LocalSearchOptions {
+                    intent: Default::default(),
                     project_root: root.clone(),
                     query: project.queries[0].query.clone(),
                     max_results: 5,
@@ -3397,6 +3936,7 @@ mod tests {
             for query in &project.queries {
                 let accurate = search_with_index(
                     LocalSearchOptions {
+                        intent: Default::default(),
                         project_root: root.clone(),
                         query: query.query.clone(),
                         max_results: 5,
@@ -3547,6 +4087,7 @@ mod tests {
             release_probe.expect("真实项目门禁应保留 Balanced 切换探针");
         let release_result = search_with_index(
             LocalSearchOptions {
+                intent: Default::default(),
                 project_root: root.clone(),
                 query,
                 max_results: 5,

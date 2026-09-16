@@ -145,7 +145,7 @@ pub struct McpConfig {
     pub acemcp_proxy_username: Option<String>, // 代理用户名（可选）
     pub acemcp_proxy_password: Option<String>, // 代理密码（可选）
     // Sou 多后端配置
-    pub sou_default_backend: Option<String>, // "auto" | "ace" | "fast_context" | "local" | "both"
+    pub sou_default_backend: Option<String>, // 中文说明：hybrid 为 Local 优先、Fast Context 按需增强。
     pub sou_auto_order: Option<Vec<String>>, // auto 模式下的后端优先级
     pub sou_include_backend_headers: Option<bool>, // 是否在结果中标注后端来源
     pub sou_include_failed_backend_errors: Option<bool>, // 部分成功时是否附加失败后端诊断

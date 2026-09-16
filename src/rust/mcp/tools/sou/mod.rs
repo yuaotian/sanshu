@@ -17,7 +17,9 @@ use crate::mcp::tools::workspace::{resolve_workspace, WorkspaceLayout, Workspace
 use crate::mcp::tools::AcemcpTool;
 
 pub(crate) mod fast_context;
+mod hybrid;
 pub(crate) mod local;
+mod query;
 pub(crate) mod reranker;
 pub(crate) mod semantic;
 pub(crate) mod telemetry;
@@ -25,6 +27,7 @@ pub(crate) mod telemetry;
 const BACKEND_ACE: &str = "ace";
 const BACKEND_FAST_CONTEXT: &str = "fast_context";
 const BACKEND_LOCAL: &str = "local";
+const BACKEND_HYBRID: &str = "hybrid";
 const BACKEND_AUTO: &str = "auto";
 // `both` 是兼容既有配置和 MCP 调用的协议值，当前语义为合并三个后端。
 const BACKEND_BOTH: &str = "both";
@@ -37,6 +40,9 @@ pub struct SouRequest {
     pub project_root_path: String,
     pub query: String,
     pub backend: Option<String>,
+    /// 中文说明：Local/hybrid 的结果排序偏好，未指定时按查询意图判断。
+    #[serde(default)]
+    pub intent: query::SearchIntent,
     pub tree_depth: Option<u8>,
     pub max_turns: Option<u8>,
     pub max_results: Option<u8>,
@@ -99,6 +105,7 @@ struct BackendRunResult {
     fusion: Option<String>,
     notice: Option<String>,
     workspace: Option<serde_json::Value>,
+    retrieval: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,8 +139,12 @@ impl SouTool {
                 },
                 "backend": {
                     "type": "string",
-                    "enum": ["default", "auto", "ace", "fast_context", "local", "both"],
-                    "description": "可选搜索后端。default 使用配置；auto 按优先级自动回退；local 使用本地 FTS5/rg；both 同时返回 ACE、fast-context 与 Local。"
+                    "enum": ["default", "auto", "ace", "fast_context", "local", "hybrid", "both"],
+                    "description": "可选搜索后端。default 使用配置；auto 按优先级自动回退；local 仅本地检索；hybrid 优先 Local，必要时由 Fast Context 增强；both 同时返回三个后端。"
+                },
+                "intent": {
+                    "type": "string", "enum": ["auto", "code", "docs"],
+                    "description": "Local/hybrid 排序偏好，auto 根据查询识别代码或文档意图；不排除其他文件类型。"
                 },
                 "tree_depth": {
                     "type": "number",
@@ -153,7 +164,7 @@ impl SouTool {
                 },
                 "timeout_ms": {
                     "type": "number",
-                    "description": "auto 模式远端后端总预算；显式 fast-context 模式下为单次请求超时毫秒数。"
+                    "description": "auto 模式远端总预算；hybrid 的 Fast Context 增强总预算（默认 8000ms，含重试）；显式 fast-context 为单次请求超时。"
                 },
                 "exclude_paths": {
                     "type": "array",
@@ -168,7 +179,7 @@ impl SouTool {
             Tool {
                 name: Cow::Borrowed("sou"),
                 description: Some(Cow::Borrowed(
-                    "代码上下文检索工具。支持 ACE、fast-context、本地 FTS5/rg 兜底、自动回退与三后端合并返回。\n\n查询建议：\n- 代码标识符通常为英文，使用中文时建议混入英文类名/函数名/文件名（如 GestureRecognizer、ImageCodec、ClipboardService）。\n- 长中文描述容易让模型空 answer；如果第一次返回 0 结果，请拆成更具体的子问题或显式给出英文关键词重试。\n- 给出模块/目录提示（如 'gesture 模块' / 'src/capture/'）有助于快速定位。",
+                    "代码上下文检索工具。支持 ACE、fast-context、本地 FTS5/rg 检索、Local/Fast Context 按需增强、自动回退与三后端合并返回。\n\n查询建议：\n- 代码标识符通常为英文，使用中文时建议混入英文类名/函数名/文件名（如 GestureRecognizer、ImageCodec、ClipboardService）。\n- 长中文描述容易让模型空 answer；如果第一次返回 0 结果，请拆成更具体的子问题或显式给出英文关键词重试。\n- 给出模块/目录提示（如 'gesture 模块' / 'src/capture/'）有助于快速定位。",
                 )),
                 input_schema: Arc::new(schema_map),
                 annotations: None,
@@ -225,6 +236,15 @@ impl SouTool {
                 BACKEND_LOCAL,
             ),
             BACKEND_LOCAL => Ok(error_result("Local搜索失败: 本地兜底已禁用".to_string())),
+            BACKEND_HYBRID => result_to_call_tool(
+                hybrid::run(&request, &config)
+                    .await
+                    .map_err(|message| BackendRunError {
+                        backend: BACKEND_HYBRID.to_string(),
+                        message,
+                    }),
+                BACKEND_HYBRID,
+            ),
             BACKEND_BOTH => run_both(&request, &config).await,
             BACKEND_AUTO => run_auto(&request, &config).await,
             other => Ok(error_result(format!("sou搜索失败: 未知后端策略 {}", other))),
@@ -250,6 +270,7 @@ impl SouTool {
                 vec![run_local(&request, &config).await?]
             }
             BACKEND_LOCAL => return Err("Local搜索失败: 本地兜底已禁用".to_string()),
+            BACKEND_HYBRID => vec![hybrid::run(&request, &config).await?],
             BACKEND_AUTO => vec![run_auto_result(&request, &config).await.map_err(|errors| {
                 format_backend_errors("sou搜索失败: 所有后端均不可用", &errors)
             })?],
@@ -341,7 +362,7 @@ pub fn fast_context_in_strategy() -> bool {
         return false;
     };
     match config.default_backend.as_str() {
-        BACKEND_FAST_CONTEXT | BACKEND_BOTH => true,
+        BACKEND_FAST_CONTEXT | BACKEND_BOTH | BACKEND_HYBRID => true,
         BACKEND_AUTO => config
             .auto_order
             .iter()
@@ -378,6 +399,7 @@ fn normalize_backend(value: &str) -> Option<String> {
         BACKEND_ACE | "acemcp" | "augment" => Some(BACKEND_ACE.to_string()),
         BACKEND_FAST_CONTEXT | "fastcontext" | "fast" => Some(BACKEND_FAST_CONTEXT.to_string()),
         BACKEND_LOCAL | "offline" | "rg" => Some(BACKEND_LOCAL.to_string()),
+        BACKEND_HYBRID => Some(BACKEND_HYBRID.to_string()),
         BACKEND_BOTH | "all" | "merge" => Some(BACKEND_BOTH.to_string()),
         _ => None,
     }
@@ -715,6 +737,7 @@ async fn run_ace(request: &SouRequest) -> Result<BackendRunResult, String> {
         Some(&notice),
     );
     Ok(BackendRunResult {
+        retrieval: None,
         backend: BACKEND_ACE.to_string(),
         text,
         hit_count: ranked.len(),
@@ -766,6 +789,7 @@ async fn run_ace_single(request: &SouRequest) -> Result<BackendRunResult, String
     }
 
     Ok(BackendRunResult {
+        retrieval: None,
         backend: BACKEND_ACE.to_string(),
         hit_count: parse_sou_sections(&text, BACKEND_ACE).len(),
         duration_ms: started_at.elapsed().as_millis() as u64,
@@ -813,6 +837,7 @@ async fn run_local_single(
 ) -> Result<BackendRunResult, String> {
     let defaults = &config.fast_context;
     let output = local::search(local::LocalSearchOptions {
+        intent: request.intent,
         project_root: PathBuf::from(&request.project_root_path),
         query: request.query.clone(),
         max_results: request.max_results.unwrap_or(defaults.max_results) as usize,
@@ -826,6 +851,7 @@ async fn run_local_single(
     .await
     .map_err(|error| error.to_string())?;
     Ok(BackendRunResult {
+        retrieval: Some(output.retrieval),
         backend: BACKEND_LOCAL.to_string(),
         text: output.text,
         hit_count: output.hit_count,
@@ -966,6 +992,7 @@ async fn run_local_workspace(
     direct_excludes.sort();
     direct_excludes.dedup();
     let direct_output = local::search_immediate(local::LocalSearchOptions {
+        intent: request.intent,
         project_root: layout.root.clone(),
         query: request.query.clone(),
         max_results: 30,
@@ -1071,6 +1098,7 @@ async fn run_local_workspace(
     );
     let text = format_workspace_sections(&ranked, &diagnostics, notice.as_deref());
     Ok(BackendRunResult {
+        retrieval: None,
         backend: BACKEND_LOCAL.to_string(),
         text,
         hit_count: ranked.len(),
@@ -1301,7 +1329,23 @@ async fn run_fast_context(
     config: &FastContextConfig,
     include_header: bool,
 ) -> Result<BackendRunResult, String> {
-    let first = run_fast_context_once(request, config, include_header, false).await;
+    run_fast_context_seeded(request, config, include_header, None).await
+}
+
+async fn run_fast_context_seeded(
+    request: &SouRequest,
+    config: &FastContextConfig,
+    include_header: bool,
+    initial_context: Option<String>,
+) -> Result<BackendRunResult, String> {
+    let first = run_fast_context_once(
+        request,
+        config,
+        include_header,
+        false,
+        initial_context.clone(),
+    )
+    .await;
     match first {
         Ok(result) => Ok(result),
         Err(message) if should_retry_fast_context_search(&message) => {
@@ -1313,7 +1357,7 @@ async fn run_fast_context(
             );
             // 兜底重试只在退化场景发生，短延迟用于避免连续完整会话给远端服务造成瞬时压力。
             tokio::time::sleep(Duration::from_millis(FAST_CONTEXT_FALLBACK_RETRY_DELAY_MS)).await;
-            run_fast_context_once(request, config, include_header, true)
+            run_fast_context_once(request, config, include_header, true, initial_context)
                 .await
                 .map_err(|retry_error| {
                     format!("{}；兜底重试仍失败: {}", message.trim(), retry_error.trim())
@@ -1328,6 +1372,7 @@ async fn run_fast_context_once(
     config: &FastContextConfig,
     include_header: bool,
     fallback_attempt: bool,
+    initial_context: Option<String>,
 ) -> Result<BackendRunResult, String> {
     let started_at = Instant::now();
     let project_root = canonical_project_root(&request.project_root_path)
@@ -1363,6 +1408,7 @@ async fn run_fast_context_once(
     let response = tokio::time::timeout(
         Duration::from_millis(effective_timeout_ms + 5000),
         fast_context::search(fast_context::SearchOptions {
+            initial_context,
             query: request.query.clone(),
             project_root: PathBuf::from(&project_root),
             api_key: config.api_key.clone(),
@@ -1426,6 +1472,7 @@ async fn run_fast_context_once(
     );
 
     Ok(BackendRunResult {
+        retrieval: None,
         backend: BACKEND_FAST_CONTEXT.to_string(),
         hit_count: parse_sou_sections(&text, BACKEND_FAST_CONTEXT).len(),
         duration_ms: started_at.elapsed().as_millis() as u64,
@@ -1727,6 +1774,7 @@ fn parse_sou_sections(text: &str, default_backend: &str) -> Vec<SouSection> {
             continue;
         }
         if line.starts_with("[sou metadata]")
+            || line.starts_with("[sou hybrid]")
             || line.starts_with("[sou fallback]")
             || line.starts_with("[sou notice]")
             || line.starts_with("[sou workspace notice]")
@@ -1917,7 +1965,12 @@ fn backend_success_result(
             text.push_str(&format!("\n[sou fallback] {}", diagnostic_summary(reason)));
         }
     }
-    if let Some(message) = result.notice.as_deref() {
+    if let Some(message) = result.notice.as_deref().filter(|message| {
+        !text.lines().any(|line| {
+            (line.starts_with("[sou-local notice]") || line.starts_with("[sou workspace notice]"))
+                && line.ends_with(*message)
+        })
+    }) {
         text.push_str(&format!("\n[sou notice] {}", diagnostic_summary(message)));
     }
     success_result_with_metadata(
@@ -1944,6 +1997,7 @@ fn backend_success_result(
             "fusion": result.fusion,
             "notice": result.notice,
             "workspace": result.workspace,
+            "retrieval": result.retrieval,
         }),
     )
 }
@@ -1994,6 +2048,7 @@ fn backend_display(backend: &str) -> &'static str {
         BACKEND_ACE => "ACE",
         BACKEND_FAST_CONTEXT => "FastContext",
         BACKEND_LOCAL => "Local",
+        BACKEND_HYBRID => "Local + Fast Context",
         _ => "sou",
     }
 }
@@ -2248,6 +2303,7 @@ private String message = "未配置 token";
         )
         .expect("Local 路由测试源码应写入成功");
         let request = SouRequest {
+            intent: Default::default(),
             project_root_path: temp.path().to_string_lossy().to_string(),
             query: "LocalIndexStatus backendSuccessResult".to_string(),
             backend: Some(BACKEND_LOCAL.to_string()),
@@ -2270,6 +2326,7 @@ private String message = "未配置 token";
 
         let output = local::search_for_test(
             local::LocalSearchOptions {
+                intent: Default::default(),
                 project_root: PathBuf::from(&request.project_root_path),
                 query: request.query.clone(),
                 max_results: request.max_results.unwrap_or(defaults.max_results) as usize,
@@ -2289,6 +2346,7 @@ private String message = "未配置 token";
         .await
         .expect("Local 路由应完成搜索");
         let result = BackendRunResult {
+            retrieval: Some(output.retrieval),
             backend: BACKEND_LOCAL.to_string(),
             text: output.text,
             hit_count: output.hit_count,

@@ -1,11 +1,11 @@
 <script setup lang="ts">
+import type { ProxyConfig } from '../../composables/useProxyConfig'
+import type { RerankerDownloadSelection } from '../../types/rerankerDownload'
 /**
  * 代码搜索工具 (Acemcp/Sou) 配置组件
  * 包含：基础配置、高级配置、日志调试、索引管理
  */
 import type { IndexStatus, LocalIndexStatus, ProjectIndexStatus, ProjectsIndexStatus } from '../../types/tauri'
-import type { ProxyConfig } from '../../composables/useProxyConfig'
-import type { RerankerDownloadSelection } from '../../types/rerankerDownload'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useDialog, useMessage } from 'naive-ui'
@@ -49,7 +49,7 @@ const config = ref({
   proxy_username: '',
   proxy_password: '',
   // sou 多后端配置
-  sou_default_backend: 'auto' as 'auto' | 'ace' | 'fast_context' | 'local' | 'both',
+  sou_default_backend: 'auto' as 'auto' | 'ace' | 'fast_context' | 'local' | 'hybrid' | 'both',
   sou_auto_order: ['ace', 'fast_context', 'local'] as string[],
   sou_include_backend_headers: true,
   sou_include_failed_backend_errors: true,
@@ -89,7 +89,7 @@ function buildIndexSignature(value: typeof config.value): string {
 const debugProjectRoot = ref('')
 const debugQuery = ref('')
 const debugLoading = ref(false)
-const debugBackend = ref<'default' | 'auto' | 'ace' | 'fast_context' | 'local' | 'both'>('default')
+const debugBackend = ref<'default' | 'auto' | 'ace' | 'fast_context' | 'local' | 'hybrid' | 'both'>('default')
 const debugUseManualInput = ref(false) // 是否使用手动输入模式
 interface ProjectSelectOption {
   label: string
@@ -103,6 +103,15 @@ const debugProjectOptionsReadError = ref('')
 
 // 调试结果增强类型
 interface DebugSearchResult {
+  // 中文说明：显示实际增强分支与耗时，避免把本地直达误认为远端已执行。
+  retrieval?: {
+    enhancement_state?: string
+    enhancement_reason?: string
+    local_duration_ms?: number
+    enhancement_duration_ms?: number
+    enhancement_budget_ms?: number
+    truncated?: boolean
+  }
   success: boolean
   result?: string
   error?: string
@@ -494,6 +503,7 @@ const backendOptions = [
   { label: '仅 ACE / Augment', value: 'ace' },
   { label: '仅 fast-context', value: 'fast_context' },
   { label: '仅 Local（FTS5 / rg）', value: 'local' },
+  { label: 'Local 优先，Fast Context 增强', value: 'hybrid' },
   { label: '三后端合并', value: 'both' },
 ]
 
@@ -508,6 +518,7 @@ const backendNameMap: Record<string, string> = {
   ace: 'ACE',
   fast_context: 'Fast Context',
   local: 'Local',
+  hybrid: 'Local + Fast Context',
   auto: '自动',
   both: '三后端',
 }
@@ -555,6 +566,7 @@ const aceEnabledInStrategy = computed(() => {
 const fastContextEnabledInStrategy = computed(() => {
   const backend = config.value.sou_default_backend
   return backend === 'fast_context'
+    || backend === 'hybrid'
     || backend === 'both'
     || (backend === 'auto' && config.value.sou_auto_order.includes('fast_context'))
 })
@@ -564,6 +576,7 @@ const localEnabledInStrategy = computed(() => {
     return false
   const backend = config.value.sou_default_backend
   return backend === 'local'
+    || backend === 'hybrid'
     || backend === 'both'
     || (backend === 'auto' && config.value.sou_auto_order.includes('local'))
 })
@@ -953,6 +966,8 @@ const backendStrategySummary = computed(() => {
       return '当前默认仅使用 Local；热索引走 FTS5，索引未就绪时即时使用 rg。'
     case 'both':
       return '当前默认同时返回 ACE、fast-context 与 Local 的合并结果；Local 关闭或任一后端失败时将降级返回其余可用结果。'
+    case 'hybrid':
+      return '优先返回 Local 精确结果；证据不足时由 Fast Context 增强，总增强预算为 8 秒，超时保留 Local 结果。'
     default:
       return `当前自动顺序：${config.value.sou_auto_order.map(value => backendNameMap[value] || value).join(' → ')}。`
   }
@@ -976,6 +991,28 @@ const debugBackendLabel = computed(() =>
 const debugActualBackendLabel = computed(() => {
   const actual = debugResultData.value?.actual_backend
   return actual ? (backendNameMap[actual] || actual) : debugBackendLabel.value
+})
+
+const hybridDiagnostic = computed(() => {
+  const retrieval = debugResultData.value?.retrieval
+  if (!retrieval?.enhancement_state)
+    return ''
+  const labels: Record<string, string> = {
+    skipped: '本地直达',
+    completed: '增强完成',
+    timeout: '增强超时',
+    error: '增强异常',
+    empty: '增强未命中',
+    local_only_file: '点名文件仅本地处理',
+    exact_file: '精确文件命中',
+    exact_identifiers: '关键标识符已命中',
+    exact_phrase: '精确短语命中',
+    no_local_hits: '本地未命中',
+    cross_module_query: '跨模块查询',
+    missing_requested_file: '目标文件尚未命中',
+    insufficient_local_evidence: '本地证据不足',
+  }
+  return `${labels[retrieval.enhancement_state] || retrieval.enhancement_state} · ${labels[retrieval.enhancement_reason || ''] || retrieval.enhancement_reason || '-'} · Local ${retrieval.local_duration_ms ?? '-'}ms / 增强 ${retrieval.enhancement_duration_ms ?? 0}ms（预算 ${retrieval.enhancement_budget_ms ?? 8000}ms）`
 })
 
 const debugCanRun = computed(() =>
@@ -2402,7 +2439,7 @@ defineExpose({ saveConfig })
               <n-space vertical size="medium">
                 <n-alert type="success" :bordered="false">
                   推荐默认策略：ACE → Fast Context → Local。远端失败或返回零片段时继续回退，Local 零命中作为最终结果。
-                  MCP 调用时也可以通过 <code>backend</code> 主动指定 ace、fast_context、local 或 both。
+                  MCP 调用时可通过 <code>backend</code> 指定 ace、fast_context、local、hybrid 或 both。
                 </n-alert>
 
                 <n-grid :x-gap="24" :y-gap="16" :cols="2">
@@ -3656,6 +3693,10 @@ defineExpose({ saveConfig })
                       <div v-if="debugResultData.engine" class="info-row">
                         <span class="info-label">Local 引擎</span>
                         <span class="info-value">{{ debugResultData.engine }} / {{ debugResultData.index_state || '-' }}</span>
+                      </div>
+                      <div v-if="hybridDiagnostic" class="info-row">
+                        <span class="info-label">组合检索</span>
+                        <span class="info-value">{{ hybridDiagnostic }}</span>
                       </div>
                       <div v-if="debugResultData.semantic_mode" class="info-row">
                         <span class="info-label">语义模式</span>

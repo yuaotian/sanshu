@@ -1465,6 +1465,8 @@ pub async fn get_acemcp_config(state: State<'_, AppState>) -> Result<AcemcpConfi
 
 #[derive(Debug, serde::Serialize)]
 pub struct DebugSearchResult {
+    /// 中文说明：透传组合检索的触发原因、来源和分阶段耗时。
+    pub retrieval: Option<serde_json::Value>,
     /// 搜索是否成功
     pub success: bool,
     /// 搜索结果文本
@@ -1533,6 +1535,7 @@ pub async fn debug_acemcp_search(
     let start_instant = Instant::now();
 
     let req = SouRequest {
+        intent: Default::default(),
         project_root_path: project_root_path.clone(),
         query: query.clone(),
         backend,
@@ -1641,6 +1644,7 @@ pub async fn debug_acemcp_search(
 
             Ok(DebugSearchResult {
                 success: !is_error,
+                retrieval: metadata.and_then(|value| value.get("retrieval")).cloned(),
                 result: (!is_error).then_some(result_text.clone()),
                 error: is_error.then_some(result_text),
                 request_time: request_time_str,
@@ -1673,6 +1677,7 @@ pub async fn debug_acemcp_search(
 
             Ok(DebugSearchResult {
                 success: false,
+                retrieval: None,
                 result: None,
                 error: Some(error_msg),
                 request_time: request_time_str,
@@ -2135,6 +2140,13 @@ pub async fn execute_acemcp_tool(
 
             // 执行搜索
             let req = SouRequest {
+                intent: arguments
+                    .get("intent")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|error| format!("检索意图参数无效: {}", error))?
+                    .unwrap_or_default(),
                 project_root_path,
                 query,
                 backend,
