@@ -82,10 +82,13 @@ struct FastContextConfig {
     exclude_paths: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct BackendRunResult {
     backend: String,
     text: String,
+    // 中文说明：原生后端保留结构化片段，内部组合检索不再往返解析展示文本。
+    sections: Option<Vec<SouSection>>,
+    section_diagnostics: Option<FastContextSectionDiagnostics>,
     hit_count: usize,
     duration_ms: u64,
     degraded: bool,
@@ -106,6 +109,63 @@ struct BackendRunResult {
     notice: Option<String>,
     workspace: Option<serde_json::Value>,
     retrieval: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct FastContextSectionDiagnostics {
+    file_count: usize,
+    skipped_file_count: usize,
+    empty_range_count: usize,
+}
+
+struct FormattedFastContext {
+    text: String,
+    sections: Vec<SouSection>,
+    diagnostics: FastContextSectionDiagnostics,
+}
+
+impl BackendRunResult {
+    #[cfg(test)]
+    fn into_sections(self) -> Result<Vec<SouSection>, String> {
+        self.into_sections_with_notices()
+            .map(|(sections, _)| sections)
+    }
+
+    fn into_sections_with_notices(self) -> Result<(Vec<SouSection>, Vec<String>), String> {
+        let mut notices = self.notice.into_iter().collect::<Vec<_>>();
+        if let Some(sections) = self.sections {
+            // 中文说明：合法零命中交给调用方回落；原生有文件却全失效时保留具体原因。
+            if sections.is_empty() {
+                if let Some(diagnostics) = self.section_diagnostics {
+                    if diagnostics.file_count > 0 {
+                        return Err(format!(
+                            "fast-context 返回的文件路径或行范围全部无效：原生文件数={}，跳过文件数={}，空范围数={}",
+                            diagnostics.file_count,
+                            diagnostics.skipped_file_count,
+                            diagnostics.empty_range_count
+                        ));
+                    }
+                }
+            }
+            return Ok((sections, notices));
+        }
+
+        let (sections, text_notices) = parse_sou_sections_with_notices(&self.text, &self.backend);
+        for notice in text_notices {
+            if !notices.contains(&notice) {
+                notices.push(notice);
+            }
+        }
+        if sections.is_empty() {
+            Err(format!(
+                "sou 文本片段解析为空：backend={}，text_chars={}",
+                self.backend,
+                self.text.chars().count()
+            ))
+        } else {
+            Ok((sections, notices))
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -253,6 +313,15 @@ impl SouTool {
 
     /// 内部结构化搜索入口；对外 MCP 文本协议继续由 search_context 保持兼容。
     pub(crate) async fn search_sections(request: SouRequest) -> Result<Vec<SouSection>, String> {
+        Self::search_sections_with_notices(request)
+            .await
+            .map(|(sections, _)| sections)
+    }
+
+    /// 中文说明：索引状态与源码片段分开传递，供组合工具保留检索诊断。
+    pub(crate) async fn search_sections_with_notices(
+        request: SouRequest,
+    ) -> Result<(Vec<SouSection>, Vec<String>), String> {
         let config =
             SouRuntimeConfig::load().map_err(|error| format!("读取 sou 配置失败: {}", error))?;
         let strategy = resolve_strategy(request.backend.as_deref(), &config);
@@ -286,14 +355,26 @@ impl SouTool {
             }
             other => return Err(format!("sou搜索失败: 未知后端策略 {}", other)),
         };
-        let sections = results
-            .into_iter()
-            .flat_map(|result| parse_sou_sections(&result.text, &result.backend))
-            .collect::<Vec<_>>();
-        if sections.is_empty() {
-            Err("sou 未返回可解析的代码片段".to_string())
+        let mut sections = Vec::new();
+        let mut notices = Vec::new();
+        let mut errors = Vec::new();
+        for result in results {
+            match result.into_sections_with_notices() {
+                Ok((hits, result_notices)) => {
+                    sections.extend(hits);
+                    for notice in result_notices {
+                        if !notices.contains(&notice) {
+                            notices.push(notice);
+                        }
+                    }
+                }
+                Err(error) => errors.push(error),
+            }
+        }
+        if sections.is_empty() && !errors.is_empty() {
+            Err(errors.join("；"))
         } else {
-            Ok(sections)
+            Ok((sections, notices))
         }
     }
 }
@@ -738,6 +819,8 @@ async fn run_ace(request: &SouRequest) -> Result<BackendRunResult, String> {
     );
     Ok(BackendRunResult {
         retrieval: None,
+        sections: None,
+        section_diagnostics: None,
         backend: BACKEND_ACE.to_string(),
         text,
         hit_count: ranked.len(),
@@ -790,6 +873,8 @@ async fn run_ace_single(request: &SouRequest) -> Result<BackendRunResult, String
 
     Ok(BackendRunResult {
         retrieval: None,
+        sections: None,
+        section_diagnostics: None,
         backend: BACKEND_ACE.to_string(),
         hit_count: parse_sou_sections(&text, BACKEND_ACE).len(),
         duration_ms: started_at.elapsed().as_millis() as u64,
@@ -852,6 +937,8 @@ async fn run_local_single(
     .map_err(|error| error.to_string())?;
     Ok(BackendRunResult {
         retrieval: Some(output.retrieval),
+        sections: None,
+        section_diagnostics: None,
         backend: BACKEND_LOCAL.to_string(),
         text: output.text,
         hit_count: output.hit_count,
@@ -1099,6 +1186,8 @@ async fn run_local_workspace(
     let text = format_workspace_sections(&ranked, &diagnostics, notice.as_deref());
     Ok(BackendRunResult {
         retrieval: None,
+        sections: None,
+        section_diagnostics: None,
         backend: BACKEND_LOCAL.to_string(),
         text,
         hit_count: ranked.len(),
@@ -1451,12 +1540,13 @@ async fn run_fast_context_once(
         response.meta
     );
 
-    let text = format_fast_context_text(&project_root, &response, include_header).map_err(|e| {
-        let message = e.to_string();
-        log_important!(warn, "[sou] fast-context 格式化失败: {}", message);
-        message
-    })?;
-    if text.trim().is_empty() {
+    let formatted =
+        format_fast_context_result(&project_root, &response, include_header).map_err(|e| {
+            let message = e.to_string();
+            log_important!(warn, "[sou] fast-context 格式化失败: {}", message);
+            message
+        })?;
+    if formatted.text.trim().is_empty() {
         return Err("fast-context 未返回可用文件范围".to_string());
     }
     if !response.answer_received {
@@ -1468,13 +1558,15 @@ async fn run_fast_context_once(
         "[sou] fast-context 完成: fallback_attempt={}, elapsed_ms={}, output_len={}",
         fallback_attempt,
         started_at.elapsed().as_millis(),
-        text.len()
+        formatted.text.len()
     );
 
     Ok(BackendRunResult {
         retrieval: None,
         backend: BACKEND_FAST_CONTEXT.to_string(),
-        hit_count: parse_sou_sections(&text, BACKEND_FAST_CONTEXT).len(),
+        hit_count: formatted.sections.len(),
+        sections: Some(formatted.sections),
+        section_diagnostics: Some(formatted.diagnostics),
         duration_ms: started_at.elapsed().as_millis() as u64,
         degraded: false,
         engine: None,
@@ -1493,7 +1585,7 @@ async fn run_fast_context_once(
         fusion: None,
         notice: None,
         workspace: None,
-        text,
+        text: formatted.text,
     })
 }
 
@@ -1505,14 +1597,18 @@ fn should_retry_fast_context_search(message: &str) -> bool {
         || message.contains("未返回可解析响应")
 }
 
-fn format_fast_context_text(
+fn format_fast_context_result(
     project_root: &str,
     response: &fast_context::SearchResult,
     include_header: bool,
-) -> Result<String> {
+) -> Result<FormattedFastContext> {
     let root = PathBuf::from(fast_context::normalize_windows_path_text(project_root));
     let mut parts = Vec::new();
-    let mut code_sections = 0usize;
+    let mut sections = Vec::new();
+    let mut diagnostics = FastContextSectionDiagnostics {
+        file_count: response.files.len(),
+        ..Default::default()
+    };
     if include_header {
         parts.push("The following code sections were retrieved:".to_string());
         parts.push(String::new());
@@ -1527,10 +1623,12 @@ fn format_fast_context_text(
 
     for file in &response.files {
         let Some(path) = resolve_fast_context_file(&root, file)? else {
-            log_important!(warn, "[sou] fast-context 文件项缺少路径，已跳过");
+            diagnostics.skipped_file_count += 1;
+            log_important!(warn, "[sou] fast-context 文件项未解析到有效路径，已跳过");
             continue;
         };
         if !path.exists() || !path.is_file() {
+            diagnostics.skipped_file_count += 1;
             log_important!(
                 warn,
                 "[sou] fast-context 文件不存在或不是文件，已跳过: {}",
@@ -1557,6 +1655,7 @@ fn format_fast_context_text(
                 read_line_range(&path, start, end)?
             };
             if snippet.trim().is_empty() {
+                diagnostics.empty_range_count += 1;
                 log_important!(
                     warn,
                     "[sou] fast-context 片段为空，已跳过: path={}, range=L{}-L{}",
@@ -1576,13 +1675,18 @@ fn format_fast_context_text(
             );
             parts.push(format!("Path: {}", display));
             parts.push(format!("Lines: L{}-L{}", start, end));
+            // 中文说明：与兼容文本共享同一次路径校验和切片，避免两条输出链内容漂移。
+            sections.push(SouSection {
+                backend: BACKEND_FAST_CONTEXT.to_string(),
+                location: format!("{}:{}-{}", display, start, end),
+                excerpt: snippet.clone(),
+            });
             parts.push(snippet);
             parts.push(String::new());
-            code_sections += 1;
         }
     }
 
-    if code_sections == 0 && response.answer_received {
+    if sections.is_empty() && response.answer_received {
         parts.push("No relevant files found.".to_string());
     }
     if !response.rg_patterns.is_empty() {
@@ -1608,7 +1712,11 @@ fn format_fast_context_text(
         parts.push(format!("[fast-context config] {}", response.meta));
     }
 
-    Ok(parts.join("\n"))
+    Ok(FormattedFastContext {
+        text: parts.join("\n"),
+        sections,
+        diagnostics,
+    })
 }
 
 fn resolve_fast_context_file(root: &Path, file: &FastContextFile) -> Result<Option<PathBuf>> {
@@ -1699,7 +1807,15 @@ fn call_result_text(result: &CallToolResult) -> String {
 }
 
 fn parse_sou_sections(text: &str, default_backend: &str) -> Vec<SouSection> {
+    parse_sou_sections_with_notices(text, default_backend).0
+}
+
+fn parse_sou_sections_with_notices(
+    text: &str,
+    default_backend: &str,
+) -> (Vec<SouSection>, Vec<String>) {
     let mut sections = Vec::new();
+    let mut notices = Vec::new();
     let mut backend = default_backend.to_string();
     let mut current_location: Option<String> = None;
     let mut current_lines = Vec::new();
@@ -1773,6 +1889,21 @@ fn parse_sou_sections(text: &str, default_backend: &str) -> Vec<SouSection> {
         if line.starts_with("The following code sections were retrieved:") {
             continue;
         }
+        // 中文说明：ACE 尾部状态只进入诊断；围栏内源码与代码字符串仍完整保留。
+        if backend == BACKEND_ACE
+            && is_ace_index_notice(line)
+            && index > 0
+            && lines[index - 1].trim().is_empty()
+            && lines[index + 1..]
+                .iter()
+                .find(|following| !following.trim().is_empty())
+                .map_or(true, |following| {
+                    following.starts_with("[sou ") || following.starts_with("### sou backend: ")
+                })
+        {
+            notices.push(line.to_string());
+            continue;
+        }
         if line.starts_with("[sou metadata]")
             || line.starts_with("[sou hybrid]")
             || line.starts_with("[sou fallback]")
@@ -1800,11 +1931,21 @@ fn parse_sou_sections(text: &str, default_backend: &str) -> Vec<SouSection> {
         &mut current_location,
         &mut current_lines,
     );
-    sections
+    (sections, notices)
 }
 
 fn is_markdown_fence(line: &str) -> bool {
     line.trim_start().starts_with("```")
+}
+
+fn is_ace_index_notice(line: &str) -> bool {
+    if line == "💡 提示：当前使用已确认的部分索引，未确认文件不会阻塞搜索。"
+    {
+        return true;
+    }
+    line.strip_prefix("💡 提示：检测到索引正在进行中，已等待 ")
+        .and_then(|text| text.strip_suffix(" 秒以获取更完整的搜索结果。"))
+        .is_some_and(|seconds| seconds.parse::<u64>().is_ok())
 }
 
 fn ace_markdown_path<'a>(line: &'a str, following_lines: &[&str]) -> Option<&'a str> {
@@ -2106,17 +2247,163 @@ mod tests {
             answer_received: true,
         };
 
-        let text = format_fast_context_text(
+        let formatted = format_fast_context_result(
             temp.path().to_str().expect("临时目录路径应为 UTF-8"),
             &response,
             true,
         )
         .expect("合法空 answer 应可格式化");
 
+        let text = formatted.text;
         assert!(text.contains("No relevant files found."));
         assert!(text.contains("grep keywords: gesture"));
         assert!(text.contains("[fast-context stats]"));
         assert!(!text.contains("Path:"), "合法空 answer 不应伪造代码片段");
+        let result = BackendRunResult {
+            backend: BACKEND_FAST_CONTEXT.to_string(),
+            text,
+            sections: Some(formatted.sections),
+            section_diagnostics: Some(formatted.diagnostics),
+            ..Default::default()
+        };
+        assert!(result
+            .into_sections()
+            .expect("合法零命中应保留为空结果")
+            .is_empty());
+    }
+
+    #[test]
+    fn native_fast_context_sections_preserve_ranges_without_text_parsing() {
+        let temp = tempdir().expect("临时目录应创建成功");
+        let file = temp.path().join("panel.cpp");
+        fs::write(&file, "disk version\n").expect("应写入文件以验证路径");
+        let absolute = file.canonicalize().expect("文件路径应可规范化");
+        let mut cache = HashMap::new();
+        cache.insert(
+            normalize_path(&absolute),
+            "first\nsecond\nthird\n".to_string(),
+        );
+        let response = fast_context::SearchResult {
+            files: vec![FastContextFile {
+                path: Some("panel.cpp".to_string()),
+                full_path: None,
+                ranges: vec![[2, 3]],
+            }],
+            rg_patterns: Vec::new(),
+            file_cache: cache,
+            stats: fast_context::SearchStats::default(),
+            meta: json!({}),
+            answer_received: true,
+        };
+        let formatted = format_fast_context_result(
+            temp.path().to_str().expect("临时目录路径应为 UTF-8"),
+            &response,
+            true,
+        )
+        .expect("原生结果应可格式化");
+        assert_eq!(formatted.sections[0].excerpt, "L2:second\nL3:third");
+        assert!(formatted.sections[0].location.ends_with("panel.cpp:2-3"));
+        assert_eq!(
+            formatted.sections,
+            parse_sou_sections(&formatted.text, BACKEND_FAST_CONTEXT),
+            "原生片段应与兼容文本保持一致"
+        );
+        let expected = formatted.sections.clone();
+        let result = BackendRunResult {
+            backend: BACKEND_FAST_CONTEXT.to_string(),
+            // 中文说明：故意去掉展示文本，确认内部链路只消费原生片段。
+            text: "diagnostics only".to_string(),
+            sections: Some(formatted.sections),
+            section_diagnostics: Some(formatted.diagnostics),
+            notice: Some("原生后端诊断".to_string()),
+            ..Default::default()
+        };
+        let (sections, notices) = result
+            .into_sections_with_notices()
+            .expect("原生片段应独立于文本");
+        assert_eq!(sections, expected);
+        assert_eq!(notices, vec!["原生后端诊断".to_string()]);
+    }
+
+    #[test]
+    fn native_fast_context_invalid_paths_and_ranges_are_not_parser_errors() {
+        let temp = tempdir().expect("临时目录应创建成功");
+        fs::write(temp.path().join("panel.cpp"), "one line\n").expect("应写入测试文件");
+        let response = fast_context::SearchResult {
+            files: vec![
+                FastContextFile {
+                    path: Some("missing.cpp".to_string()),
+                    full_path: None,
+                    ranges: vec![[1, 2]],
+                },
+                FastContextFile {
+                    path: Some("panel.cpp".to_string()),
+                    full_path: None,
+                    ranges: vec![[20, 30]],
+                },
+            ],
+            rg_patterns: Vec::new(),
+            file_cache: HashMap::new(),
+            stats: fast_context::SearchStats::default(),
+            meta: json!({}),
+            answer_received: true,
+        };
+        let formatted = format_fast_context_result(
+            temp.path().to_str().expect("临时目录路径应为 UTF-8"),
+            &response,
+            false,
+        )
+        .expect("无效文件和范围应保留诊断");
+        let result = BackendRunResult {
+            backend: BACKEND_FAST_CONTEXT.to_string(),
+            text: formatted.text,
+            sections: Some(formatted.sections),
+            section_diagnostics: Some(formatted.diagnostics),
+            ..Default::default()
+        };
+        let error = result.into_sections().expect_err("全部范围无效应明确报告");
+        assert!(error.contains("原生文件数=2，跳过文件数=1，空范围数=1"));
+
+        let legacy = BackendRunResult {
+            backend: BACKEND_ACE.to_string(),
+            text: "unrecognized response".to_string(),
+            ..Default::default()
+        };
+        assert!(legacy
+            .into_sections()
+            .expect_err("未知文本格式应报解析错误")
+            .contains("文本片段解析为空"));
+    }
+
+    #[test]
+    fn ace_index_notice_is_removed_only_outside_source_code() {
+        let notice = "💡 提示：当前使用已确认的部分索引，未确认文件不会阻塞搜索。";
+        let text = format!(
+            "## panel.ts\nLines: 1-3\n\n```text\nconst notice = `{notice}`;\n{notice}\n```\n\n{notice}"
+        );
+        let (sections, notices) = parse_sou_sections_with_notices(&text, BACKEND_ACE);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(
+            sections[0].excerpt,
+            format!("const notice = `{notice}`;\n{notice}")
+        );
+        assert_eq!(notices, vec![notice.to_string()]);
+        let result = BackendRunResult {
+            backend: BACKEND_ACE.to_string(),
+            text,
+            notice: Some(notice.to_string()),
+            ..Default::default()
+        };
+        let (_, notices) = result
+            .into_sections_with_notices()
+            .expect("ACE 状态应和片段分开传递");
+        assert_eq!(notices, vec![notice.to_string()], "重复诊断应只保留一次");
+
+        let legacy = "Path: panel.ts\nLines: L1-L1\nconst ready = true;\n\n💡 提示：检测到索引正在进行中，已等待 2 秒以获取更完整的搜索结果。";
+        assert_eq!(
+            parse_sou_sections(legacy, BACKEND_ACE)[0].excerpt,
+            "const ready = true;"
+        );
     }
 
     #[test]
@@ -2347,6 +2634,8 @@ private String message = "未配置 token";
         .expect("Local 路由应完成搜索");
         let result = BackendRunResult {
             retrieval: Some(output.retrieval),
+            sections: None,
+            section_diagnostics: None,
             backend: BACKEND_LOCAL.to_string(),
             text: output.text,
             hit_count: output.hit_count,

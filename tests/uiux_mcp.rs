@@ -80,6 +80,122 @@ async fn uiux_beautify_supports_explicit_local_ab_baseline() {
 }
 
 #[tokio::test]
+async fn uiux_local_ocr_audit_exposes_relevant_knowledge_and_retrieval_diagnostics() {
+    // 中文说明：固定原始故障请求并关闭项目上下文，验证知识检索自身的完整 JSON 契约。
+    let query = "OCR 纯屏幕文字识别二级菜单工具栏面板美化与组件体验重塑";
+    let result = UiuxTool::call_tool(
+        "uiux",
+        json!({
+            "query": query,
+            "action": "audit",
+            "knowledge_backend": "local",
+            "append_project_context": false,
+            "max_results": 3,
+            "lang": "zh"
+        }),
+    )
+    .await
+    .expect("OCR 审查请求应完成");
+    let value = parse_uiux_json(&extract_first_text(&result));
+    let retrieval = &value["data"]["retrieval"];
+    let diagnostics = &retrieval["knowledge_diagnostics"];
+    let hits = value["data"]["uiux_hits"]
+        .as_array()
+        .expect("应返回知识片段数组");
+
+    assert!(!hits.is_empty() && hits.len() <= 3);
+    assert_eq!(
+        retrieval["knowledge_hit_count"].as_u64(),
+        Some(hits.len() as u64)
+    );
+    assert_eq!(retrieval["requested_knowledge_backend"], "local");
+    assert_eq!(retrieval["knowledge_backend_source"], "request");
+    assert_eq!(retrieval["knowledge_source"], "local_bm25");
+    assert_eq!(retrieval["project_context_enabled"], false);
+    assert_eq!(retrieval["project_context_appended"], false);
+    assert_eq!(retrieval["queries"]["local_knowledge_query"], query);
+    assert_eq!(diagnostics["status"], "matched");
+    assert_eq!(diagnostics["reason"], "matched");
+    assert!(diagnostics["candidate_count"].as_u64().unwrap_or_default() >= hits.len() as u64);
+    assert!(hits.iter().any(|hit| {
+        hit["location"]
+            .as_str()
+            .is_some_and(|location| location.contains("/data/products.csv:"))
+            && hit["excerpt"]
+                .as_str()
+                .is_some_and(|excerpt| excerpt.contains("Scanner & Document Manager"))
+    }));
+    assert!(hits.iter().any(|hit| {
+        hit["location"]
+            .as_str()
+            .is_some_and(|location| location.contains("/data/ux-guidelines.csv:"))
+    }));
+    for field in ["domains", "searched_domains"] {
+        let domains = diagnostics[field].as_array().expect("应保留领域诊断");
+        assert!(domains.contains(&json!("product")));
+        assert!(domains.contains(&json!("ux")));
+    }
+    let query_tokens = diagnostics["query_tokens"]
+        .as_array()
+        .expect("应返回主题词项");
+    for token in ["ocr", "menu", "toolbar"] {
+        assert!(query_tokens.contains(&json!(token)));
+    }
+    assert!(!query_tokens.contains(&json!("accessibility")));
+    assert!(diagnostics["action_tokens"]
+        .as_array()
+        .expect("应返回动作词项")
+        .contains(&json!("accessibility")));
+    assert!(value["errors"]
+        .as_array()
+        .expect("应返回错误数组")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn uiux_unrelated_audit_preserves_empty_knowledge_error_and_prompt_notice() {
+    // 中文说明：审查动作补词仅参与排序，零主题证据时保持空结果与明确的知识缺失提示。
+    let result = UiuxTool::call_tool(
+        "uiux",
+        json!({
+            "query": "ZXQJ9471QX NOTKNOWLEDGE113",
+            "action": "audit",
+            "knowledge_backend": "local",
+            "append_project_context": false,
+            "max_results": 3
+        }),
+    )
+    .await
+    .expect("无关审查请求应返回结构化结果");
+    let value = parse_uiux_json(&extract_first_text(&result));
+    let retrieval = &value["data"]["retrieval"];
+    let diagnostics = &retrieval["knowledge_diagnostics"];
+
+    assert!(value["data"]["uiux_hits"]
+        .as_array()
+        .expect("应返回知识片段数组")
+        .is_empty());
+    assert_eq!(retrieval["knowledge_hit_count"], 0);
+    assert_eq!(diagnostics["candidate_count"], 0);
+    assert_eq!(diagnostics["reason"], "no_domain_terms");
+    assert_eq!(diagnostics["status"], "matched_low_confidence");
+    assert!(!diagnostics["action_tokens"]
+        .as_array()
+        .expect("审查动作仍应保留词项")
+        .is_empty());
+    assert!(value["errors"]
+        .as_array()
+        .expect("应返回错误数组")
+        .iter()
+        .any(|error| error["code"] == "uiux_knowledge_empty"));
+    let prompt = value["data"]["prompt"]
+        .as_str()
+        .expect("应保留可解释的提示词");
+    assert!(prompt.contains("本次未取得 UI/UX 知识片段"));
+    assert!(!prompt.contains("# UI/UX 参考知识"));
+}
+
+#[tokio::test]
 async fn uiux_auto_uses_local_engine_for_long_chinese_narrative() {
     let result = UiuxTool::call_tool(
         "uiux",
@@ -105,9 +221,10 @@ async fn uiux_auto_uses_local_engine_for_long_chinese_narrative() {
     assert!(retrieval["knowledge_diagnostics"]["status"]
         .as_str()
         .is_some_and(|status| status.starts_with("matched")));
+    // 中文说明：资源压力导致语义让路时仍保留 BM25，属于既有 auto 回落契约。
     assert!(matches!(
         retrieval["knowledge_diagnostics"]["semantic_state"].as_str(),
-        Some("ready" | "missing" | "loading" | "disabled" | "error")
+        Some("ready" | "missing" | "loading" | "disabled" | "error" | "resource")
     ));
     assert_eq!(retrieval["knowledge_hit_count"].as_u64(), Some(3));
     let domains = retrieval["knowledge_diagnostics"]["domains"]

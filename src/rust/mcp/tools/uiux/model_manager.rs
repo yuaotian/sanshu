@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::config::{load_standalone_config, AppState, ProxyConfig};
+use crate::config::{load_standalone_config, AppConfig, AppState, ProxyConfig};
 use crate::log_important;
 use crate::mcp::embedding;
 use crate::network::download_verified_with_strategy_with_progress_and_cancel;
@@ -86,6 +86,8 @@ const MODEL_FILES: &[ModelFileSpec] = &[
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiuxModelStatus {
     pub phase: String,
+    #[serde(default)]
+    pub embedding_phase: String,
     pub model_name: String,
     pub revision: String,
     pub model_dir: String,
@@ -219,12 +221,16 @@ pub fn get_uiux_config(state: tauri::State<'_, AppState>) -> Result<UiuxConfig, 
         .config
         .lock()
         .map_err(|error| format!("获取 UIUX 配置失败: {}", error))?;
+    Ok(uiux_config_snapshot(&config))
+}
+
+fn uiux_config_snapshot(config: &AppConfig) -> UiuxConfig {
     let mcp = &config.mcp_config;
     let model_dir = mcp
         .local_embedding_model_dir
         .clone()
         .or_else(|| mcp.uiux_model_dir.clone());
-    Ok(UiuxConfig {
+    UiuxConfig {
         knowledge_backend: mcp
             .uiux_knowledge_backend
             .clone()
@@ -237,7 +243,41 @@ pub fn get_uiux_config(state: tauri::State<'_, AppState>) -> Result<UiuxConfig, 
         .to_string_lossy()
         .to_string(),
         model_dir,
-    })
+    }
+}
+
+fn normalized_backend(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+fn config_directory(config: &UiuxConfig) -> PathBuf {
+    embedding::effective_model_dir(config.model_dir.as_deref(), None)
+}
+
+fn uiux_config_matches(current: &UiuxConfig, expected: &UiuxConfig) -> Result<bool, String> {
+    Ok(normalized_backend(&current.knowledge_backend)
+        == normalized_backend(&expected.knowledge_backend)
+        && current.semantic_enabled == expected.semantic_enabled
+        && embedding::model_directory_key(&config_directory(current))?
+            == embedding::model_directory_key(&config_directory(expected))?)
+}
+
+/// 中文说明：在配置锁内校验页面确认过的目录，后续操作只使用返回的快照路径。
+pub(crate) fn validated_model_directory(
+    config: &AppConfig,
+    expected_model_dir: &str,
+) -> Result<PathBuf, String> {
+    let directory = embedding::effective_model_dir(
+        config.mcp_config.local_embedding_model_dir.as_deref(),
+        config.mcp_config.uiux_model_dir.as_deref(),
+    );
+    if expected_model_dir.trim().is_empty()
+        || embedding::model_directory_key(&directory)?
+            != embedding::model_directory_key(Path::new(expected_model_dir.trim()))?
+    {
+        return Err("共享模型目录已变化，请刷新已保存配置后重新确认操作".to_string());
+    }
+    Ok(directory)
 }
 
 #[tauri::command]
@@ -245,12 +285,9 @@ pub async fn set_uiux_config(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     config: UiuxConfig,
-) -> Result<(), String> {
-    let backend = config
-        .knowledge_backend
-        .trim()
-        .to_ascii_lowercase()
-        .replace('-', "_");
+    expected_config: UiuxConfig,
+) -> Result<UiuxConfig, String> {
+    let backend = normalized_backend(&config.knowledge_backend);
     if !matches!(backend.as_str(), "auto" | "fast_context" | "local") {
         return Err(format!("未知 UIUX 检索后端: {}", config.knowledge_backend));
     }
@@ -258,13 +295,17 @@ pub async fn set_uiux_config(
         .model_dir
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let new_directory = embedding::effective_model_dir(model_dir.as_deref(), None);
-
-    let previous = {
+    let (previous, old_directory) = {
         let mut app_config = state
             .config
             .lock()
             .map_err(|error| format!("锁定 UIUX 配置失败: {}", error))?;
+        let current = uiux_config_snapshot(&app_config);
+        // 中文说明：只比较本页拥有的字段，过期草稿不得覆盖其他窗口的新配置。
+        if !uiux_config_matches(&current, &expected_config)? {
+            return Err("UIUX 已保存配置已变化，请刷新并核对草稿后重试".to_string());
+        }
+        let old_directory = config_directory(&current);
         let previous = (
             app_config.mcp_config.uiux_knowledge_backend.clone(),
             app_config.mcp_config.uiux_semantic_enabled,
@@ -274,7 +315,7 @@ pub async fn set_uiux_config(
         app_config.mcp_config.uiux_semantic_enabled = Some(config.semantic_enabled);
         // 新配置统一写入共享目录；旧 uiux_model_dir 仅作为读取兼容项保留。
         app_config.mcp_config.local_embedding_model_dir = model_dir.clone();
-        previous
+        (previous, old_directory)
     };
     if let Err(error) = crate::config::save_config(&state, &app_handle).await {
         if let Ok(mut app_config) = state.config.lock() {
@@ -291,8 +332,20 @@ pub async fn set_uiux_config(
         return Err(format!("保存 UIUX 配置失败: {}", error));
     }
 
-    reset_runtime_if_directory_changed(&new_directory);
-    Ok(())
+    let app_config = state
+        .config
+        .lock()
+        .map_err(|error| format!("读取已保存 UIUX 配置失败: {}", error))?;
+    // 中文说明：共享目录清空后继续遵循旧 uiux_model_dir 回退，回传真实生效目录。
+    let saved = uiux_config_snapshot(&app_config);
+    drop(app_config);
+    // 中文说明：只在有效目录真的变化后释放旧目录，同目录保存保留 sou 的共享实例。
+    if embedding::model_directory_key(&old_directory)?
+        != embedding::model_directory_key(&config_directory(&saved))?
+    {
+        reset_runtime_for_directory(&old_directory);
+    }
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -331,32 +384,31 @@ pub fn get_uiux_model_status(state: tauri::State<'_, AppState>) -> Result<UiuxMo
             config.mcp_config.uiux_model_dir.as_deref(),
         )
     };
-    if assets_have_expected_sizes(&directory) {
-        ensure_runtime_started(&directory);
-    }
+    // 中文说明：状态查询只读资产和内存快照，模型初始化仅由真实查询或显式下载触发。
     Ok(current_status(&directory))
 }
 
 #[tauri::command]
 pub async fn start_uiux_model_download(
     state: tauri::State<'_, AppState>,
+    expected_model_dir: String,
 ) -> Result<UiuxModelStatus, String> {
+    let (directory, proxy_config) = {
+        let config = state
+            .config
+            .lock()
+            .map_err(|error| format!("获取 UIUX 配置失败: {}", error))?;
+        (
+            validated_model_directory(&config, &expected_model_dir)?,
+            config.proxy_config.clone(),
+        )
+    };
     if DOWNLOAD_RUNNING.swap(true, Ordering::SeqCst) {
         return Err("UIUX 模型下载任务已在运行".to_string());
     }
     CANCEL_DOWNLOAD.store(false, Ordering::SeqCst);
 
     let prepared = (|| {
-        let config = state
-            .config
-            .lock()
-            .map_err(|error| format!("获取 UIUX 配置失败: {}", error))?;
-        let directory = embedding::effective_model_dir(
-            config.mcp_config.local_embedding_model_dir.as_deref(),
-            config.mcp_config.uiux_model_dir.as_deref(),
-        );
-        let proxy_config = config.proxy_config.clone();
-        drop(config);
         let initial = status_for(&directory, "downloading", "准备下载模型文件");
         write_status(&initial)?;
         Ok::<_, String>((directory, proxy_config, initial))
@@ -405,7 +457,10 @@ pub fn cancel_uiux_model_download() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn remove_uiux_model(state: tauri::State<'_, AppState>) -> Result<UiuxModelStatus, String> {
+pub fn remove_uiux_model(
+    state: tauri::State<'_, AppState>,
+    expected_model_dir: String,
+) -> Result<UiuxModelStatus, String> {
     if DOWNLOAD_RUNNING.load(Ordering::SeqCst) {
         return Err("请先取消正在运行的 UIUX 模型下载".to_string());
     }
@@ -414,10 +469,7 @@ pub fn remove_uiux_model(state: tauri::State<'_, AppState>) -> Result<UiuxModelS
             .config
             .lock()
             .map_err(|error| format!("获取 UIUX 配置失败: {}", error))?;
-        embedding::effective_model_dir(
-            config.mcp_config.local_embedding_model_dir.as_deref(),
-            config.mcp_config.uiux_model_dir.as_deref(),
-        )
+        validated_model_directory(&config, &expected_model_dir)?
     };
     fs::create_dir_all(&directory)
         .map_err(|error| format!("创建模型目录失败 {}: {}", directory.display(), error))?;
@@ -430,7 +482,7 @@ pub fn remove_uiux_model(state: tauri::State<'_, AppState>) -> Result<UiuxModelS
         "另一个 Sanshu 进程正在加载 UIUX 模型或建立语义索引",
     )?;
     remove_known_model_files(&directory)?;
-    reset_runtime();
+    reset_runtime_for_directory(&directory);
     let status = status_for(
         &directory,
         "missing",
@@ -1080,6 +1132,7 @@ fn status_for(directory: &Path, phase: &str, message: &str) -> UiuxModelStatus {
     let embedding_snapshot = embedding::snapshot(directory);
     UiuxModelStatus {
         phase: phase.to_string(),
+        embedding_phase: embedding_snapshot.phase.as_str().to_string(),
         model_name: MODEL_NAME.to_string(),
         revision: MODEL_REVISION.to_string(),
         model_dir: directory.to_string_lossy().to_string(),
@@ -1119,51 +1172,87 @@ fn status_for(directory: &Path, phase: &str, message: &str) -> UiuxModelStatus {
 }
 
 fn current_status(directory: &Path) -> UiuxModelStatus {
-    if !assets_have_expected_sizes(directory) && !DOWNLOAD_RUNNING.load(Ordering::SeqCst) {
-        let mut status = status_for(directory, "missing", "当前 provider 的模型运行时尚未就绪");
-        if let Some(saved) = read_status(directory) {
-            if saved.phase == "error" {
-                status.error = saved.error;
-            }
-        }
-        return status;
-    }
-    if let Ok(runtime) = RUNTIME.lock() {
-        if runtime.directory.as_deref() == Some(directory) {
-            match runtime.phase {
-                RuntimePhase::Ready => {
-                    let mut status = status_for(directory, "ready", "BGE 模型与语义索引已就绪");
-                    status.indexed_documents = runtime.embeddings.len();
-                    status.progress_percent = 100.0;
-                    status.index_progress_percent = 100.0;
-                    return status;
-                }
-                RuntimePhase::Loading => {
-                    if let Some(status) = read_status(directory) {
-                        return status;
-                    }
-                }
-                RuntimePhase::Error => {
-                    let mut status = status_for(directory, "error", "BGE 运行时初始化失败");
-                    status.error = runtime.error.clone();
-                    return status;
-                }
-                RuntimePhase::Empty => {}
-            }
-        }
-    }
+    let saved = read_status(directory);
+    // 中文说明：只复用确有活动任务的进度，历史 ready/loading 状态不冒充当前进程状态。
     if DOWNLOAD_RUNNING.load(Ordering::SeqCst) {
-        if let Some(status) = read_status(directory) {
-            return status;
+        if let Some(status) = saved
+            .as_ref()
+            .filter(|status| matches!(status.phase.as_str(), "downloading" | "verifying"))
+        {
+            return status.clone();
         }
     }
-    let mut status = status_for(directory, "missing", "模型未完整下载，auto 当前使用 BM25");
-    if let Some(saved) = read_status(directory) {
-        if saved.phase == "error" {
-            status.error = saved.error;
+    let (index_phase, index_error, indexed_documents) = match RUNTIME.lock() {
+        Ok(runtime) if runtime.directory.as_deref() == Some(directory) => (
+            runtime.phase,
+            runtime.error.clone(),
+            runtime.embeddings.len(),
+        ),
+        Ok(_) => (RuntimePhase::Empty, None, 0),
+        Err(error) => (RuntimePhase::Error, Some(error.to_string()), 0),
+    };
+    let shared = embedding::snapshot(directory);
+    let (phase, message) = observed_model_phase(
+        assets_have_expected_sizes(directory),
+        index_phase,
+        shared.phase,
+    );
+    let mut status = status_for(directory, phase, message);
+    status.embedding_phase = shared.phase.as_str().to_string();
+    status.indexed_documents = indexed_documents;
+    status.error = index_error.or(shared.error);
+    if index_phase == RuntimePhase::Ready {
+        status.index_progress_percent = 100.0;
+    }
+    if index_phase == RuntimePhase::Loading {
+        if let Some(saved) = saved
+            .as_ref()
+            .filter(|saved| matches!(saved.phase.as_str(), "loading" | "indexing"))
+        {
+            status.phase = saved.phase.clone();
+            status.message = saved.message.clone();
+            status.indexed_documents = saved.indexed_documents;
+            status.index_progress_percent = saved.index_progress_percent;
         }
+    }
+    if status.error.is_none() {
+        status.error = saved
+            .filter(|saved| saved.phase == "error")
+            .and_then(|saved| saved.error);
     }
     status
+}
+
+fn observed_model_phase(
+    assets_ready: bool,
+    index_phase: RuntimePhase,
+    shared_phase: embedding::RuntimePhase,
+) -> (&'static str, &'static str) {
+    if !assets_ready {
+        return (
+            "missing",
+            "模型或当前 provider 的运行时资产尚未就绪，auto 当前使用 BM25",
+        );
+    }
+    if index_phase == RuntimePhase::Error || shared_phase == embedding::RuntimePhase::Error {
+        return ("error", "BGE 模型或 UIUX 语义索引初始化异常");
+    }
+    if index_phase == RuntimePhase::Loading || shared_phase == embedding::RuntimePhase::Loading {
+        return ("loading", "BGE 模型或 UIUX 语义索引正在按需加载");
+    }
+    if shared_phase == embedding::RuntimePhase::Ready && index_phase == RuntimePhase::Ready {
+        return ("ready", "BGE 模型与 UIUX 语义索引已就绪");
+    }
+    if shared_phase == embedding::RuntimePhase::Unloaded {
+        return (
+            "installed",
+            "BGE 模型已安装，闲置后已释放，下次语义请求按需加载",
+        );
+    }
+    (
+        "installed",
+        "BGE 模型已安装，模型与 UIUX 语义索引将在查询时按需加载",
+    )
 }
 
 fn runtime_snapshot(directory: &Path) -> (RuntimePhase, Option<String>) {
@@ -1176,20 +1265,18 @@ fn runtime_snapshot(directory: &Path) -> (RuntimePhase, Option<String>) {
     }
 }
 
-fn reset_runtime_if_directory_changed(directory: &Path) {
-    if let Ok(runtime) = RUNTIME.lock() {
-        if runtime.directory.as_deref() == Some(directory) {
-            return;
+fn reset_runtime_for_directory(directory: &Path) {
+    if let Ok(mut runtime) = RUNTIME.lock() {
+        if runtime.directory.as_deref().is_some_and(|current| {
+            embedding::model_directory_key(current)
+                .ok()
+                .zip(embedding::model_directory_key(directory).ok())
+                .is_some_and(|(current, expected)| current == expected)
+        }) {
+            *runtime = RuntimeSlot::default();
         }
     }
-    reset_runtime();
-}
-
-fn reset_runtime() {
-    if let Ok(mut runtime) = RUNTIME.lock() {
-        *runtime = RuntimeSlot::default();
-    }
-    embedding::reset();
+    embedding::reset_if_directory(directory);
 }
 
 fn mark_download_complete(status: &mut UiuxModelStatus) {
@@ -1493,6 +1580,120 @@ fn remove_known_model_files(directory: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observed_status_distinguishes_installed_idle_and_ready_without_starting_runtime() {
+        for (index, shared, expected) in [
+            (
+                RuntimePhase::Empty,
+                embedding::RuntimePhase::Missing,
+                "installed",
+            ),
+            (
+                RuntimePhase::Ready,
+                embedding::RuntimePhase::Unloaded,
+                "installed",
+            ),
+            (
+                RuntimePhase::Empty,
+                embedding::RuntimePhase::Ready,
+                "installed",
+            ),
+            (RuntimePhase::Ready, embedding::RuntimePhase::Ready, "ready"),
+            (
+                RuntimePhase::Loading,
+                embedding::RuntimePhase::Ready,
+                "loading",
+            ),
+            (RuntimePhase::Ready, embedding::RuntimePhase::Error, "error"),
+        ] {
+            assert_eq!(observed_model_phase(true, index, shared).0, expected);
+        }
+        assert!(
+            observed_model_phase(true, RuntimePhase::Ready, embedding::RuntimePhase::Unloaded)
+                .1
+                .contains("闲置")
+        );
+        assert_eq!(
+            observed_model_phase(false, RuntimePhase::Ready, embedding::RuntimePhase::Ready).0,
+            "missing"
+        );
+    }
+
+    #[test]
+    fn expected_directory_guard_preserves_files_and_accepts_uncreated_equivalent_paths() {
+        let root = tempfile::tempdir().expect("应创建目录校验样例");
+        let selected = root.path().join("selected");
+        let stale = root.path().join("stale");
+        fs::create_dir(&stale).expect("应创建旧目录");
+        fs::write(stale.join("keep.txt"), b"preserve").expect("应写入保留样例");
+        let mut config = AppConfig::default();
+        config.mcp_config.local_embedding_model_dir = Some(selected.to_string_lossy().to_string());
+
+        assert!(validated_model_directory(&config, &stale.to_string_lossy()).is_err());
+        assert!(validated_model_directory(&config, " ").is_err());
+        let equivalent = selected.join("child").join("..");
+        assert_eq!(
+            validated_model_directory(&config, &equivalent.to_string_lossy()).unwrap(),
+            selected
+        );
+        assert!(!selected.exists(), "目录校验不创建待下载目录");
+        assert_eq!(fs::read(stale.join("keep.txt")).unwrap(), b"preserve");
+    }
+
+    #[test]
+    fn uiux_baseline_compares_only_owned_values_and_effective_directory() {
+        let root = tempfile::tempdir().expect("应创建配置快照样例");
+        let mut config = AppConfig::default();
+        config.mcp_config.local_embedding_model_dir =
+            Some(root.path().join("model").to_string_lossy().to_string());
+        let expected = uiux_config_snapshot(&config);
+        config.mcp_config.sou_default_backend = Some("local".to_string());
+        assert!(uiux_config_matches(&uiux_config_snapshot(&config), &expected).unwrap());
+
+        for changed in ["backend", "semantic", "directory"] {
+            let mut other = expected.clone();
+            match changed {
+                "backend" => other.knowledge_backend = "local".to_string(),
+                "semantic" => other.semantic_enabled = !expected.semantic_enabled,
+                _ => {
+                    other.model_dir = Some(root.path().join("other").to_string_lossy().to_string())
+                }
+            }
+            assert!(
+                !uiux_config_matches(&other, &expected).unwrap(),
+                "过期 {changed} 基线应被识别"
+            );
+        }
+        let mut same_directory = expected.clone();
+        same_directory.model_dir = Some(
+            root.path()
+                .join("model/child/..")
+                .to_string_lossy()
+                .to_string(),
+        );
+        assert!(
+            uiux_config_matches(&same_directory, &expected).unwrap(),
+            "等价路径不应触发目录变化"
+        );
+    }
+
+    #[test]
+    fn cleared_shared_directory_snapshot_preserves_legacy_fallback() {
+        let root = tempfile::tempdir().expect("应创建兼容目录样例");
+        let legacy = root.path().join("legacy");
+        let mut config = AppConfig::default();
+        config.mcp_config.uiux_model_dir = Some(legacy.to_string_lossy().to_string());
+        config.mcp_config.local_embedding_model_dir = None;
+
+        let saved = uiux_config_snapshot(&config);
+        assert_eq!(config_directory(&saved), legacy);
+        assert_eq!(PathBuf::from(saved.effective_model_dir), legacy);
+        assert_eq!(
+            validated_model_directory(&config, &legacy.to_string_lossy()).unwrap(),
+            legacy
+        );
+    }
 
     #[test]
     fn model_manifest_has_expected_total_and_unique_paths() {

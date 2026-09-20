@@ -722,6 +722,52 @@ pub fn reset() {
     }
 }
 
+/// 中文说明：模型操作绑定确认时的目录，只释放该目录的共享实例。
+pub(crate) fn reset_if_directory(directory: &Path) {
+    if let Ok(mut runtime) = RUNTIME.lock() {
+        reset_matching_runtime(&mut runtime, directory);
+    }
+}
+
+fn reset_matching_runtime(runtime: &mut RuntimeSlot, directory: &Path) {
+    if runtime.directory.as_deref().is_some_and(|current| {
+        model_directory_key(current)
+            .ok()
+            .zip(model_directory_key(directory).ok())
+            .is_some_and(|(current, expected)| current == expected)
+    }) {
+        *runtime = RuntimeSlot::default();
+    }
+}
+
+/// 中文说明：目录比较不创建文件，兼容 Windows 大小写、分隔符及尚未创建的下载目录。
+pub(crate) fn model_directory_key(directory: &Path) -> Result<PathBuf, String> {
+    let absolute =
+        std::path::absolute(directory).map_err(|error| format!("解析模型目录失败: {}", error))?;
+    let resolved = absolute.canonicalize().unwrap_or(absolute);
+    let mut normalized = PathBuf::new();
+    for component in resolved.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    if cfg!(windows) {
+        let text = normalized.to_string_lossy().replace('\\', "/");
+        let text = if let Some(unc) = text.strip_prefix("//?/UNC/") {
+            format!("//{unc}")
+        } else {
+            text.strip_prefix("//?/").unwrap_or(&text).to_string()
+        };
+        Ok(PathBuf::from(text.to_lowercase()))
+    } else {
+        Ok(normalized)
+    }
+}
+
 async fn wait_until_ready(
     directory: &Path,
     wait_budget: Duration,
@@ -972,9 +1018,8 @@ enum ResourcePressure {
 }
 
 fn resource_pressure(provider: ExecutionProvider) -> (ResourcePressure, ResourcePressureSnapshot) {
-    let snapshot = crate::mcp::tools::sou::telemetry::pressure_snapshot(
-        provider == ExecutionProvider::Cuda,
-    );
+    let snapshot =
+        crate::mcp::tools::sou::telemetry::pressure_snapshot(provider == ExecutionProvider::Cuda);
     let process_memory_critical = snapshot
         .process_memory_bytes
         .is_some_and(|value| value >= 2 * GIB);
@@ -1203,6 +1248,41 @@ pub fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conditional_reset_does_not_release_another_directory() {
+        let root = tempfile::tempdir().expect("应创建共享实例目录样例");
+        let active = root.path().join("active");
+        let mut runtime = RuntimeSlot::default();
+        runtime.directory = Some(active.clone());
+        runtime.phase = RuntimePhase::Unloaded;
+        runtime.error = Some("retained".to_string());
+        reset_matching_runtime(&mut runtime, &root.path().join("old"));
+        assert_eq!(runtime.directory.as_deref(), Some(active.as_path()));
+        assert_eq!(runtime.error.as_deref(), Some("retained"));
+
+        reset_matching_runtime(&mut runtime, &active.join("child/.."));
+        assert!(runtime.directory.is_none());
+        assert!(runtime.error.is_none());
+    }
+
+    #[test]
+    fn model_directory_normalization_is_read_only_for_missing_paths() {
+        let root = tempfile::tempdir().expect("应创建路径规范化样例");
+        let target = root.path().join("missing");
+        assert_eq!(
+            model_directory_key(&target).unwrap(),
+            model_directory_key(&target.join("child/..")).unwrap()
+        );
+        if cfg!(windows) {
+            let alternate = target.to_string_lossy().to_uppercase().replace('\\', "/");
+            assert_eq!(
+                model_directory_key(&target).unwrap(),
+                model_directory_key(Path::new(&alternate)).unwrap()
+            );
+        }
+        assert!(!target.exists());
+    }
 
     #[test]
     fn shared_directory_prefers_new_setting_then_legacy_setting() {

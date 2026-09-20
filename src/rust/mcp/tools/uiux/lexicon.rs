@@ -72,6 +72,22 @@ pub const ZH_TO_EN_EXPANSIONS: &[(&str, &[&str])] = &[
     ("后台管理", &["admin", "dashboard", "enterprise"]),
     ("管理面板", &["admin", "dashboard", "panel"]),
     ("设计系统", &["design", "system", "component", "token"]),
+    // 组件词映射到现有 UX 控件规则；保留 OCR 的产品语义，避免只靠审查通用词召回。
+    (
+        "文字识别",
+        &["ocr", "scanner", "document", "text", "extraction"],
+    ),
+    (
+        "工具栏",
+        &["toolbar", "button", "controls", "keyboard", "focus"],
+    ),
+    (
+        "二级菜单",
+        &["submenu", "menu", "navigation", "keyboard", "focus"],
+    ),
+    ("菜单", &["menu", "navigation", "keyboard", "focus"]),
+    ("面板", &["panel", "layout", "controls"]),
+    ("组件", &["component", "controls"]),
     // 设计要素
     ("配色", &["color", "palette", "contrast"]),
     ("字体", &["typography", "font", "heading"]),
@@ -112,4 +128,5 @@ pub const EN_SYNONYMS: &[(&str, &[&str])] = &[
     ),
     ("canvas", &["rendering", "animation", "performance"]),
     ("space", &["cosmic", "aerospace", "orbital"]),
+    ("ocr", &["scanner", "document", "text", "extraction"]),
 ];

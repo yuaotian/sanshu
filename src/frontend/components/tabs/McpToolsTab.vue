@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { UiuxEditSession } from '../../types/uiux'
 import { useMessage } from 'naive-ui'
 import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
 import { useMcpToolsReactive } from '../../composables/useMcpTools'
@@ -36,6 +37,8 @@ const message = useMessage()
 const needsReconnect = ref(false)
 const showToolConfigModal = ref(false)
 const currentToolId = ref('')
+// 中文说明：工具切换会卸载配置组件，父级仅保存 UIUX 编辑快照，避免未保存输入随切页丢失。
+const uiuxEditSession = ref<UiuxEditSession | null>(null)
 const lastHandledAutoOpenRequestId = ref(0)
 
 // 计算属性：当前工具名称
@@ -241,7 +244,11 @@ onMounted(async () => {
     >
       <div class="config-modal-body min-h-[400px]">
         <SouConfig v-if="currentToolId === 'sou'" :active="showToolConfigModal" />
-        <UiuxConfig v-else-if="currentToolId === 'uiux'" :active="showToolConfigModal" />
+        <UiuxConfig
+          v-else-if="currentToolId === 'uiux'"
+          v-model:session="uiuxEditSession"
+          :active="showToolConfigModal"
+        />
         <Context7Config v-else-if="currentToolId === 'context7'" :active="showToolConfigModal" />
         <EnhanceConfig
           v-else-if="currentToolId === 'enhance'"

@@ -49,6 +49,7 @@ impl FusedCandidate {
 }
 
 pub async fn search(query: &str, action: UiuxAction, max_results: usize) -> HybridSearchOutcome {
+    let max_results = max_results.clamp(1, 8);
     let bm25 = structured_search::search(query, action, max_results.max(8));
     let settings = model_manager::semantic_settings();
     if !settings.enabled {
@@ -56,6 +57,7 @@ pub async fn search(query: &str, action: UiuxAction, max_results: usize) -> Hybr
             bm25,
             "disabled",
             "UIUX 本地语义检索已关闭，auto 使用结构化 BM25",
+            max_results,
         );
     }
 
@@ -63,13 +65,13 @@ pub async fn search(query: &str, action: UiuxAction, max_results: usize) -> Hybr
         match model_manager::rank_documents(query, &settings.model_dir, MODEL_WAIT_BUDGET).await {
             Ok(value) => value,
             Err(unavailable) => {
-                return bm25_only(bm25, &unavailable.state, &unavailable.message);
+                return bm25_only(bm25, &unavailable.state, &unavailable.message, max_results);
             }
         };
     let semantic_top_score = ranking.top_score;
     if bm25.abstained && semantic_top_score < SEMANTIC_ONLY_MIN_SCORE {
         return HybridSearchOutcome {
-            report: bm25,
+            report: limit_report(bm25, max_results),
             engine: "local_bm25_bge_rrf_v1".to_string(),
             semantic_state: "ready".to_string(),
             semantic_top_score: Some(semantic_top_score),
@@ -93,9 +95,21 @@ pub async fn search(query: &str, action: UiuxAction, max_results: usize) -> Hybr
     }
 }
 
-fn bm25_only(bm25: SearchReport, semantic_state: &str, message: &str) -> HybridSearchOutcome {
+fn limit_report(mut report: SearchReport, max_results: usize) -> SearchReport {
+    // 中文说明：融合预召回保留八条候选，直接回落时仍须遵守请求上限并保留检索诊断。
+    report.hits.truncate(max_results.clamp(1, 8));
+    report.domains = ordered_unique(report.hits.iter().map(|hit| hit.domain.clone()));
+    report
+}
+
+fn bm25_only(
+    bm25: SearchReport,
+    semantic_state: &str,
+    message: &str,
+    max_results: usize,
+) -> HybridSearchOutcome {
     HybridSearchOutcome {
-        report: bm25,
+        report: limit_report(bm25, max_results),
         engine: structured_search::KNOWLEDGE_ENGINE.to_string(),
         semantic_state: semantic_state.to_string(),
         semantic_top_score: None,
@@ -177,12 +191,15 @@ fn fuse_reports(
 
     SearchReport {
         abstained: hits.is_empty(),
+        // 中文说明：融合命中只更新最终结果原因，保留 BM25 的分词、领域与候选诊断。
+        reason: if hits.is_empty() {
+            bm25.reason.clone()
+        } else {
+            "matched_hybrid".to_string()
+        },
         hits,
-        rewritten_query: bm25.rewritten_query,
-        query_rewrites: bm25.query_rewrites,
         domains,
-        top_score: bm25.top_score,
-        token_coverage: bm25.token_coverage,
+        ..bm25
     }
 }
 
@@ -234,6 +251,75 @@ fn ordered_unique(values: impl Iterator<Item = String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lexical_report() -> SearchReport {
+        SearchReport {
+            hits: (0..10)
+                .map(|index| KnowledgeHit {
+                    source: "local_bm25".to_string(),
+                    location: format!("fixture:{index}"),
+                    excerpt: format!("工具栏规则 {index}"),
+                    domain: format!("domain_{index}"),
+                })
+                .collect(),
+            rewritten_query: "toolbar menu".to_string(),
+            query_rewrites: vec!["工具栏 → toolbar".to_string()],
+            query_tokens: vec!["toolbar".to_string(), "menu".to_string()],
+            action_tokens: vec!["accessibility".to_string()],
+            searched_domains: vec!["ux".to_string()],
+            candidate_count: 12,
+            reason: "matched".to_string(),
+            domains: (0..10).map(|index| format!("domain_{index}")).collect(),
+            top_score: 6.5,
+            token_coverage: 0.75,
+            abstained: false,
+        }
+    }
+
+    #[test]
+    fn bm25_fallback_respects_result_limit_without_losing_diagnostics() {
+        let original = lexical_report();
+        for state in ["disabled", "missing", "loading", "error", "resource"] {
+            for (requested, expected) in [(0, 1), (1, 1), (3, 3), (8, 8), (99, 8)] {
+                let outcome = bm25_only(original.clone(), state, "语义回落", requested);
+                let report = outcome.report;
+                assert_eq!(report.hits.len(), expected);
+                assert_eq!(
+                    report.hits[expected - 1].location,
+                    format!("fixture:{}", expected - 1)
+                );
+                assert_eq!(report.domains.len(), expected);
+                assert_eq!(report.rewritten_query, original.rewritten_query);
+                assert_eq!(report.query_rewrites, original.query_rewrites);
+                assert_eq!(report.query_tokens, original.query_tokens);
+                assert_eq!(report.action_tokens, original.action_tokens);
+                assert_eq!(report.searched_domains, original.searched_domains);
+                assert_eq!(report.candidate_count, original.candidate_count);
+                assert_eq!(report.reason, original.reason);
+                assert_eq!(report.top_score, original.top_score);
+                assert_eq!(report.token_coverage, original.token_coverage);
+                assert_eq!(report.abstained, original.abstained);
+                assert_eq!(outcome.semantic_state, state);
+            }
+        }
+    }
+
+    #[test]
+    fn low_confidence_limit_keeps_empty_result_and_lexical_reason() {
+        let mut original = lexical_report();
+        original.hits.clear();
+        original.domains.clear();
+        original.abstained = true;
+        original.reason = "insufficient_matches".to_string();
+        let report = limit_report(original.clone(), 3);
+        assert!(report.hits.is_empty());
+        assert!(report.abstained);
+        assert_eq!(report.reason, original.reason);
+        assert_eq!(report.query_tokens, original.query_tokens);
+        assert_eq!(report.action_tokens, original.action_tokens);
+        assert_eq!(report.searched_domains, original.searched_domains);
+        assert_eq!(report.candidate_count, original.candidate_count);
+    }
 
     #[test]
     fn rrf_keeps_lexical_exact_match_ahead_of_semantic_only_match() {

@@ -1797,9 +1797,7 @@ pub fn get_local_embedding_model_status(
     let requested_provider = crate::mcp::embedding::configured_provider();
     let assets_ready =
         crate::mcp::embedding::assets_available_for_provider(&model_dir, requested_provider);
-    if assets_ready {
-        crate::mcp::embedding::ensure_started(&model_dir);
-    }
+    // 中文说明：配置页只读取共享模型快照，打开页面不触发模型加载或索引任务。
     let snapshot = crate::mcp::embedding::snapshot(&model_dir);
     let snapshot_error = snapshot.error.clone();
     let (phase, message, error) = if !assets_ready {
@@ -1827,12 +1825,12 @@ pub fn get_local_embedding_model_status(
                 None,
             ),
             crate::mcp::embedding::RuntimePhase::Missing => (
-                "missing".to_string(),
-                "BGE 共享模型运行时资产尚未就绪".to_string(),
+                "installed".to_string(),
+                "BGE 共享模型已安装，将在语义请求时按需加载".to_string(),
                 None,
             ),
             crate::mcp::embedding::RuntimePhase::Unloaded => (
-                "unloaded".to_string(),
+                "installed".to_string(),
                 "BGE 共享模型因闲置已释放，下次语义请求将按需重载".to_string(),
                 None,
             ),
@@ -1936,16 +1934,17 @@ fn integrity_result(
 #[tauri::command]
 pub async fn verify_uiux_model_integrity(
     state: State<'_, AppState>,
+    expected_model_dir: String,
 ) -> Result<SouModelIntegrityResult, String> {
     let directory = {
         let config = state
             .config
             .lock()
             .map_err(|error| format!("获取配置失败: {}", error))?;
-        crate::mcp::embedding::effective_model_dir(
-            config.mcp_config.local_embedding_model_dir.as_deref(),
-            config.mcp_config.uiux_model_dir.as_deref(),
-        )
+        crate::mcp::tools::uiux::model_manager::validated_model_directory(
+            &config,
+            &expected_model_dir,
+        )?
     };
     let check_directory = directory.clone();
     tauri::async_runtime::spawn_blocking(move || {

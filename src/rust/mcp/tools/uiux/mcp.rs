@@ -3,7 +3,8 @@
 // fast-context 仅在显式请求时用于 A/B 诊断，项目上下文仍通过 sou 检索用户项目。
 
 use std::borrow::Cow;
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -35,6 +36,7 @@ struct UiuxDefaults {
     output_format: UiuxOutputFormat,
     max_results_cap: u32,
     knowledge_backend: UiuxKnowledgeBackend,
+    knowledge_backend_configured: bool,
 }
 
 impl UiuxDefaults {
@@ -54,16 +56,19 @@ impl UiuxDefaults {
             .unwrap_or(10)
             .max(1);
         // 知识检索后端：默认 auto 使用本地 BM25/BGE 混合检索，模型未就绪时保底 BM25。
-        let knowledge_backend = mcp_config
+        let configured_backend = mcp_config
             .and_then(|c| c.uiux_knowledge_backend.as_deref())
-            .and_then(parse_knowledge_backend)
-            .unwrap_or(UiuxKnowledgeBackend::Auto);
+            .and_then(parse_knowledge_backend);
+        let knowledge_backend = configured_backend.unwrap_or(UiuxKnowledgeBackend::Auto);
 
         Self {
             lang,
             output_format,
             max_results_cap,
             knowledge_backend,
+            // 中文说明：加载器在缺文件时会返回默认配置，此时来源仍应标记 default。
+            knowledge_backend_configured: configured_backend.is_some()
+                && dirs::config_dir().is_some_and(|root| root.join("sanshu/config.json").is_file()),
         }
     }
 }
@@ -79,6 +84,9 @@ struct UiuxSnippet {
 #[derive(Debug, Clone, Serialize)]
 struct UiuxQueries {
     knowledge_query: String,
+    // 中文说明：保留旧字段，同时明确本地与远端实际使用的不同输入。
+    local_knowledge_query: String,
+    remote_knowledge_query: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     project_context_query: Option<String>,
 }
@@ -93,6 +101,11 @@ struct UiuxKnowledgeDiagnostics {
     query_rewrites: Vec<String>,
     top_score: f64,
     token_coverage: f64,
+    query_tokens: Vec<String>,
+    action_tokens: Vec<String>,
+    searched_domains: Vec<String>,
+    candidate_count: usize,
+    reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     semantic_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -104,13 +117,23 @@ struct UiuxKnowledgeDiagnostics {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct UiuxProjectDiagnostics {
+    requested_file: String,
+    target_status: String,
+    target_source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct UiuxRetrieval {
     requested_knowledge_backend: String,
+    knowledge_backend_source: String,
     knowledge_source: String,
     knowledge_diagnostics: UiuxKnowledgeDiagnostics,
     project_context_source: String,
     project_context_enabled: bool,
     project_context_appended: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_context_diagnostics: Option<UiuxProjectDiagnostics>,
     degraded: bool,
     knowledge_duration_ms: u128,
     project_context_duration_ms: u128,
@@ -197,6 +220,13 @@ async fn handle_request(
     let _output_format = resolve_output_format(req.output_format, defaults);
     let action = req.action.unwrap_or(UiuxAction::Beautify);
     let knowledge_backend = req.knowledge_backend.unwrap_or(defaults.knowledge_backend);
+    let knowledge_backend_source = if req.knowledge_backend.is_some() {
+        "request"
+    } else if defaults.knowledge_backend_configured {
+        "config"
+    } else {
+        "default"
+    };
     let max_results = req
         .max_results
         .unwrap_or(DEFAULT_MAX_RESULTS)
@@ -282,17 +312,21 @@ async fn handle_request(
     let prompt = build_prompt(action, &req.query, &uiux_hits, &project_result.hits);
     let retrieval = UiuxRetrieval {
         requested_knowledge_backend: knowledge_backend.as_str().to_string(),
+        knowledge_backend_source: knowledge_backend_source.to_string(),
         knowledge_source,
         knowledge_diagnostics,
         project_context_source,
         project_context_enabled,
         project_context_appended,
+        project_context_diagnostics: project_result.project_diagnostics,
         degraded,
         knowledge_duration_ms,
         project_context_duration_ms,
         knowledge_hit_count,
         project_context_hit_count,
         queries: UiuxQueries {
+            local_knowledge_query: req.query.clone(),
+            remote_knowledge_query: knowledge_query.clone(),
             knowledge_query,
             project_context_query,
         },
@@ -310,7 +344,10 @@ async fn handle_request(
     let text = if errors.is_empty() {
         localize::success_summary(lang, action, project_context_appended, degraded)
     } else {
-        localize::error_text(lang, "UI/UX 检索未返回知识片段，请检查查询词")
+        localize::error_text(
+            lang,
+            "UI/UX 知识检索为空，请查看检索阶段、实际词项与候选诊断",
+        )
     };
 
     build_response("uiux", lang, data, text, errors)
@@ -373,6 +410,7 @@ struct SearchOutcome {
     degraded: bool,
     message: Option<String>,
     knowledge_diagnostics: Option<UiuxKnowledgeDiagnostics>,
+    project_diagnostics: Option<UiuxProjectDiagnostics>,
 }
 
 impl SearchOutcome {
@@ -383,6 +421,7 @@ impl SearchOutcome {
             degraded,
             message: Some(message.to_string()),
             knowledge_diagnostics: None,
+            project_diagnostics: None,
         }
     }
 }
@@ -430,26 +469,35 @@ async fn collect_knowledge_hits(
     }
 
     match search_knowledge_via_fast_context(remote_query, max_results).await {
-        Ok(hits) if !hits.is_empty() => SearchOutcome {
-            source: "fast_context_kb".to_string(),
-            hits,
-            degraded: false,
-            message: Some("fast-context 已在物化知识库目录完成定向检索".to_string()),
-            knowledge_diagnostics: Some(UiuxKnowledgeDiagnostics {
-                engine: "fast_context".to_string(),
-                version: structured_search::KNOWLEDGE_VERSION.to_string(),
-                status: "matched".to_string(),
-                domains: Vec::new(),
-                rewritten_query: remote_query.to_string(),
-                query_rewrites: Vec::new(),
-                top_score: 0.0,
-                token_coverage: 0.0,
-                semantic_model: None,
-                semantic_state: None,
-                semantic_top_score: None,
-                fusion: None,
-            }),
-        },
+        Ok(hits) if !hits.is_empty() => {
+            let hit_count = hits.len();
+            SearchOutcome {
+                source: "fast_context_kb".to_string(),
+                hits,
+                degraded: false,
+                message: Some("fast-context 已在物化知识库目录完成定向检索".to_string()),
+                knowledge_diagnostics: Some(UiuxKnowledgeDiagnostics {
+                    engine: "fast_context".to_string(),
+                    version: structured_search::KNOWLEDGE_VERSION.to_string(),
+                    status: "matched".to_string(),
+                    domains: Vec::new(),
+                    rewritten_query: remote_query.to_string(),
+                    query_rewrites: Vec::new(),
+                    top_score: 0.0,
+                    token_coverage: 0.0,
+                    query_tokens: Vec::new(),
+                    action_tokens: Vec::new(),
+                    searched_domains: Vec::new(),
+                    candidate_count: hit_count,
+                    reason: "matched_remote".to_string(),
+                    semantic_model: None,
+                    semantic_state: None,
+                    semantic_top_score: None,
+                    fusion: None,
+                }),
+                project_diagnostics: None,
+            }
+        }
         Ok(_) => local_structured_outcome(
             local_query,
             action,
@@ -511,11 +559,17 @@ fn local_hybrid_outcome(outcome: semantic_search::HybridSearchOutcome) -> Search
             query_rewrites: report.query_rewrites,
             top_score: report.top_score,
             token_coverage: report.token_coverage,
+            query_tokens: report.query_tokens,
+            action_tokens: report.action_tokens,
+            searched_domains: report.searched_domains,
+            candidate_count: report.candidate_count,
+            reason: report.reason,
             semantic_model: Some(super::model_manager::MODEL_NAME.to_string()),
             semantic_state: Some(outcome.semantic_state),
             semantic_top_score: outcome.semantic_top_score,
             fusion: outcome.fusion,
         }),
+        project_diagnostics: None,
     }
 }
 
@@ -558,11 +612,17 @@ fn local_structured_outcome(
             query_rewrites: report.query_rewrites,
             top_score: report.top_score,
             token_coverage: report.token_coverage,
+            query_tokens: report.query_tokens,
+            action_tokens: report.action_tokens,
+            searched_domains: report.searched_domains,
+            candidate_count: report.candidate_count,
+            reason: report.reason,
             semantic_model: None,
             semantic_state: None,
             semantic_top_score: None,
             fusion: None,
         }),
+        project_diagnostics: None,
     }
 }
 
@@ -581,6 +641,11 @@ fn local_diagnostics(status: &str) -> UiuxKnowledgeDiagnostics {
         query_rewrites: Vec::new(),
         top_score: 0.0,
         token_coverage: 0.0,
+        query_tokens: Vec::new(),
+        action_tokens: Vec::new(),
+        searched_domains: Vec::new(),
+        candidate_count: 0,
+        reason: status.to_string(),
         semantic_model: None,
         semantic_state: None,
         semantic_top_score: None,
@@ -641,30 +706,83 @@ async fn collect_project_context_hits(
     current_file_path: Option<&str>,
     max_results: usize,
 ) -> SearchOutcome {
-    project_context_outcome(
-        search_sou_sections(project_root_path, query).await,
-        current_file_path,
-        max_results,
-    )
+    let (sections, notices) = match search_sou_sections(project_root_path, query).await {
+        Ok((sections, notices)) => (Ok(sections), notices),
+        Err(error) => (Err(error), Vec::new()),
+    };
+    let mut outcome =
+        project_context_outcome(sections, current_file_path, max_results, project_root_path);
+    // 中文说明：索引健康信息进入检索诊断，不再混入代码片段供后续 AI 引用。
+    for notice in notices {
+        outcome
+            .message
+            .get_or_insert_with(String::new)
+            .push_str(&format!("；{notice}"));
+    }
+    let Some(requested_file) = current_file_path else {
+        return outcome;
+    };
+
+    // 中文说明：显式目标先校验真实项目边界，避免同名文件或目录外路径冒充当前页面。
+    let target = match resolve_requested_file(project_root_path, requested_file) {
+        Ok(target) => target,
+        Err(reason) => {
+            set_target_diagnostics(&mut outcome, requested_file, reason, None);
+            return outcome;
+        }
+    };
+    if outcome.hits.iter().any(|hit| {
+        hit.location.as_deref().is_some_and(|location| {
+            context_path_matches(location, requested_file, project_root_path)
+        })
+    }) {
+        set_target_diagnostics(&mut outcome, requested_file, "matched", Some("sou"));
+        return outcome;
+    }
+
+    // 中文说明：仅在当前文件未召回时有界回读该文件，保留相关依赖并明确记录补召回来源。
+    let query = query.to_string();
+    let requested = requested_file.to_string();
+    let targeted = tokio::task::spawn_blocking(move || read_target_context(&target, &query)).await;
+    match targeted {
+        Ok(Ok(hit)) => {
+            let has_related_context = !outcome.hits.is_empty();
+            outcome.hits.insert(0, hit);
+            outcome.hits.truncate(max_results.max(1));
+            outcome.source = if has_related_context {
+                "sou_with_target_file"
+            } else {
+                "target_file"
+            }
+            .to_string();
+            set_target_diagnostics(
+                &mut outcome,
+                &requested,
+                "matched",
+                Some("bounded_file_read"),
+            );
+            let message = outcome.message.get_or_insert_with(String::new);
+            message.push_str("；已通过有界文件回读补齐指定页面上下文");
+        }
+        Ok(Err(reason)) => set_target_diagnostics(&mut outcome, &requested, reason, None),
+        Err(_) => set_target_diagnostics(&mut outcome, &requested, "target_read_failed", None),
+    }
+    outcome
 }
 
 fn project_context_outcome(
     result: Result<Vec<SouSection>, String>,
     current_file_path: Option<&str>,
     max_results: usize,
+    project_root_path: &str,
 ) -> SearchOutcome {
     match result {
         Ok(mut sections) => {
             sections.retain(|section| is_project_context_candidate(&section.location));
             if let Some(current_file_path) = current_file_path {
-                let file_hint = current_file_hint(current_file_path);
-                if let Some(file_hint) = file_hint {
-                    sections.sort_by(|a, b| {
-                        let a_hit = a.location.contains(&file_hint);
-                        let b_hit = b.location.contains(&file_hint);
-                        b_hit.cmp(&a_hit)
-                    });
-                }
+                sections.sort_by_key(|section| {
+                    !context_path_matches(&section.location, current_file_path, project_root_path)
+                });
             }
 
             let hits: Vec<UiuxSnippet> = sections
@@ -687,6 +805,7 @@ fn project_context_outcome(
                 degraded: false,
                 message: Some("已通过 sou 追加项目页面上下文".to_string()),
                 knowledge_diagnostics: None,
+                project_diagnostics: None,
             }
         }
         Err(err) => SearchOutcome {
@@ -695,15 +814,158 @@ fn project_context_outcome(
             degraded: true,
             message: Some(format!("项目上下文追加失败，已跳过：{}", err)),
             knowledge_diagnostics: None,
+            project_diagnostics: None,
         },
     }
+}
+
+fn set_target_diagnostics(
+    outcome: &mut SearchOutcome,
+    requested_file: &str,
+    status: &str,
+    source: Option<&str>,
+) {
+    if status != "matched" {
+        outcome.degraded = true;
+        let message = outcome.message.get_or_insert_with(String::new);
+        message.push_str(&format!("；指定页面上下文未就绪：{status}"));
+    }
+    outcome.project_diagnostics = Some(UiuxProjectDiagnostics {
+        requested_file: requested_file.to_string(),
+        target_status: status.to_string(),
+        target_source: source.map(str::to_string),
+    });
+}
+
+fn normalized_context_path(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let normalized = if let Some(unc) = normalized.strip_prefix("//?/UNC/") {
+        format!("//{unc}")
+    } else {
+        normalized
+            .strip_prefix("//?/")
+            .unwrap_or(&normalized)
+            .to_string()
+    };
+    let mut path = PathBuf::new();
+    for component in Path::new(&normalized).components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                path.pop();
+            }
+            other => path.push(other.as_os_str()),
+        }
+    }
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        normalized.to_lowercase()
+    } else {
+        normalized.to_string()
+    }
+}
+
+fn context_path_matches(location: &str, requested_file: &str, project_root: &str) -> bool {
+    let resolve = |value: &str| {
+        let slashes = value.replace('\\', "/");
+        let path = Path::new(&slashes);
+        if path.is_absolute() {
+            normalized_context_path(&slashes)
+        } else {
+            normalized_context_path(&Path::new(project_root).join(path).to_string_lossy())
+        }
+    };
+    resolve(sou_location_path(location)) == resolve(requested_file)
+}
+
+fn resolve_requested_file(
+    project_root: &str,
+    requested_file: &str,
+) -> Result<PathBuf, &'static str> {
+    let root = Path::new(project_root)
+        .canonicalize()
+        .map_err(|_| "project_root_missing")?;
+    let requested = PathBuf::from(requested_file.replace('\\', "/"));
+    let candidate = if requested.is_absolute() {
+        requested
+    } else {
+        root.join(requested)
+    };
+    let target = candidate.canonicalize().map_err(|_| "target_missing")?;
+    if !target.starts_with(&root) {
+        return Err("target_outside_project");
+    }
+    if !target.is_file() || !is_project_context_candidate(&target.to_string_lossy()) {
+        return Err("target_unsupported_file");
+    }
+    Ok(target)
+}
+
+fn read_target_context(target: &Path, query: &str) -> Result<UiuxSnippet, &'static str> {
+    const MAX_TARGET_BYTES: u64 = 512 * 1024;
+    const WINDOW_LINES: usize = 24;
+    let file = std::fs::File::open(target).map_err(|_| "target_read_failed")?;
+    let mut bytes = Vec::new();
+    file.take(MAX_TARGET_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "target_read_failed")?;
+    if bytes.len() as u64 > MAX_TARGET_BYTES {
+        return Err("target_too_large");
+    }
+    let content = String::from_utf8(bytes).map_err(|_| "target_encoding_unsupported")?;
+    let lines = content.lines().collect::<Vec<_>>();
+    if lines.is_empty() {
+        return Err("target_empty");
+    }
+    let stem = target
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let lower_query = query.to_lowercase();
+    let terms = lower_query
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+        .filter(|term| term.chars().count() >= 3 && *term != stem)
+        .take(16)
+        .collect::<Vec<_>>();
+    // 中文说明：从需求相关行附近选窗口，避免固定读取文件头遗漏实际控件实现。
+    let mut best_start = 0;
+    let mut best_score = 0;
+    for (index, line) in lines.iter().enumerate() {
+        let lower = line.to_lowercase();
+        if !terms.iter().any(|term| lower.contains(term)) {
+            continue;
+        }
+        let start = index.saturating_sub(4);
+        let end = (start + WINDOW_LINES).min(lines.len());
+        let window = lines[start..end].join("\n").to_lowercase();
+        let score = terms
+            .iter()
+            .map(|term| window.matches(term).count().min(8))
+            .sum::<usize>();
+        if score > best_score {
+            best_start = start;
+            best_score = score;
+        }
+    }
+    let end = (best_start + WINDOW_LINES).min(lines.len());
+    Ok(UiuxSnippet {
+        source: "project_file".to_string(),
+        location: Some(format!(
+            "{}:{}-{}",
+            target.to_string_lossy().replace('\\', "/"),
+            best_start + 1,
+            end
+        )),
+        excerpt: compact_sou_excerpt(&lines[best_start..end].join("\n")),
+    })
 }
 
 async fn search_sou_sections(
     project_root_path: &str,
     query: &str,
-) -> Result<Vec<SouSection>, String> {
-    SouTool::search_sections(SouRequest {
+) -> Result<(Vec<SouSection>, Vec<String>), String> {
+    SouTool::search_sections_with_notices(SouRequest {
         intent: Default::default(),
         project_root_path: project_root_path.to_string(),
         query: query.to_string(),
@@ -892,7 +1154,7 @@ fn build_prompt(
 ) -> String {
     let mut sections = Vec::new();
     sections.push("# 角色".to_string());
-    sections.push("你是资深 UI/UX 设计与前端改造助手。".to_string());
+    sections.push("你是资深 UI/UX 设计与界面交互改造助手。".to_string());
     sections.push("# 任务".to_string());
     sections.push(format!("- 当前需求：{}", query));
     sections.push(format!("- 动作：{}", action.as_str()));
@@ -900,6 +1162,8 @@ fn build_prompt(
     sections.push("- 严格遵循 KISS / YAGNI / SOLID。".to_string());
     sections.push("- 不擅自修改业务流程与数据语义。".to_string());
     sections.push("- 输出中文，且要可直接发给代码型 AI。".to_string());
+    // 中文说明：知识库包含多个平台的规则，引用时须依据项目实现判断适用范围。
+    sections.push("- 根据项目代码确认平台与技术栈；仅采用适用的知识规则，标明参考条目的平台限制，不把参考框架当成项目既有实现。".to_string());
 
     if !project_hits.is_empty() {
         sections.push("# 项目上下文".to_string());
@@ -909,6 +1173,9 @@ fn build_prompt(
     if !uiux_hits.is_empty() {
         sections.push("# UI/UX 参考知识".to_string());
         sections.push(render_snippets(uiux_hits));
+    } else {
+        sections.push("# 知识检索状态".to_string());
+        sections.push("本次未取得 UI/UX 知识片段。后续建议仅依据已提供的项目代码与任务要求，明确区分代码事实和待验证建议，不声称已有知识库依据。".to_string());
     }
 
     sections.push("# 输出要求".to_string());
@@ -920,7 +1187,7 @@ fn build_prompt(
             "请输出一段“UI 描述提示词”，必须依次包含：\n1. 页面整体气质\n2. 视觉语言关键词\n3. 配色与字体性格\n4. 组件触感与交互反馈\n5. 页面氛围与品牌感\n6. 不适合采用的反向风格"
         }
         UiuxAction::Audit => {
-            "请输出一段“UI 审查提示词”，要求 AI 围绕：可访问性、对齐、间距、层级、状态一致性、视觉噪音、移动端适配、交互反馈进行审查，并按严重级别输出问题与改进建议。"
+            "请输出一段“UI 审查提示词”，要求 AI 围绕：可访问性、对齐、间距、层级、状态一致性、视觉噪音、适用平台的尺寸适配、交互反馈进行审查，并按严重级别输出问题与改进建议。依据代码证据区分原生桌面的窗口/DPI/键盘操作、Web 响应式和移动触控；未确认的平台能力应标为待验证。"
         }
         UiuxAction::DesignSystem => {
             "请输出一段“设计系统提示词”，必须覆盖：颜色 token、字体与字号层级、间距、圆角、阴影、按钮状态、表单状态、卡片语义、导航规范、响应式规则，以及组件复用约束。"
@@ -972,13 +1239,20 @@ fn is_project_context_candidate(location: &str) -> bool {
         || normalized.ends_with(".scss")
         || normalized.ends_with(".html")
         || normalized.ends_with(".rs")
+        // 中文说明：原生窗口与 Svelte 同属界面实现，避免指定目标在排序前被过滤。
+        || normalized.ends_with(".svelte")
+        || normalized.ends_with(".cpp")
+        || normalized.ends_with(".cc")
+        || normalized.ends_with(".cxx")
+        || normalized.ends_with(".h")
+        || normalized.ends_with(".hpp")
 }
 
 fn sou_location_path(location: &str) -> &str {
     let Some((path, suffix)) = location.rsplit_once(':') else {
         return location;
     };
-    if suffix.contains('-') && suffix.chars().all(|ch| ch.is_ascii_digit() || ch == '-') {
+    if !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit() || ch == '-') {
         path
     } else {
         location
@@ -1052,7 +1326,7 @@ mod tests {
 
     #[test]
     fn project_context_failure_and_empty_candidates_are_degraded() {
-        let failed = project_context_outcome(Err("backend error".to_string()), None, 3);
+        let failed = project_context_outcome(Err("backend error".to_string()), None, 3, "E:/demo");
         assert!(failed.degraded);
         assert_eq!(failed.source, "skipped");
 
@@ -1064,6 +1338,7 @@ mod tests {
             }]),
             None,
             3,
+            "E:/demo",
         );
         assert!(filtered.degraded);
         assert!(filtered.hits.is_empty());
@@ -1079,6 +1354,7 @@ mod tests {
             }]),
             Some("Panel.vue"),
             3,
+            "E:/demo",
         );
 
         assert!(!outcome.degraded);
@@ -1088,5 +1364,116 @@ mod tests {
             outcome.hits[0].location.as_deref(),
             Some("E:/demo/Panel.vue:12-24")
         );
+    }
+
+    #[test]
+    fn native_target_is_retained_and_preferred_over_same_stem_dependencies() {
+        let outcome = project_context_outcome(
+            Ok(vec![
+                SouSection {
+                    backend: "ace".into(),
+                    location: "frontend/Panel.ts:1-8".into(),
+                    excerpt: "action registry".into(),
+                },
+                SouSection {
+                    backend: "ace".into(),
+                    location: "src/ui/Panel.cpp:30-48".into(),
+                    excerpt: "OCR native controls".into(),
+                },
+            ]),
+            Some("src/ui/Panel.cpp"),
+            1,
+            "E:/demo",
+        );
+        assert_eq!(outcome.hits.len(), 1);
+        assert_eq!(
+            outcome.hits[0].location.as_deref(),
+            Some("src/ui/Panel.cpp:30-48")
+        );
+        assert!(is_project_context_candidate("frontend/Panel.svelte:1-20"));
+        assert!(!is_project_context_candidate("docs/Panel.md:1-20"));
+        assert!(!context_path_matches(
+            "src/other/Panel.cpp:1-8",
+            "src/ui/Panel.cpp",
+            "E:/demo"
+        ));
+    }
+
+    #[test]
+    fn target_read_is_bounded_and_selects_query_related_source() {
+        let project = tempfile::tempdir().expect("创建测试项目");
+        let target = project.path().join("Panel.cpp");
+        let content = format!(
+            "{}\nif (tool == \"ocr\") {{\n  create_ocr_toolbar();\n}}",
+            "// header\n".repeat(60)
+        );
+        std::fs::write(&target, content).expect("写入目标页面");
+        let resolved = resolve_requested_file(project.path().to_str().unwrap(), "Panel.cpp")
+            .expect("项目内目标应可读取");
+        let hit = read_target_context(&resolved, "OCR 文字识别工具栏").expect("应命中后部控件源码");
+        assert!(hit.excerpt.contains("create_ocr_toolbar"));
+        assert_eq!(hit.source, "project_file");
+        std::fs::write(&target, vec![b'x'; 512 * 1024 + 1]).expect("写入超限目标");
+        assert_eq!(
+            read_target_context(&resolved, "ocr").unwrap_err(),
+            "target_too_large"
+        );
+    }
+
+    #[test]
+    fn target_context_rejects_missing_and_outside_project_paths() {
+        let project = tempfile::tempdir().expect("创建测试项目");
+        let outside = tempfile::tempdir().expect("创建项目外目录");
+        let target = outside.path().join("Panel.cpp");
+        std::fs::write(&target, "native UI").expect("写入项目外文件");
+        assert_eq!(
+            resolve_requested_file(project.path().to_str().unwrap(), target.to_str().unwrap())
+                .unwrap_err(),
+            "target_outside_project"
+        );
+        assert_eq!(
+            resolve_requested_file(project.path().to_str().unwrap(), "missing.cpp").unwrap_err(),
+            "target_missing"
+        );
+        let mut outcome = SearchOutcome::skipped("项目检索为空", false);
+        set_target_diagnostics(&mut outcome, "missing.cpp", "target_missing", None);
+        assert!(outcome.degraded);
+        assert_eq!(
+            outcome.project_diagnostics.unwrap().target_status,
+            "target_missing"
+        );
+    }
+
+    #[test]
+    fn remote_fallback_preserves_local_ocr_evidence_and_stage() {
+        let query = "OCR 纯屏幕文字识别二级菜单工具栏面板美化与组件体验重塑";
+        for stage in ["fast_context_empty_fallback", "fast_context_error_fallback"] {
+            let outcome = local_structured_outcome(
+                query,
+                UiuxAction::Audit,
+                3,
+                true,
+                stage,
+                "远端降级".into(),
+            );
+            assert!(!outcome.hits.is_empty());
+            assert!(outcome.degraded);
+            let diagnostics = outcome.knowledge_diagnostics.unwrap();
+            assert_eq!(diagnostics.status, stage);
+            assert!(diagnostics.query_tokens.iter().any(|token| token == "ocr"));
+            assert!(diagnostics
+                .searched_domains
+                .iter()
+                .any(|domain| domain == "product"));
+            assert!(diagnostics.candidate_count > 0);
+        }
+    }
+
+    #[test]
+    fn empty_knowledge_prompt_declares_missing_evidence_and_platform_scope() {
+        let prompt = build_prompt(UiuxAction::Audit, "原生窗口审查", &[], &[]);
+        assert!(prompt.contains("本次未取得 UI/UX 知识片段"));
+        assert!(prompt.contains("窗口/DPI/键盘操作"));
+        assert!(!prompt.contains("# UI/UX 参考知识"));
     }
 }

@@ -140,7 +140,8 @@ interface DebugSearchResult {
 }
 
 interface EmbeddingModelStatus {
-  phase: 'missing' | 'downloading' | 'verifying' | 'loading' | 'indexing' | 'ready' | 'error'
+  phase: 'missing' | 'installed' | 'downloading' | 'verifying' | 'loading' | 'indexing' | 'ready' | 'error'
+  embedding_phase?: 'missing' | 'loading' | 'ready' | 'unloaded' | 'error'
   model_name: string
   revision: string
   model_dir: string
@@ -233,6 +234,8 @@ const localIndexStatus = ref<LocalIndexStatus | null>(null)
 const localIndexLoading = ref(false)
 const localIndexSyncing = ref(false)
 const effectiveEmbeddingModelDir = ref('')
+// 中文说明：操作基线只由显式加载或保存确认，状态轮询和目录选择器都不能改写。
+const savedEffectiveEmbeddingModelDir = ref('')
 const effectiveRerankerModelDir = ref('')
 const effectiveLocalIndexDir = ref('')
 const embeddingModelStatus = ref<EmbeddingModelStatus | null>(null)
@@ -270,6 +273,9 @@ let localIndexStatusTimer: ReturnType<typeof setInterval> | null = null
 let resourceUsageTimer: ReturnType<typeof setInterval> | null = null
 let localIndexStatusRequestActive = false
 let embeddingStatusRequestActive = false
+let embeddingStatusRefreshPending = false
+// 中文说明：切页、目录草稿和模型操作使旧状态请求失效，避免晚到响应覆盖当前目标。
+let embeddingStatusEpoch = 0
 let rerankerStatusRequestActive = false
 let resourceUsageRequestActive = false
 let projectOptionsRefreshTimer: ReturnType<typeof setTimeout> | null = null
@@ -672,6 +678,7 @@ const embeddingPhaseLabel = computed(() => {
     return '未完成'
   return ({
     missing: '未下载',
+    installed: '已安装，按需加载',
     downloading: '下载中',
     verifying: '校验中',
     loading: '加载中',
@@ -683,6 +690,7 @@ const embeddingPhaseLabel = computed(() => {
 
 const embeddingTagType = computed<'default' | 'info' | 'success' | 'warning' | 'error'>(() => {
   switch (embeddingModelStatus.value?.phase) {
+    case 'installed': return 'success'
     case 'ready': return 'success'
     case 'error': return 'error'
     case 'missing': return 'warning'
@@ -705,9 +713,11 @@ function formatProviderLabel(provider?: string | null): string {
   return provider?.trim() || '未知'
 }
 
-const embeddingExecutionProviderLabel = computed(() =>
-  formatProviderLabel(embeddingModelStatus.value?.execution_provider || 'cpu'),
-)
+const embeddingExecutionProviderLabel = computed(() => {
+  if (embeddingModelStatus.value?.embedding_phase !== 'ready')
+    return '按需加载'
+  return formatProviderLabel(embeddingModelStatus.value.execution_provider)
+})
 
 const embeddingRequestedProviderLabel = computed(() => {
   const provider = embeddingModelStatus.value?.requested_provider || config.value.sou_embedding_provider
@@ -715,6 +725,8 @@ const embeddingRequestedProviderLabel = computed(() => {
 })
 
 const embeddingProviderTagType = computed<'default' | 'info' | 'success' | 'warning' | 'error'>(() => {
+  if (embeddingModelStatus.value?.embedding_phase !== 'ready')
+    return 'default'
   if (embeddingModelStatus.value?.provider_fallback_reason)
     return 'warning'
   if (embeddingModelStatus.value?.execution_provider === 'cuda')
@@ -727,6 +739,16 @@ const embeddingProviderTagType = computed<'default' | 'info' | 'success' | 'warn
 const embeddingTaskActive = computed(() =>
   embeddingModelOperating.value
   || ['downloading', 'verifying', 'loading', 'indexing'].includes(embeddingModelStatus.value?.phase || ''),
+)
+
+const embeddingAssetsInstalled = computed(() =>
+  ['installed', 'ready'].includes(embeddingModelStatus.value?.phase || ''),
+)
+
+// 中文说明：资产大小齐备仍可能校验失败，当前目录的损坏结果必须保留显式修复入口。
+const embeddingNeedsRepair = computed(() =>
+  embeddingIntegrity.value?.valid === false
+  && embeddingIntegrity.value.model_dir === embeddingModelStatus.value?.model_dir,
 )
 
 const localIndexTaskActive = computed(() =>
@@ -1173,6 +1195,7 @@ async function loadAcemcpConfig() {
       fast_context_exclude_paths: res.fast_context_exclude_paths || ['node_modules', '.git', 'dist', 'build', 'target'],
     }
     effectiveEmbeddingModelDir.value = res.effective_local_embedding_model_dir || ''
+    savedEffectiveEmbeddingModelDir.value = effectiveEmbeddingModelDir.value
     effectiveRerankerModelDir.value = res.effective_sou_reranker_model_dir || ''
     effectiveLocalIndexDir.value = res.effective_sou_local_index_dir || ''
     if (!config.value.fast_context_api_key) {
@@ -1284,6 +1307,7 @@ async function saveConfig(showFeedback = true): Promise<boolean> {
 
     const nextIndexSignature = buildIndexSignature(config.value)
     const indexConfigChanged = lastSavedIndexSignature.value !== nextIndexSignature
+    const savedEmbeddingDirectory = config.value.local_embedding_model_dir
 
     await invoke('save_acemcp_config', {
       args: {
@@ -1325,6 +1349,20 @@ async function saveConfig(showFeedback = true): Promise<boolean> {
     })
     lastSavedIndexSignature.value = nextIndexSignature
     rememberStorageConfig()
+    savedStorageConfig.value.local_embedding_model_dir = savedEmbeddingDirectory
+    // 中文说明：保存后只回读已保存目录，不覆盖仍在编辑的其他配置草稿。
+    invalidateEmbeddingStatus()
+    savedEffectiveEmbeddingModelDir.value = ''
+    try {
+      const saved = await invoke<{ local_embedding_model_dir?: string, effective_local_embedding_model_dir: string }>('get_acemcp_config')
+      if ((saved.local_embedding_model_dir || '').trim() !== savedEmbeddingDirectory.trim())
+        throw new Error('共享模型目录已被其他窗口更改，请重新加载已保存配置')
+      savedEffectiveEmbeddingModelDir.value = saved.effective_local_embedding_model_dir
+      await refreshEmbeddingModelStatus(false)
+    }
+    catch (error) {
+      embeddingStatusReadError.value = `保存后的共享模型目录待确认：${error}`
+    }
     if (showFeedback)
       message.success('配置已保存')
     if (showFeedback && indexConfigChanged) {
@@ -1594,11 +1632,21 @@ async function openSouStorageDirectory(path: string) {
 }
 
 async function refreshEmbeddingModelStatus(showFeedback = false) {
-  if (embeddingStatusRequestActive)
+  if (componentDisposed || !props.active || storageFieldDirty('local_embedding_model_dir'))
     return
+  if (embeddingStatusRequestActive) {
+    embeddingStatusRefreshPending = true
+    return
+  }
   embeddingStatusRequestActive = true
+  const epoch = embeddingStatusEpoch
+  const directory = config.value.local_embedding_model_dir
   try {
     const status = await invoke<EmbeddingModelStatus>('get_uiux_model_status')
+    if (!embeddingRequestCurrent(epoch, directory))
+      return
+    if (!savedEffectiveEmbeddingModelDir.value || status.model_dir !== savedEffectiveEmbeddingModelDir.value)
+      throw new Error('共享模型生效目录与本页已保存配置不一致，请重新加载已保存配置后再操作')
     embeddingStatusReadError.value = ''
     if (embeddingIntegrity.value && embeddingIntegrity.value.model_dir !== status.model_dir)
       embeddingIntegrity.value = null
@@ -1618,13 +1666,58 @@ async function refreshEmbeddingModelStatus(showFeedback = false) {
       stopEmbeddingStatusPolling()
   }
   catch (error) {
+    if (!embeddingRequestCurrent(epoch, directory))
+      return
     embeddingStatusReadError.value = String(error)
     if (showFeedback)
       message.error(`读取共享模型状态失败: ${error}`)
   }
   finally {
     embeddingStatusRequestActive = false
+    if (embeddingStatusRefreshPending) {
+      embeddingStatusRefreshPending = false
+      void refreshEmbeddingModelStatus(false)
+    }
   }
+}
+
+function embeddingRequestCurrent(epoch: number, directory: string): boolean {
+  return !componentDisposed && props.active && epoch === embeddingStatusEpoch
+    && directory === config.value.local_embedding_model_dir
+}
+
+function invalidateEmbeddingStatus() {
+  embeddingStatusEpoch += 1
+  embeddingStatusRefreshPending = false
+  stopEmbeddingStatusPolling()
+}
+
+async function confirmedEmbeddingDirectory(): Promise<string | undefined> {
+  if (componentDisposed || !props.active)
+    return
+  if (storageFieldDirty('local_embedding_model_dir')) {
+    message.warning('共享模型目录尚未保存，请先显式保存配置后再操作')
+    return
+  }
+  if (!embeddingModelStatus.value || embeddingStatusReadError.value)
+    await refreshEmbeddingModelStatus(true)
+  if (componentDisposed || !props.active || storageFieldDirty('local_embedding_model_dir') || embeddingStatusReadError.value)
+    return
+  // 中文说明：仅采用后端确认的生效目录；选择器中的路径可能仍是未保存草稿。
+  return embeddingModelStatus.value?.model_dir || undefined
+}
+
+function confirmReloadModelConfiguration() {
+  dialog.warning({
+    title: '重新加载已保存配置',
+    content: '重新加载会覆盖本页尚未保存的配置草稿，并重新确认共享模型目录。',
+    positiveText: '重新加载',
+    negativeText: '保留草稿',
+    onPositiveClick: async () => {
+      invalidateEmbeddingStatus()
+      await loadActiveData()
+    },
+  })
 }
 
 function stopEmbeddingStatusPolling() {
@@ -1635,7 +1728,7 @@ function stopEmbeddingStatusPolling() {
 }
 
 function startEmbeddingStatusPolling() {
-  if (embeddingStatusTimer || !props.active)
+  if (embeddingStatusTimer || !props.active || componentDisposed || storageFieldDirty('local_embedding_model_dir'))
     return
   embeddingStatusTimer = setInterval(() => refreshEmbeddingModelStatus(false), 1000)
 }
@@ -1824,18 +1917,32 @@ function confirmRemoveReranker() {
 }
 
 async function installEmbeddingModel() {
+  if (!semanticEnabled.value) {
+    message.info('启用均衡或准确模式后才能下载共享嵌入模型')
+    return
+  }
+  if (embeddingTaskActive.value || embeddingIntegrityChecking.value || storageConfigSaving.value)
+    return
+  const expectedModelDir = await confirmedEmbeddingDirectory()
+  if (!expectedModelDir || embeddingTaskActive.value || embeddingIntegrityChecking.value)
+    return
+  invalidateEmbeddingStatus()
+  const epoch = embeddingStatusEpoch
+  const directory = config.value.local_embedding_model_dir
   embeddingModelOperating.value = true
   try {
-    if (!await saveConfig())
+    const status = await invoke<EmbeddingModelStatus>('start_uiux_model_download', { expectedModelDir })
+    if (!embeddingRequestCurrent(epoch, directory))
       return
-    embeddingModelStatus.value = await invoke<EmbeddingModelStatus>('start_uiux_model_download')
+    embeddingModelStatus.value = status
     resetEmbeddingRate()
     embeddingRateSample = updateRate(null, embeddingModelStatus.value.downloaded_bytes || 0).sample
     startEmbeddingStatusPolling()
     message.success('共享 BGE 模型下载任务已启动')
   }
   catch (error) {
-    message.error(`启动模型下载失败: ${error}`)
+    if (embeddingRequestCurrent(epoch, directory))
+      message.error(`启动模型下载失败: ${error}`)
   }
   finally {
     embeddingModelOperating.value = false
@@ -1847,11 +1954,20 @@ async function verifyEmbeddingIntegrity() {
     message.info('启用均衡或准确模式后才能校验共享嵌入模型')
     return
   }
-  if (!await ensureSouStorageConfigSaved())
+  if (embeddingTaskActive.value || embeddingIntegrityChecking.value || storageConfigSaving.value)
     return
+  const expectedModelDir = await confirmedEmbeddingDirectory()
+  if (!expectedModelDir || embeddingTaskActive.value || embeddingIntegrityChecking.value)
+    return
+  invalidateEmbeddingStatus()
+  const epoch = embeddingStatusEpoch
+  const directory = config.value.local_embedding_model_dir
   embeddingIntegrityChecking.value = true
   try {
-    embeddingIntegrity.value = await invoke<ModelIntegrityResult>('verify_uiux_model_integrity')
+    const integrity = await invoke<ModelIntegrityResult>('verify_uiux_model_integrity', { expectedModelDir })
+    if (!embeddingRequestCurrent(epoch, directory))
+      return
+    embeddingIntegrity.value = integrity
     if (embeddingIntegrity.value.model_dir)
       effectiveEmbeddingModelDir.value = embeddingIntegrity.value.model_dir
     if (embeddingIntegrity.value.valid)
@@ -1860,7 +1976,8 @@ async function verifyEmbeddingIntegrity() {
       message.warning(`共享嵌入模型校验未通过：${embeddingIntegrity.value.message}`)
   }
   catch (error) {
-    message.error(`共享嵌入模型校验失败: ${error}`)
+    if (embeddingRequestCurrent(epoch, directory))
+      message.error(`共享嵌入模型校验失败: ${error}`)
   }
   finally {
     embeddingIntegrityChecking.value = false
@@ -2207,10 +2324,12 @@ watch(() => config.value.text_extensions, (list) => {
 watch(() => config.value.local_embedding_model_dir, (value, previous) => {
   if (value === previous)
     return
+  invalidateEmbeddingStatus()
   embeddingModelStatus.value = null
   embeddingIntegrity.value = null
+  embeddingStatusReadError.value = ''
   resetEmbeddingRate()
-})
+}, { flush: 'sync' })
 
 watch(() => config.value.sou_reranker_model_dir, (value, previous) => {
   if (value === previous)
@@ -2285,12 +2404,12 @@ watch(() => props.active, (active) => {
     void loadActiveData()
   }
   else {
-    stopEmbeddingStatusPolling()
+    invalidateEmbeddingStatus()
     stopRerankerStatusPolling()
     stopLocalIndexStatusPolling()
     stopResourceUsagePolling()
   }
-})
+}, { flush: 'sync' })
 
 // 组件挂载
 onMounted(() => {
@@ -2302,7 +2421,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   componentDisposed = true
-  stopEmbeddingStatusPolling()
+  invalidateEmbeddingStatus()
   stopRerankerStatusPolling()
   stopLocalIndexStatusPolling()
   stopResourceUsagePolling()
@@ -2734,7 +2853,7 @@ defineExpose({ saveConfig })
                     </div>
                     <n-space align="center" :wrap="true">
                       <n-tag :type="embeddingModelStatus?.runtime_ready ? 'success' : 'warning'" :bordered="false">
-                        ORT {{ embeddingModelStatus?.runtime_ready ? '就绪' : '待加载' }}
+                        ORT 资产{{ embeddingModelStatus?.runtime_ready ? '齐备' : '未齐备' }}
                       </n-tag>
                       <n-tag :type="embeddingTagType" :bordered="false">
                         {{ embeddingPhaseLabel }}
@@ -2750,7 +2869,7 @@ defineExpose({ saveConfig })
                   <n-progress
                     type="line"
                     :percentage="normalizeProgressPercent(embeddingModelStatus?.progress_percent)"
-                    :status="embeddingModelStatus?.phase === 'error' ? 'error' : embeddingModelStatus?.phase === 'ready' ? 'success' : 'default'"
+                    :status="embeddingModelStatus?.phase === 'error' ? 'error' : embeddingAssetsInstalled ? 'success' : 'default'"
                     :height="8"
                     :border-radius="4"
                   >
@@ -2770,6 +2889,9 @@ defineExpose({ saveConfig })
                   <div class="sou-history-line">
                     {{ embeddingStatusReadError ? `状态读取失败，保留最近数据：${embeddingStatusReadError}` : '近 30 秒速度窗口仅保存在当前页面' }}
                   </div>
+                  <n-button v-if="embeddingStatusReadError" size="small" secondary @click="confirmReloadModelConfiguration">
+                    重新加载已保存配置
+                  </n-button>
                   <div class="form-feedback">
                     推理设备：{{ embeddingExecutionProviderLabel }} · 请求 {{ embeddingRequestedProviderLabel }} · batch {{ embeddingModelStatus?.batch_size || 64 }} · intra_threads {{ embeddingModelStatus?.intra_threads || '默认' }}
                   </div>
@@ -2807,21 +2929,21 @@ defineExpose({ saveConfig })
                       取消下载
                     </n-button>
                     <n-button
-                      v-else
+                      v-else-if="!embeddingAssetsInstalled || embeddingNeedsRepair"
                       type="primary"
                       :loading="embeddingModelOperating"
-                      :disabled="!semanticEnabled || embeddingTaskActive || storageConfigSaving"
+                      :disabled="!semanticEnabled || embeddingTaskActive || embeddingIntegrityChecking || storageConfigSaving || storageFieldDirty('local_embedding_model_dir')"
                       @click="installEmbeddingModel"
                     >
                       <template #icon>
                         <div class="i-carbon-download" />
                       </template>
-                      {{ embeddingModelStatus?.phase === 'error' || (embeddingModelStatus?.phase === 'missing' && (embeddingModelStatus?.downloaded_bytes || 0) > 0) ? '重试下载' : '下载共享模型' }}
+                      {{ embeddingNeedsRepair ? '修复下载' : embeddingModelStatus?.phase === 'error' || (embeddingModelStatus?.phase === 'missing' && (embeddingModelStatus?.downloaded_bytes || 0) > 0) ? '重试下载' : '下载共享模型' }}
                     </n-button>
                     <n-button
                       secondary
                       :loading="embeddingIntegrityChecking"
-                      :disabled="!semanticEnabled || embeddingTaskActive || storageConfigSaving"
+                      :disabled="!semanticEnabled || embeddingTaskActive || embeddingIntegrityChecking || storageConfigSaving || storageFieldDirty('local_embedding_model_dir')"
                       @click="verifyEmbeddingIntegrity"
                     >
                       <template #icon>
@@ -2845,7 +2967,7 @@ defineExpose({ saveConfig })
                   语义模式已关闭，模型与目录配置保留；启用均衡或准确模式后可继续下载、校验和构建。
                 </div>
                 <n-alert v-if="storageConfigDirty" type="warning" :bordered="false">
-                  存储目录有未应用变更；点击同步、下载、删除或重新校验时会先自动保存。
+                  共享模型目录变更需先显式保存配置，再下载或校验；本地索引与重排模型操作仍会先自动保存相关目录配置。
                 </n-alert>
                 <div v-if="storageConfigDirty" class="flex justify-end">
                   <n-button size="small" secondary :loading="storageConfigSaving" @click="saveConfig()">
@@ -2894,7 +3016,7 @@ defineExpose({ saveConfig })
                   </n-input-group>
                   <template #feedback>
                     <span class="form-feedback">
-                      {{ config.local_embedding_model_dir || effectiveEmbeddingModelDir }} · {{ storageFieldDirty('local_embedding_model_dir') ? '待应用，下一次模型操作前自动保存' : '已应用' }}
+                      {{ config.local_embedding_model_dir || effectiveEmbeddingModelDir }} · {{ storageFieldDirty('local_embedding_model_dir') ? '待应用，请先显式保存配置' : '已应用' }}
                     </span>
                   </template>
                 </n-form-item>

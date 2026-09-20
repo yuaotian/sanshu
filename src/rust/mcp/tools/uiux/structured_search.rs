@@ -77,7 +77,15 @@ const MOTION_DISPLAY: &[&str] = &[
     "Don't",
     "Performance Notes",
 ];
-const GUIDELINE_SEARCH: &[&str] = &["Category", "Issue", "Keywords", "Description", "Platform"];
+const GUIDELINE_SEARCH: &[&str] = &[
+    "Category",
+    "Issue",
+    "Keywords",
+    "Description",
+    "Platform",
+    "Do",
+    "Don't",
+];
 const GUIDELINE_DISPLAY: &[&str] = &[
     "Category",
     "Issue",
@@ -130,6 +138,13 @@ pub struct SearchReport {
     pub hits: Vec<KnowledgeHit>,
     pub rewritten_query: String,
     pub query_rewrites: Vec<String>,
+    // 主题词决定候选准入；动作词仅辅助排序，尝试域与最终命中域分开记录。
+    pub query_tokens: Vec<String>,
+    pub action_tokens: Vec<String>,
+    pub searched_domains: Vec<String>,
+    // 记录词法排序前的合格候选数，语义融合保留该计数以便追踪回退原因。
+    pub candidate_count: usize,
+    pub reason: String,
     pub domains: Vec<String>,
     pub top_score: f64,
     pub token_coverage: f64,
@@ -153,6 +168,7 @@ struct KnowledgeDocument {
     identity: String,
     normalized_identity: String,
     term_frequencies: HashMap<String, usize>,
+    primary_terms: HashSet<String>,
     length: usize,
     search_text: String,
     location: String,
@@ -222,19 +238,23 @@ static SEMANTIC_DOCUMENTS: Lazy<Vec<SemanticDocument>> = Lazy::new(|| {
 pub fn search(query: &str, action: UiuxAction, max_results: usize) -> SearchReport {
     let limit = max_results.clamp(1, 8);
     let rewritten = rewrite_query(query);
+    let action_tokens = action_query_tokens(action);
     if rewritten.tokens.is_empty() {
-        return empty_report(rewritten);
+        return empty_report(rewritten, action_tokens);
     }
     let raw_query_tokens = tokenize(query);
 
     let routing = route_domains(query, &rewritten.tokens, action);
     let minimum_matches = if rewritten.tokens.len() <= 3 { 1 } else { 2 };
     let mut candidates = Vec::new();
+    let mut searched_domains = Vec::new();
+    let mut has_domain_terms = false;
 
     for index in INDEXES.iter() {
         if !routing.domains.contains(index.domain.as_str()) {
             continue;
         }
+        searched_domains.push(index.domain.clone());
 
         let searchable_tokens: Vec<&String> = rewritten
             .tokens
@@ -244,6 +264,11 @@ pub fn search(query: &str, action: UiuxAction, max_results: usize) -> SearchRepo
         if searchable_tokens.is_empty() {
             continue;
         }
+        has_domain_terms = true;
+        let searchable_action_tokens: Vec<&String> = action_tokens
+            .iter()
+            .filter(|token| index.document_frequencies.contains_key(token.as_str()))
+            .collect();
 
         for document in &index.documents {
             let matched = searchable_tokens
@@ -268,10 +293,19 @@ pub fn search(query: &str, action: UiuxAction, max_results: usize) -> SearchRepo
                 .then_some(0.55)
                 .unwrap_or(0.15);
             let normalized_bm25 = raw_score / (raw_score + 5.0);
+            // 动作只给已命中主题的候选加分，不参与候选准入、主题覆盖率和原始分数。
+            let action_score = bm25_score(index, document, &searchable_action_tokens);
+            let audit_priority = if matches!(action, UiuxAction::Audit) && index.domain == "ux" {
+                0.35
+            } else {
+                0.0
+            };
             let score = normalized_bm25 * 4.0
                 + coverage * 2.0
                 + (matched as f64).ln_1p() * 0.35
                 + route_boost
+                + action_score / (action_score + 5.0) * 0.3
+                + audit_priority
                 + identity_bonus;
 
             candidates.push(Candidate {
@@ -298,6 +332,7 @@ pub fn search(query: &str, action: UiuxAction, max_results: usize) -> SearchRepo
     });
     let top_score = candidates.first().map(|item| item.raw_score).unwrap_or(0.0);
     let token_coverage = candidates.first().map(|item| item.coverage).unwrap_or(0.0);
+    let candidate_count = candidates.len();
     let hits = select_diverse_hits(candidates, limit);
     let domains = ordered_unique(hits.iter().map(|hit| hit.domain.clone()));
 
@@ -306,6 +341,18 @@ pub fn search(query: &str, action: UiuxAction, max_results: usize) -> SearchRepo
         hits,
         rewritten_query: rewritten.text,
         query_rewrites: rewritten.rewrites,
+        query_tokens: rewritten.tokens,
+        action_tokens,
+        searched_domains,
+        candidate_count,
+        reason: if candidate_count > 0 {
+            "matched"
+        } else if has_domain_terms {
+            "insufficient_matches"
+        } else {
+            "no_domain_terms"
+        }
+        .to_string(),
         domains,
         top_score,
         token_coverage,
@@ -325,11 +372,16 @@ fn document_count() -> usize {
     INDEXES.iter().map(|index| index.documents.len()).sum()
 }
 
-fn empty_report(rewritten: RewrittenQuery) -> SearchReport {
+fn empty_report(rewritten: RewrittenQuery, action_tokens: Vec<String>) -> SearchReport {
     SearchReport {
         hits: Vec::new(),
         rewritten_query: rewritten.text,
         query_rewrites: rewritten.rewrites,
+        query_tokens: rewritten.tokens,
+        action_tokens,
+        searched_domains: Vec::new(),
+        candidate_count: 0,
+        reason: "no_query_terms".to_string(),
         domains: Vec::new(),
         top_score: 0.0,
         token_coverage: 0.0,
@@ -348,6 +400,14 @@ fn build_domain_index(spec: CorpusSpec) -> Option<DomainIndex> {
         .map(|(index, header)| (header, index))
         .collect();
     let mut documents = Vec::new();
+    // 仅对本轮新增的指南正文补充词降权，技术栈等既有搜索字段保持原权重。
+    let has_supplementary_guidelines = spec.search_fields == GUIDELINE_SEARCH;
+    let primary_fields: Vec<&str> = spec
+        .search_fields
+        .iter()
+        .copied()
+        .filter(|field| !has_supplementary_guidelines || !matches!(*field, "Do" | "Don't"))
+        .collect();
 
     for (record_index, record) in reader.records().enumerate() {
         let Ok(record) = record else {
@@ -362,6 +422,9 @@ fn build_domain_index(spec: CorpusSpec) -> Option<DomainIndex> {
         let identity = first_value(&record, &header_indices, spec.identity_fields)
             .unwrap_or_else(|| format!("{}-{}", spec.domain, record_index + 1));
         let search_text = join_fields(&record, &header_indices, spec.search_fields);
+        let primary_terms = tokenize(&join_fields(&record, &header_indices, &primary_fields))
+            .into_iter()
+            .collect();
         let tokens = tokenize(&search_text);
         if tokens.is_empty() {
             continue;
@@ -375,6 +438,7 @@ fn build_domain_index(spec: CorpusSpec) -> Option<DomainIndex> {
             normalized_identity: normalize_identity(&identity),
             identity: identity.clone(),
             term_frequencies,
+            primary_terms,
             length: tokens.len(),
             search_text,
             location: format!(
@@ -434,7 +498,13 @@ fn bm25_score(index: &DomainIndex, document: &KnowledgeDocument, query_tokens: &
                 .ln();
             let length_normalization =
                 1.0 - BM25_B + BM25_B * document.length as f64 / index.average_length;
-            idf * frequency * (BM25_K1 + 1.0) / (frequency + BM25_K1 * length_normalization)
+            let field_weight = if document.primary_terms.contains(token.as_str()) {
+                1.0
+            } else {
+                0.35
+            };
+            field_weight * idf * frequency * (BM25_K1 + 1.0)
+                / (frequency + BM25_K1 * length_normalization)
         })
         .sum()
 }
@@ -543,6 +613,16 @@ struct DomainRouting {
     strong_domains: HashSet<String>,
 }
 
+fn action_query_tokens(action: UiuxAction) -> Vec<String> {
+    // 审查维度与用户主题分开保存，零主题查询不会凭这些通用词制造命中。
+    tokenize(match action {
+        UiuxAction::Beautify => "style color typography spacing",
+        UiuxAction::Describe => "layout hierarchy component state",
+        UiuxAction::Audit => "accessibility spacing alignment state responsive",
+        UiuxAction::DesignSystem => "design system token component consistency",
+    })
+}
+
 fn route_domains(query: &str, tokens: &[String], action: UiuxAction) -> DomainRouting {
     let token_set: HashSet<&str> = tokens.iter().map(String::as_str).collect();
     let normalized = query.to_lowercase();
@@ -557,6 +637,14 @@ fn route_domains(query: &str, tokens: &[String], action: UiuxAction) -> DomainRo
     };
     domains.extend(action_domains.iter().map(|domain| (*domain).to_string()));
 
+    // OCR 在 products.csv 中有明确条目，审查动作也应允许检索这些产品背景知识。
+    add_domain_for_tokens(
+        &mut domains,
+        &mut strong_domains,
+        &token_set,
+        "product",
+        &["ocr", "scanner"],
+    );
     add_domain_for_tokens(
         &mut domains,
         &mut strong_domains,
@@ -1318,6 +1406,138 @@ mod tests {
             "显式 Svelte 查询应召回对应技术栈规则: {:?}",
             report.domains
         );
+    }
+
+    #[test]
+    fn ocr_toolbar_audit_retrieves_product_and_control_guidance() {
+        let report = search(
+            "OCR 纯屏幕文字识别二级菜单工具栏面板美化与组件体验重塑",
+            UiuxAction::Audit,
+            3,
+        );
+
+        assert!(
+            report.hits.iter().any(|hit| {
+                hit.domain == "product" && hit.excerpt.contains("Scanner & Document Manager")
+            }),
+            "OCR 审查应包含扫描与文字提取场景，实际为: {:?}",
+            report.hits
+        );
+        assert!(report.hits.iter().any(|hit| hit.domain == "ux"));
+        assert!(report
+            .searched_domains
+            .iter()
+            .any(|domain| domain == "product"));
+        assert!(report.query_tokens.iter().any(|token| token == "ocr"));
+        assert!(report
+            .action_tokens
+            .iter()
+            .any(|token| token == "accessibility"));
+        assert!(!report
+            .query_tokens
+            .iter()
+            .any(|token| token == "accessibility"));
+        assert!(report.candidate_count >= report.hits.len());
+        assert_eq!(report.reason, "matched");
+    }
+
+    #[test]
+    fn chinese_toolbar_audit_retrieves_keyboard_and_focus_guidance() {
+        let report = search("二级菜单工具栏面板审查", UiuxAction::Audit, 3);
+
+        assert!(!report.abstained);
+        assert!(
+            report.hits.iter().any(|hit| {
+                hit.domain == "ux"
+                    && (hit.excerpt.contains("Focus") || hit.excerpt.contains("Keyboard"))
+            }),
+            "纯中文控件审查应召回焦点或键盘规则，实际为: {:?}",
+            report.hits
+        );
+        assert!(report.query_tokens.iter().any(|token| token == "toolbar"));
+        assert!(report.query_tokens.iter().any(|token| token == "menu"));
+    }
+
+    #[test]
+    fn guideline_instructions_can_retrieve_dragging_guidance() {
+        let report = search("reorder resize select", UiuxAction::Audit, 8);
+        assert!(
+            report
+                .hits
+                .iter()
+                .any(|hit| { hit.domain == "ux" && hit.excerpt.contains("Dragging Movements") }),
+            "应检索规则正文中的交互限制，实际为: {:?}",
+            report.hits
+        );
+    }
+
+    #[test]
+    fn guideline_supplements_do_not_change_existing_stack_field_weights() {
+        // 两条记录长度和词频相同，仅交换主题词所在字段，隔离字段优先级与语料差异。
+        const CSV: &str =
+            "Category,Issue,Guideline,Keywords,Description,Platform,Do,Don't,Applies To\n\
+            Interaction,Primary,Primary,unused,toolbar,All,control,gamma,All\n\
+            Interaction,Secondary,Secondary,unused,control,All,toolbar,gamma,All\n";
+        let mut spec = CorpusSpec {
+            domain: "ux",
+            label: "UX 指南",
+            relative_path: "fixture.csv",
+            csv: CSV,
+            identity_fields: &["Issue"],
+            search_fields: GUIDELINE_SEARCH,
+            display_fields: GUIDELINE_DISPLAY,
+            exclude_deprecated_styles: false,
+        };
+        let guideline = build_domain_index(spec).expect("指南样例应构建成功");
+        let query_tokens = tokenize("toolbar");
+        let query_refs: Vec<&String> = query_tokens.iter().collect();
+        assert!(
+            bm25_score(&guideline, &guideline.documents[0], &query_refs)
+                > bm25_score(&guideline, &guideline.documents[1], &query_refs),
+            "指南主题描述中的同等命中应优先于补充正文"
+        );
+
+        spec.domain = "stack:svelte";
+        spec.search_fields = STACK_SEARCH;
+        spec.identity_fields = &["Guideline"];
+        let stack = build_domain_index(spec).expect("技术栈样例应构建成功");
+        assert_eq!(
+            bm25_score(&stack, &stack.documents[0], &query_refs),
+            bm25_score(&stack, &stack.documents[1], &query_refs),
+            "技术栈既有描述与正文搜索字段应保留相同权重"
+        );
+    }
+
+    #[test]
+    fn audit_action_terms_do_not_manufacture_topic_matches() {
+        let report = search("ZXQJ9471QX NOTKNOWLEDGE113", UiuxAction::Audit, 3);
+
+        assert!(report.hits.is_empty());
+        assert!(report.abstained);
+        assert_eq!(report.candidate_count, 0);
+        assert_eq!(report.reason, "no_domain_terms");
+        assert!(report.searched_domains.iter().any(|domain| domain == "ux"));
+        assert!(report.domains.is_empty());
+        assert!(!report.action_tokens.is_empty());
+        assert_eq!(report.top_score, 0.0);
+    }
+
+    #[test]
+    fn empty_and_insufficient_topic_terms_have_distinct_reasons() {
+        let no_terms = search("甲乙丙丁", UiuxAction::Audit, 3);
+        assert!(no_terms.hits.is_empty());
+        assert_eq!(no_terms.reason, "no_query_terms");
+        assert!(no_terms.query_tokens.is_empty());
+        assert!(no_terms.searched_domains.is_empty());
+
+        let insufficient = search(
+            "keyboard qzxv9471 abcdxyz9471 nomatch9471",
+            UiuxAction::Audit,
+            3,
+        );
+        assert!(insufficient.hits.is_empty());
+        assert_eq!(insufficient.candidate_count, 0);
+        assert_eq!(insufficient.reason, "insufficient_matches");
     }
 
     #[test]
