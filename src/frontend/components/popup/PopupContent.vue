@@ -791,13 +791,18 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- 引用原文按钮 -->
+      <!-- 中文注释：原蓝色是页面唯一的蓝，与 teal 主色冲突；改为 primary 语义色并补齐键盘焦点态 -->
       <div class="flex justify-end mt-4 pt-3 border-t border-gray-600/30" data-guide="quote-message">
         <div
           title="点击将AI的消息内容引用到输入框中"
-          class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-blue-500/20 hover:bg-blue-500/30 text-white rounded-md transition-all duration-200 cursor-pointer border border-blue-500/50 hover:border-blue-500/70 shadow-sm hover:shadow-md"
+          class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-primary-500/15 hover:bg-primary-500/25 text-on-surface rounded-md transition-colors duration-150 cursor-pointer border border-primary-500/40 hover:border-primary-500/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/45"
+          role="button"
+          tabindex="0"
           @click="quoteMessage"
+          @keydown.enter.prevent="quoteMessage"
+          @keydown.space.prevent="quoteMessage"
         >
-          <div class="i-carbon-quotes w-3.5 h-3.5" />
+          <div class="i-carbon-quotes w-3.5 h-3.5 text-primary-600 dark:text-primary-400" />
           <span>引用原文</span>
         </div>
       </div>

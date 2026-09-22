@@ -138,15 +138,17 @@ onMounted(() => {
       </div>
 
       <!-- 右侧操作按钮 -->
+      <!-- 中文注释：主次分明——「发送」是唯一的实心主按钮且尺寸最大，
+           「继续」「本地增强」降为次级样式与 small 尺寸，避免与主操作争夺注意力 -->
       <div class="flex items-center" data-guide="popup-actions">
-        <n-space size="small">
+        <n-space size="small" align="center">
           <!-- 增强按钮 / 启用 CTA -->
           <n-tooltip v-if="enhanceEnabled" trigger="hover" placement="top">
             <template #trigger>
               <n-button
                 :disabled="!canEnhance || submitting"
-                size="medium"
-                type="info"
+                size="small"
+                tertiary
                 data-guide="enhance-button"
                 @click="handleEnhance"
               >
@@ -167,8 +169,9 @@ onMounted(() => {
             <template #trigger>
               <n-button
                 :disabled="submitting"
-                size="medium"
+                size="small"
                 type="warning"
+                secondary
                 data-guide="enhance-cta"
                 @click="handleEnhance"
               >
@@ -187,8 +190,8 @@ onMounted(() => {
               <n-button
                 :disabled="submitting"
                 :loading="submitting"
-                size="medium"
-                type="default"
+                size="small"
+                secondary
                 data-guide="continue-button"
                 @click="handleContinue"
               >

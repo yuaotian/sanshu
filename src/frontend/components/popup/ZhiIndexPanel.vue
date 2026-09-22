@@ -101,23 +101,24 @@ const authFailureHint = '更新完成后，可重新同步或等待自动索引�
 const nestedProjects = computed(() => nestedStatus.value?.nested_projects ?? [])
 
 // 状态图标类名
+// 中文注释：语义色统一采用「浅色 600 档 / 深色 400 档」双主题配对，保证浅色主题下图标对比度
 const statusIcon = computed(() => {
   if (props.projectStatus?.is_partial)
-    return 'i-carbon-warning-alt text-amber-400'
+    return 'i-carbon-warning-alt text-amber-600 dark:text-amber-400'
   const status = props.projectStatus?.status
   switch (status) {
     case 'idle':
       return 'i-carbon-circle-dash text-gray-400'
     case 'indexing':
-      return 'i-carbon-in-progress text-emerald-400/80 animate-spin'
+      return 'i-carbon-in-progress text-emerald-600 dark:text-emerald-400 animate-spin'
     case 'paused':
-      return 'i-carbon-pause-outline text-amber-400'
+      return 'i-carbon-pause-outline text-amber-600 dark:text-amber-400'
     case 'synced':
-      return 'i-carbon-checkmark-filled text-emerald-400'
+      return 'i-carbon-checkmark-filled text-emerald-600 dark:text-emerald-400'
     case 'failed':
       return isAuthFailure.value
-        ? 'i-carbon-warning-alt-filled text-rose-400'
-        : 'i-carbon-warning-filled text-rose-400'
+        ? 'i-carbon-warning-alt-filled text-rose-600 dark:text-rose-400'
+        : 'i-carbon-warning-filled text-rose-600 dark:text-rose-400'
     default:
       return 'i-carbon-help text-gray-400'
   }
@@ -384,15 +385,15 @@ function getNestedStatusIcon(np: NestedProjectInfo): string {
   const status = np.index_status?.status
   switch (status) {
     case 'synced':
-      return 'i-carbon-checkmark-filled text-emerald-400'
+      return 'i-carbon-checkmark-filled text-emerald-600 dark:text-emerald-400'
     case 'indexing':
-      return 'i-carbon-in-progress text-emerald-400/80 animate-spin'
+      return 'i-carbon-in-progress text-emerald-600 dark:text-emerald-400 animate-spin'
     case 'paused':
-      return 'i-carbon-pause-outline text-amber-400'
+      return 'i-carbon-pause-outline text-amber-600 dark:text-amber-400'
     case 'failed':
-      return 'i-carbon-warning-filled text-rose-400'
+      return 'i-carbon-warning-filled text-rose-600 dark:text-rose-400'
     default:
-      return 'i-carbon-circle-dash text-gray-400/60'
+      return 'i-carbon-circle-dash text-gray-400'
   }
 }
 
@@ -431,7 +432,7 @@ onMounted(() => {
       class="panel-guide"
     >
       <div class="guide-icon">
-        <div class="i-carbon-search text-lg text-gray-400/80" />
+        <div class="i-carbon-search text-lg text-on-surface-muted" />
       </div>
       <div class="guide-content">
         <span class="guide-text">启用代码搜索以使用智能索引</span>
@@ -450,7 +451,7 @@ onMounted(() => {
       class="panel-guide"
     >
       <div class="guide-icon guide-icon--warning">
-        <div class="i-carbon-api text-lg text-amber-400/80" />
+        <div class="i-carbon-api text-lg text-amber-600 dark:text-amber-400" />
       </div>
       <div class="guide-content">
         <span class="guide-text">配置 API 密钥以启用代码索引</span>
@@ -510,8 +511,8 @@ onMounted(() => {
           <!-- 最近索引文件信息（响应式隐藏） -->
           <n-tooltip v-if="recentFilesText" trigger="hover" :delay="300">
             <template #trigger>
-              <div class="hidden md:flex items-center gap-1 text-white/50 text-[11px] max-w-[100px]">
-                <div class="i-carbon-document shrink-0 text-white/40 text-xs" />
+              <div class="hidden md:flex items-center gap-1 text-on-surface-secondary text-[11px] max-w-[100px]">
+                <div class="i-carbon-document shrink-0 text-on-surface-muted text-xs" />
                 <span class="truncate">{{ recentFilesText }}</span>
               </div>
             </template>
@@ -519,7 +520,9 @@ onMounted(() => {
               <div v-for="(file, idx) in recentIndexedFiles.slice(0, 5)" :key="idx" class="text-xs truncate">
                 {{ file }}
               </div>
-              <div class="text-[10px] text-white/40 mt-1 pt-1 border-t border-white/10">
+              <!-- 中文注释：tooltip 背景由 Naive UI 控制（浅色主题下为深色气泡），
+                   故此处不用语义文字色，改为继承气泡文字色 + 降低不透明度，避免两种主题下都读不清 -->
+              <div class="text-[10px] opacity-60 mt-1 pt-1 border-t border-gray-500/30">
                 {{ recentIndexedFiles.length > 5
                   ? `共 ${recentIndexedFiles.length} 个文件，仅显示最近 5 个`
                   : '最近增量索引的文件' }}
@@ -527,19 +530,19 @@ onMounted(() => {
             </div>
           </n-tooltip>
           <!-- 分隔符 -->
-          <span v-if="recentFilesText && projectName" class="text-white/25 text-xs hidden md:inline">·</span>
+          <span v-if="recentFilesText && projectName" class="text-on-surface-muted opacity-60 text-xs hidden md:inline">·</span>
           <!-- 项目根目录名称 -->
           <n-tooltip v-if="projectName" trigger="hover" :delay="300">
             <template #trigger>
-              <div class="flex items-center gap-1.5 text-white/55 text-xs max-w-[120px]">
-                <div class="i-carbon-folder shrink-0 text-white/40 text-sm" />
+              <div class="flex items-center gap-1.5 text-on-surface-secondary text-xs max-w-[120px]">
+                <div class="i-carbon-folder shrink-0 text-on-surface-muted text-sm" />
                 <span class="truncate">{{ projectName }}</span>
               </div>
             </template>
             <span class="text-xs">{{ props.projectRoot }}</span>
           </n-tooltip>
           <!-- 分隔符 -->
-          <span v-if="projectName" class="text-white/25 text-xs">·</span>
+          <span v-if="projectName" class="text-on-surface-muted opacity-60 text-xs">·</span>
           <!-- 展开/收起图标 -->
           <div
             class="expand-icon"
@@ -700,14 +703,14 @@ onMounted(() => {
 
 <style scoped>
 /* ==================== 面板容器 ==================== */
+/* 中文注释：统一改用主题语义变量，保证深浅主题都能正确渲染 */
 .zhi-index-panel {
   margin: 8px;
   border-radius: 12px;
   overflow: hidden;
-  background: linear-gradient(135deg, rgba(30, 30, 30, 0.7) 0%, rgba(25, 25, 25, 0.8) 100%);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  backdrop-filter: blur(12px);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  background: var(--color-container);
+  border: 1px solid var(--color-border);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 8%);
 }
 
 /* ==================== 引导模式样式 ==================== */
@@ -725,13 +728,13 @@ onMounted(() => {
   width: 36px;
   height: 36px;
   border-radius: 10px;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0.02) 100%);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--color-container-secondary);
+  border: 1px solid var(--color-border);
 }
 
 .guide-icon--warning {
-  background: linear-gradient(135deg, rgba(251, 191, 36, 0.08) 0%, rgba(251, 191, 36, 0.04) 100%);
-  border-color: rgba(251, 191, 36, 0.15);
+  background: rgb(251 191 36 / 10%);
+  border-color: rgb(251 191 36 / 25%);
 }
 
 .guide-content {
@@ -744,9 +747,10 @@ onMounted(() => {
 
 .guide-text {
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.65);
+  color: var(--color-on-surface-secondary);
 }
 
+/* 中文注释：错误语义靠红色底纹/边框/图标承载，文字用主题色保证深浅模式可读 */
 .auth-failure-alert {
   display: flex;
   align-items: center;
@@ -754,8 +758,8 @@ onMounted(() => {
   padding: 12px 14px;
   margin-bottom: 12px;
   border-radius: 12px;
-  border: 1px solid rgba(251, 113, 133, 0.25);
-  background: linear-gradient(135deg, rgba(127, 29, 29, 0.36) 0%, rgba(69, 10, 10, 0.2) 100%);
+  border: 1px solid rgb(239 68 68 / 35%);
+  background: rgb(239 68 68 / 10%);
 }
 
 .auth-failure-alert__icon {
@@ -766,8 +770,8 @@ onMounted(() => {
   height: 34px;
   flex-shrink: 0;
   border-radius: 10px;
-  color: rgb(251 113 133);
-  background: rgba(127, 29, 29, 0.35);
+  color: rgb(239 68 68);
+  background: rgb(239 68 68 / 15%);
 }
 
 .auth-failure-alert__content {
@@ -778,14 +782,14 @@ onMounted(() => {
 .auth-failure-alert__title {
   font-size: 12px;
   font-weight: 600;
-  color: rgba(255, 228, 230, 0.96);
+  color: var(--color-on-surface);
 }
 
 .auth-failure-alert__desc {
   margin-top: 3px;
   font-size: 11px;
   line-height: 1.45;
-  color: rgba(255, 228, 230, 0.8);
+  color: var(--color-on-surface-secondary);
   word-break: break-word;
 }
 
@@ -793,7 +797,7 @@ onMounted(() => {
   margin-top: 5px;
   font-size: 11px;
   line-height: 1.4;
-  color: rgba(254, 205, 211, 0.88);
+  color: var(--color-on-surface-muted);
 }
 
 /* ==================== 正常模式 - 头部状态条 ==================== */
@@ -808,7 +812,7 @@ onMounted(() => {
 }
 
 .panel-header:hover {
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--color-container-secondary);
 }
 
 .header-left {
@@ -827,18 +831,20 @@ onMounted(() => {
 }
 
 .status-text {
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--color-on-surface);
   font-weight: 500;
 }
 
 .status-divider {
-  color: rgba(255, 255, 255, 0.25);
+  color: var(--color-on-surface-muted);
+  opacity: 0.6;
 }
 
 .status-files {
-  color: rgba(255, 255, 255, 0.65);
+  color: var(--color-on-surface-secondary);
 }
 
+/* 中文注释：强调色沿用 PlanPanel 的 primary-700 / dark:primary-300 双主题配对 */
 .nested-badge {
   display: inline-flex;
   align-items: center;
@@ -846,24 +852,36 @@ onMounted(() => {
   margin-left: 4px;
   border-radius: 4px;
   font-size: 10px;
-  background: linear-gradient(135deg, rgba(52, 211, 153, 0.15) 0%, rgba(52, 211, 153, 0.08) 100%);
-  color: rgba(52, 211, 153, 0.9);
-  border: 1px solid rgba(52, 211, 153, 0.2);
+  background: rgb(20 184 166 / 12%);
+  color: #0f766e;
+  border: 1px solid rgb(20 184 166 / 25%);
+}
+
+.dark .nested-badge {
+  color: #5eead4;
 }
 
 .status-time {
-  color: rgba(255, 255, 255, 0.45);
+  color: var(--color-on-surface-muted);
 }
 
-/* 距上次同步 1~24h：温和提醒 */
+/* 距上次同步 1~24h：温和提醒（浅色用深一档保证对比度） */
 .status-time--warn {
-  color: rgba(251, 191, 36, 0.85);
+  color: #b45309;
+}
+
+.dark .status-time--warn {
+  color: #fcd34d;
 }
 
 /* 距上次同步 > 24h：高亮警示 */
 .status-time--critical {
-  color: rgba(251, 113, 133, 0.95);
+  color: #be123c;
   font-weight: 500;
+}
+
+.dark .status-time--critical {
+  color: #fda4af;
 }
 
 /* 头部"立即同步"快捷按钮 */
@@ -875,35 +893,43 @@ onMounted(() => {
   border-radius: 6px;
   font-size: 11px;
   font-weight: 500;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.85);
+  background: var(--color-container-secondary);
+  border: 1px solid var(--color-border);
+  color: var(--color-on-surface-secondary);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
 .quick-resync-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--color-container-tertiary);
 }
 
 .quick-resync-btn--warn {
-  border-color: rgba(251, 191, 36, 0.35);
-  color: rgba(251, 191, 36, 0.95);
-  background: linear-gradient(135deg, rgba(251, 191, 36, 0.10) 0%, rgba(251, 191, 36, 0.04) 100%);
+  border-color: rgb(245 158 11 / 40%);
+  color: #b45309;
+  background: rgb(245 158 11 / 10%);
 }
 
 .quick-resync-btn--warn:hover {
-  background: linear-gradient(135deg, rgba(251, 191, 36, 0.18) 0%, rgba(251, 191, 36, 0.08) 100%);
+  background: rgb(245 158 11 / 18%);
+}
+
+.dark .quick-resync-btn--warn {
+  color: #fcd34d;
 }
 
 .quick-resync-btn--critical {
-  border-color: rgba(251, 113, 133, 0.4);
-  color: rgba(254, 205, 211, 0.98);
-  background: linear-gradient(135deg, rgba(251, 113, 133, 0.14) 0%, rgba(251, 113, 133, 0.06) 100%);
+  border-color: rgb(239 68 68 / 40%);
+  color: #be123c;
+  background: rgb(239 68 68 / 10%);
 }
 
 .quick-resync-btn--critical:hover {
-  background: linear-gradient(135deg, rgba(251, 113, 133, 0.22) 0%, rgba(251, 113, 133, 0.10) 100%);
+  background: rgb(239 68 68 / 18%);
+}
+
+.dark .quick-resync-btn--critical {
+  color: #fda4af;
 }
 
 .header-right {
@@ -914,14 +940,14 @@ onMounted(() => {
 .expand-icon {
   width: 14px;
   height: 14px;
-  color: rgba(255, 255, 255, 0.4);
+  color: var(--color-on-surface-muted);
   transition: transform 0.2s ease;
 }
 
 /* ==================== 正常模式 - 展开内容 ==================== */
 .panel-content {
   padding: 0 16px 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  border-top: 1px solid var(--color-divider);
 }
 
 /* ==================== 嵌套项目区域 ==================== */
@@ -929,8 +955,8 @@ onMounted(() => {
   margin-top: 12px;
   padding: 10px 12px;
   border-radius: 10px;
-  background: linear-gradient(135deg, rgba(52, 211, 153, 0.04) 0%, rgba(52, 211, 153, 0.02) 100%);
-  border: 1px solid rgba(52, 211, 153, 0.1);
+  background: rgb(20 184 166 / 6%);
+  border: 1px solid rgb(20 184 166 / 18%);
 }
 
 .section-header {
@@ -943,15 +969,20 @@ onMounted(() => {
 .section-icon {
   width: 14px;
   height: 14px;
-  color: rgba(52, 211, 153, 0.7);
+  color: #0d9488;
 }
 
 .section-title {
   font-size: 11px;
   font-weight: 500;
-  color: rgba(52, 211, 153, 0.9);
+  color: #0f766e;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+}
+
+.dark .section-icon,
+.dark .section-title {
+  color: #5eead4;
 }
 
 /* 骨架屏 */
@@ -968,9 +999,13 @@ onMounted(() => {
   gap: 8px;
   padding: 8px 10px;
   border-radius: 8px;
-  background: rgba(248, 113, 113, 0.08);
-  color: rgba(248, 113, 113, 0.9);
+  background: rgb(239 68 68 / 10%);
+  color: #be123c;
   font-size: 12px;
+}
+
+.dark .nested-error {
+  color: #fda4af;
 }
 
 .skeleton-item {
@@ -984,7 +1019,7 @@ onMounted(() => {
   width: 14px;
   height: 14px;
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--color-container-tertiary);
   animation: skeleton-pulse 1.5s ease-in-out infinite;
 }
 
@@ -992,7 +1027,7 @@ onMounted(() => {
   height: 12px;
   width: 80px;
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--color-container-tertiary);
   animation: skeleton-pulse 1.5s ease-in-out infinite;
 }
 
@@ -1014,12 +1049,12 @@ onMounted(() => {
   justify-content: space-between;
   padding: 6px 8px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--color-container-secondary);
   transition: background 0.2s ease;
 }
 
 .nested-item:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--color-container-tertiary);
 }
 
 .nested-item__left {
@@ -1031,13 +1066,17 @@ onMounted(() => {
 .nested-item__folder-icon {
   width: 14px;
   height: 14px;
-  color: rgba(52, 211, 153, 0.6);
+  color: #0d9488;
+}
+
+.dark .nested-item__folder-icon {
+  color: #2dd4bf;
 }
 
 .nested-item__name {
   font-size: 12px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.85);
+  color: var(--color-on-surface);
 }
 
 .nested-item__right {
@@ -1048,7 +1087,7 @@ onMounted(() => {
 
 .nested-item__stats {
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--color-on-surface-secondary);
   font-family: ui-monospace, monospace;
 }
 
@@ -1071,38 +1110,51 @@ onMounted(() => {
   align-items: center;
   padding: 10px 8px;
   border-radius: 8px;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0.02) 100%);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  transition: all 0.2s ease;
+  background: var(--color-container-secondary);
+  border: 1px solid var(--color-border);
+  transition: background-color 0.2s ease, border-color 0.2s ease;
 }
 
 .stat-card:hover {
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0.03) 100%);
-  border-color: rgba(255, 255, 255, 0.08);
+  background: var(--color-container-tertiary);
 }
 
+/* 中文注释：语义色沿用项目「浅色用 700 档 / 深色用 300 档」的双主题配对，保证两种主题对比度 */
 .stat-card--success .stat-value {
+  color: #15803d;
+}
+
+.dark .stat-card--success .stat-value {
   color: #86efac;
 }
 
 .stat-card--info .stat-value {
+  color: #1d4ed8;
+}
+
+.dark .stat-card--info .stat-value {
   color: #93c5fd;
 }
 
 .stat-card--error .stat-value {
+  color: #b91c1c;
+}
+
+.dark .stat-card--error .stat-value {
   color: #fca5a5;
 }
 
 .stat-value {
   font-size: 16px;
   font-weight: 600;
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--color-on-surface);
   line-height: 1.2;
+  font-variant-numeric: tabular-nums;
 }
 
 .stat-label {
   font-size: 10px;
-  color: rgba(255, 255, 255, 0.45);
+  color: var(--color-on-surface-muted);
   margin-top: 2px;
 }
 
@@ -1114,6 +1166,6 @@ onMounted(() => {
   gap: 12px;
   margin-top: 12px;
   padding-top: 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  border-top: 1px solid var(--color-divider);
 }
 </style>

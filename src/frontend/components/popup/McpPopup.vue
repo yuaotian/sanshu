@@ -803,10 +803,7 @@ function handleOpenIndexStatus() {
       <div class="px-4 pb-3 bg-black select-text">
         <PopupInput
           ref="inputRef" :request="request" :loading="loading" :submitting="submitting"
-          :enhance-enabled="localEnhanceEnabled"
           @update="handleInputUpdate" @image-add="handleImageAdd" @image-remove="handleImageRemove"
-          @enhance="handleEnhance"
-          @open-mcp-tools-tab="handleOpenMcpToolsTab"
         />
       </div>
     </div>

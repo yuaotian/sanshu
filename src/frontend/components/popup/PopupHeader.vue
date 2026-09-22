@@ -115,28 +115,29 @@ function isAuthFailure(): boolean {
       <!-- 左侧：标题 -->
       <div class="flex items-center gap-3 min-w-0">
         <div class="w-3 h-3 rounded-full bg-primary-500" />
-        <h1 class="text-base font-medium text-slate-800 dark:text-white truncate">
+        <h1 class="text-base font-medium text-on-surface truncate">
           三术 - 道生一，一生二，二生三，三生万物
         </h1>
       </div>
 
       <!-- 中间：单次微信通知状态，避免与正文和主要操作争夺注意力。 -->
       <div v-if="showWechatNotificationState" class="justify-self-center min-w-0">
+        <!-- 中文注释：改用主题语义色（与右侧「代码索引」胶囊同一套配方），slate-* 不在项目色板内且没有浅色变体 -->
         <div
-          class="inline-flex h-8 max-w-[320px] items-center gap-1.5 rounded-full border border-slate-500/40 bg-black-100/80 px-2.5 text-xs text-slate-200 shadow-sm"
+          class="inline-flex h-8 max-w-[320px] items-center gap-1.5 rounded-full border border-gray-300/60 bg-container-secondary px-2.5 text-xs text-on-surface shadow-sm"
           role="status"
           aria-live="polite"
           :title="wechatNotificationLabel"
         >
           <div
             v-if="wechatNotificationState.phase === 'countdown'"
-            class="i-carbon-alarm w-3.5 h-3.5 flex-shrink-0 text-slate-300"
+            class="i-carbon-alarm w-3.5 h-3.5 flex-shrink-0 text-on-surface-secondary"
           />
-          <div class="i-carbon-logo-wechat w-3.5 h-3.5 flex-shrink-0 text-green-300/80" />
+          <div class="i-carbon-logo-wechat w-3.5 h-3.5 flex-shrink-0 text-green-600 dark:text-green-400" />
           <button
             v-if="wechatNotificationState.phase === 'manual'"
             type="button"
-            class="rounded px-0.5 font-medium text-slate-100 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/70"
+            class="rounded px-0.5 font-medium text-on-surface transition-colors duration-150 hover:text-primary-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/45"
             title="立即发送本次微信通知"
             @click="emit('sendWechatNotification')"
           >
@@ -146,7 +147,7 @@ function isAuthFailure(): boolean {
           <button
             v-if="wechatNotificationState.phase === 'countdown'"
             type="button"
-            class="ml-0.5 inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full text-slate-400 transition-colors duration-150 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/70"
+            class="ml-0.5 inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full text-on-surface-muted transition-colors duration-150 hover:bg-container-tertiary hover:text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/45"
             title="取消本次微信通知"
             aria-label="取消本次微信通知"
             @click="emit('cancelWechatNotification')"
@@ -226,7 +227,7 @@ function isAuthFailure(): boolean {
             <template #icon>
               <div
                 :class="props.alwaysOnTop ? 'i-carbon-pin-filled' : 'i-carbon-pin'"
-                class="w-4 h-4 text-slate-700 dark:text-white"
+                class="w-4 h-4 text-on-surface"
               />
             </template>
           </n-button>
@@ -240,7 +241,7 @@ function isAuthFailure(): boolean {
             <template #icon>
               <div
                 :class="props.showMainLayout ? 'i-carbon-chat' : 'i-carbon-settings'"
-                class="w-4 h-4 text-slate-700 dark:text-white"
+                class="w-4 h-4 text-on-surface"
               />
             </template>
           </n-button>
@@ -252,7 +253,7 @@ function isAuthFailure(): boolean {
             @click="handleOpenLogViewer"
           >
             <template #icon>
-              <div class="i-carbon-document w-4 h-4 text-slate-700 dark:text-white" />
+              <div class="i-carbon-document w-4 h-4 text-on-surface" />
             </template>
           </n-button>
           <n-button
@@ -263,7 +264,7 @@ function isAuthFailure(): boolean {
             @click="handleThemeChange"
           >
             <template #icon>
-              <ThemeIcon :theme="props.currentTheme" class="w-4 h-4 text-slate-700 dark:text-white" />
+              <ThemeIcon :theme="props.currentTheme" class="w-4 h-4 text-on-surface" />
             </template>
           </n-button>
         </n-space>

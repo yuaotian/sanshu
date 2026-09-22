@@ -16,7 +16,6 @@ interface Props {
   request: McpRequest | null
   loading?: boolean
   submitting?: boolean
-  enhanceEnabled?: boolean
 }
 
 interface Emits {
@@ -30,14 +29,11 @@ interface Emits {
   }]
   imageAdd: [image: string]
   imageRemove: [index: number]
-  enhance: []
-  openMcpToolsTab: []
 }
 
 const props = withDefaults(defineProps<Props>(), {
   loading: false,
   submitting: false,
-  enhanceEnabled: false,
 })
 
 const emit = defineEmits<Emits>()
@@ -305,18 +301,6 @@ function handleImagePaste(event: ClipboardEvent) {
 
   if (hasImage) {
     event.preventDefault()
-  }
-}
-
-// 处理增强入口点击
-function handleEnhanceClick() {
-  if (props.submitting)
-    return
-  if (props.enhanceEnabled) {
-    emit('enhance')
-  }
-  else {
-    emit('openMcpToolsTab')
   }
 }
 
@@ -776,14 +760,18 @@ defineExpose({
   <div class="space-y-3">
     <!-- 预定义选项 -->
     <div v-if="!loading && hasOptions" class="space-y-3" data-guide="predefined-options">
-      <h4 class="text-sm font-medium text-white">
+      <h4 class="text-sm font-medium text-on-surface">
         请选择选项
       </h4>
       <n-space vertical size="small">
+        <!-- 中文注释：补齐选中态（primary 边框 + 浅色底），hover 改为提升背景而非降低不透明度，避免反直觉的对比度下降 -->
         <div
           v-for="(option, index) in request!.predefined_options"
           :key="`option-${index}`"
-          class="rounded-lg p-3 border border-gray-600 bg-gray-100 cursor-pointer hover:opacity-80 transition-opacity"
+          class="rounded-lg p-3 border cursor-pointer transition-colors duration-150"
+          :class="selectedOptions.includes(option)
+            ? 'border-primary-500 bg-primary-500/10'
+            : 'border-gray-600 bg-container-secondary hover:border-gray-500 hover:bg-container-tertiary'"
           @click="handleOptionToggle(option)"
         >
           <n-checkbox
@@ -802,7 +790,7 @@ defineExpose({
 
     <!-- 图片预览区域 -->
     <div v-if="!loading && uploadedImages.length > 0" class="space-y-3">
-      <h4 class="text-sm font-medium text-white">
+      <h4 class="text-sm font-medium text-on-surface">
         已添加的图片 ({{ uploadedImages.length }})
       </h4>
 
@@ -854,13 +842,13 @@ defineExpose({
         class="transition-all duration-300 ease-[cubic-bezier(0.25,0.8,0.25,1)]" :class="[
           isFloating ? 'sticky bottom-0 z-[50]' : 'relative',
           (isFloating && isSticking)
-            ? 'bg-surface/85 backdrop-blur-xl shadow-[0_-8px_30px_rgba(0,0,0,0.15)] border-t border-white/10 pb-5 pt-4 px-3 -mx-3 mb-0'
+            ? 'bg-surface/85 backdrop-blur-xl shadow-[0_-8px_30px_rgba(0,0,0,0.15)] border-t border-gray-300/60 pb-5 pt-4 px-3 -mx-3 mb-0'
             : 'space-y-3',
         ]"
       >
         <!-- 标题栏 & 切换按钮 -->
         <div class="flex items-center justify-between mb-2">
-          <h4 class="text-sm font-medium text-white">
+          <h4 class="text-sm font-medium text-on-surface">
             {{ hasOptions ? '补充说明 (可选)' : '请输入您的回复' }}
           </h4>
           <n-button
@@ -1012,25 +1000,8 @@ defineExpose({
           </div>
         </div>
 
-        <!-- 提示词增强入口 -->
-        <div class="flex items-center justify-between text-xs my-2">
-          <div class="flex items-center gap-2 text-on-surface-secondary">
-            <div class="i-carbon-magic-wand w-3 h-3 text-primary-500" />
-            <span>{{ enhanceEnabled ? '将当前文本发送给本地 AI 做结构化增强' : '提示词增强未启用' }}</span>
-          </div>
-          <n-button
-            size="tiny"
-            :type="enhanceEnabled ? 'info' : 'warning'"
-            secondary
-            :disabled="submitting || (enhanceEnabled && !canEnhance)"
-            @click="handleEnhanceClick"
-          >
-            <template #icon>
-              <div :class="enhanceEnabled ? 'i-carbon-magic-wand' : 'i-carbon-launch'" />
-            </template>
-            {{ enhanceEnabled ? '本地增强' : '启用增强' }}
-          </n-button>
-        </div>
+        <!-- 中文注释：原「提示词增强入口」行与底部操作栏的「本地增强」按钮功能完全重复
+             （两者都走 McpPopup 的 handleEnhance），保留底部唯一入口，此处移除以减少视觉噪音 -->
 
         <!-- 文本输入框 -->
         <n-input
