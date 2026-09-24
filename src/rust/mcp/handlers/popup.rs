@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::fs;
-use std::process::Command;
+use std::process::{Output, Stdio};
 use std::time::Instant;
 
 // 复用公共 UI 启动器模块，消除与 icon_popup.rs 的重复代码
@@ -9,13 +9,43 @@ use crate::mcp::types::PopupRequest;
 use crate::mcp::utils::safe_truncate_clean;
 use crate::{log_debug, log_important};
 
-/// 创建 Tauri 弹窗
+/// 创建 Tauri 弹窗（同步）
 ///
-/// 优先调用与 MCP 服务器同目录的 UI 命令，找不到时使用全局版本
+/// 供 CLI / 设置页测试弹窗使用。MCP `zhi` 请走异步版本，避免阻塞运行时导致无法发送 progress。
 pub fn create_tauri_popup(request: &PopupRequest) -> Result<String> {
     let start = Instant::now();
+    let (command_path, temp_file) = prepare_popup_request(request)?;
 
-    // 创建临时请求文件 - 跨平台适配
+    let output = std::process::Command::new(&command_path)
+        .arg("--mcp-request")
+        .arg(temp_file.to_string_lossy().to_string())
+        .output();
+
+    let _ = fs::remove_file(&temp_file);
+    interpret_gui_output(&request.id, output?, start.elapsed().as_millis())
+}
+
+/// 创建 Tauri 弹窗（异步）
+///
+/// 中文说明：用 tokio 等待 GUI，方便 MCP 侧在等待期间发送 progress 心跳。
+pub async fn create_tauri_popup_async(request: &PopupRequest) -> Result<String> {
+    let start = Instant::now();
+    let (command_path, temp_file) = prepare_popup_request(request)?;
+
+    // 中文说明：切断 stdin，避免 GUI 占用 MCP 的 stdio 管道导致心跳发不出去。
+    let output = tokio::process::Command::new(&command_path)
+        .arg("--mcp-request")
+        .arg(temp_file.to_string_lossy().to_string())
+        .stdin(Stdio::null())
+        .output()
+        .await;
+
+    let _ = fs::remove_file(&temp_file);
+    interpret_gui_output(&request.id, output?, start.elapsed().as_millis())
+}
+
+/// 写入临时请求文件并解析 GUI 命令路径
+fn prepare_popup_request(request: &PopupRequest) -> Result<(String, std::path::PathBuf)> {
     let temp_dir = std::env::temp_dir();
     let temp_file = temp_dir.join(format!("mcp_request_{}.json", request.id));
     let request_json = serde_json::to_string_pretty(request)?;
@@ -33,25 +63,17 @@ pub fn create_tauri_popup(request: &PopupRequest) -> Result<String> {
         request.is_markdown
     );
 
-    // 尝试找到等一下命令的路径
     let command_path = find_ui_command()?;
-
     log_debug!(
         "[popup] 准备调用GUI进程: request_id={}, command_path={}",
         request.id,
         command_path
     );
+    Ok((command_path, temp_file))
+}
 
-    // 调用等一下命令
-    let output = Command::new(&command_path)
-        .arg("--mcp-request")
-        .arg(temp_file.to_string_lossy().to_string())
-        .output()?;
-
-    // 清理临时文件
-    let _ = fs::remove_file(&temp_file);
-
-    let elapsed_ms = start.elapsed().as_millis();
+/// 解析 GUI 进程 stdout/stderr
+fn interpret_gui_output(request_id: &str, output: Output, elapsed_ms: u128) -> Result<String> {
     let exit_code = output.status.code();
     let stdout_len = output.stdout.len();
     let stderr_len = output.stderr.len();
@@ -63,7 +85,7 @@ pub fn create_tauri_popup(request: &PopupRequest) -> Result<String> {
         log_important!(
             info,
             "[popup] GUI执行成功: request_id={}, exit_code={:?}, stdout_len={}, stderr_len={}, elapsed_ms={}",
-            request.id,
+            request_id,
             exit_code,
             stdout_len,
             stderr_len,
@@ -79,7 +101,7 @@ pub fn create_tauri_popup(request: &PopupRequest) -> Result<String> {
         log_important!(
             error,
             "[popup] GUI执行失败: request_id={}, exit_code={:?}, stdout_len={}, stderr_len={}, stderr_preview={}, elapsed_ms={}",
-            request.id,
+            request_id,
             exit_code,
             stdout_len,
             stderr_len,

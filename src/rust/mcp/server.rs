@@ -2,7 +2,7 @@ use anyhow::Result;
 use rmcp::model::*;
 use rmcp::{
     model::ErrorData as McpError,
-    service::{RequestContext, ServerInitializeError},
+    service::{Peer, RequestContext, ServerInitializeError},
     transport::{async_rw::AsyncRwTransport, stdio, Transport},
     RoleServer, ServerHandler, ServiceExt,
 };
@@ -26,6 +26,19 @@ use crate::{log_debug, log_important};
 const WINDSURF_ZHI_ALIAS: &str = "work_note";
 const MCP_PROFILE_ENV: &str = "SANSHU_MCP_PROFILE";
 const MCP_SERVER_DISCOVER_METHOD: &str = "server/discover";
+
+/// 从 MCP 请求 meta 取出 progress token，供 zhi 等待弹窗时发心跳
+fn extract_zhi_progress_sink(
+    context: &RequestContext<RoleServer>,
+) -> Option<(Peer<RoleServer>, ProgressToken)> {
+    let value = context
+        .meta
+        .get("progressToken")
+        .cloned()
+        .or_else(|| context.meta.get("progress_token").cloned())?;
+    let token = serde_json::from_value::<ProgressToken>(value).ok()?;
+    Some((context.peer.clone(), token))
+}
 
 /// 兼容会先探测新版生命周期、再回退旧版 initialize 的 MCP 客户端。
 struct DiscoverFallbackTransport<T> {
@@ -445,7 +458,7 @@ impl ServerHandler for ZhiServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParam,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let call_id = generate_request_id();
         let start = Instant::now();
@@ -494,7 +507,13 @@ impl ServerHandler for ZhiServer {
                 match serde_json::from_value::<ZhiRequest>(arguments_value) {
                     Ok(zhi_request) => {
                         // 调用三术工具（将 call_id 作为 request.id 贯穿到 GUI/响应）
-                        InteractionTool::zhi_with_request_id(zhi_request, call_id.clone()).await
+                        let progress = extract_zhi_progress_sink(&context);
+                        InteractionTool::zhi_with_request_id(
+                            zhi_request,
+                            call_id.clone(),
+                            progress,
+                        )
+                        .await
                     }
                     Err(e) => {
                         log_important!(
