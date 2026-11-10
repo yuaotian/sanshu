@@ -170,6 +170,9 @@ interface EmbeddingModelStatus {
   cuda_runtime_available?: boolean
   cuda_runtime_dir?: string
   cuda_runtime_error?: string
+  cuda_runtime_checked_dirs?: string[]
+  cuda_runtime_missing_files?: string[]
+  provider_restart_required?: boolean
   runtime_path?: string
   batch_size?: number
   intra_threads?: number
@@ -724,6 +727,15 @@ const embeddingRequestedProviderLabel = computed(() => {
   return formatProviderLabel(provider)
 })
 
+const embeddingCudaRuntimeSummary = computed(() => {
+  const status = embeddingModelStatus.value
+  if (!status)
+    return '未检测'
+  if (status.cuda_runtime_available)
+    return status.cuda_runtime_dir ? `${status.cuda_runtime_dir}（预检通过）` : '预检通过'
+  return status.cuda_runtime_dir ? `${status.cuda_runtime_dir}（预检失败）` : '未发现匹配目录'
+})
+
 const embeddingProviderTagType = computed<'default' | 'info' | 'success' | 'warning' | 'error'>(() => {
   if (embeddingModelStatus.value?.embedding_phase !== 'ready')
     return 'default'
@@ -765,7 +777,7 @@ const localIndexProgressPercent = computed(() => {
     return 0
   const total = status.semantic_indexed_chunks + status.semantic_pending_chunks
   if (total <= 0)
-    return status.semantic_state === 'ready' ? 100 : 0
+    return 0
   return Math.max(0, Math.min(100, status.semantic_indexed_chunks / total * 100))
 })
 
@@ -911,12 +923,33 @@ const localIndexEtaLabel = computed(() => {
   const status = localIndexStatus.value
   if (!status)
     return '--'
-  if (status.semantic_state === 'ready' || status.semantic_pending_chunks <= 0)
+  // 中文说明：空分块或缺失模型代表没有可估算任务，不能把 0/0 报告为已完成。
+  if (status.semantic_state === 'disabled')
+    return '语义索引已关闭'
+  if (status.semantic_state === 'missing')
+    return '待建立'
+  const total = status.semantic_indexed_chunks + status.semantic_pending_chunks
+  if (total <= 0)
+    return '不适用（无语义分块）'
+  if (status.semantic_state === 'ready' && status.semantic_pending_chunks <= 0)
     return '已完成'
   const rate = localIndexThroughputSummary.value.average || localIndexThroughput.value
   if (!rate || rate <= 0)
     return '等待采样'
   return formatElapsed(status.semantic_pending_chunks / rate * 1000)
+})
+
+const localSemanticProgressDescription = computed(() => {
+  const status = localIndexStatus.value
+  if (!status)
+    return ''
+  if (status.semantic_state === 'missing')
+    return 'BGE 向量尚未建立；Local FTS5 仍可用'
+  if (status.semantic_state === 'disabled')
+    return '语义索引已关闭；Local FTS5 仍可用'
+  if (status.semantic_state === 'ready' && status.semantic_indexed_chunks === 0)
+    return '当前没有可持久化的语义分块'
+  return '已持久化向量分块'
 })
 
 const embeddingIntegrityLabel = computed(() => {
@@ -2025,7 +2058,7 @@ function projectOptionLabel(status: ProjectIndexStatus): string {
     : ''
   const stale = status.is_stale && status.status !== 'indexing' ? ' · 待重建' : ''
   const partial = status.is_partial ? ' · 部分可用' : ''
-  return `${getProjectName(status.project_root)} · ${projectStatusLabel[status.status] || '未知'}${progress} · ${indexed}/${total} 文件${partial}${stale}`
+  return `${getProjectName(status.project_root)} · ACE 文件索引 ${projectStatusLabel[status.status] || '未知'}${progress} · ${indexed}/${total} 文件${partial}${stale}`
 }
 
 /** 加载调试用项目选择列表；数据源与索引管理页保持一致。 */
@@ -2729,7 +2762,7 @@ defineExpose({ saveConfig })
                       </div>
                       <template #feedback>
                         <span v-if="localIndexStatus" class="form-feedback">
-                          {{ localIndexStatus.project_root }} · {{ localIndexStatus.is_workspace ? `${localIndexStatus.project_count} 个独立项目联合检索` : `${localIndexStatus.indexed_files} 文件 / ${localIndexStatus.indexed_chunks} 分块` }}
+                          Local FTS5/BGE · {{ localIndexStatus.project_root }} · {{ localIndexStatus.is_workspace ? `${localIndexStatus.project_count} 个独立项目联合检索` : `${localIndexStatus.indexed_files} 文件 / ${localIndexStatus.indexed_chunks} 分块` }}
                         </span>
                         <span v-else class="form-feedback">索引管理中的项目会在此列出，也可以切换为手动输入。</span>
                         <span v-if="debugProjectOptionsReadError" class="form-feedback sou-warning-text">
@@ -2739,7 +2772,7 @@ defineExpose({ saveConfig })
                     </n-form-item>
                   </n-grid-item>
                   <n-grid-item>
-                    <n-form-item label="索引状态">
+                    <n-form-item label="Local FTS5 状态">
                       <n-space align="center">
                         <n-tag :type="localIndexTagType" :bordered="false">
                           {{ localIndexStateLabel }}
@@ -2751,7 +2784,7 @@ defineExpose({ saveConfig })
                     </n-form-item>
                   </n-grid-item>
                   <n-grid-item>
-                    <n-form-item label="语义状态">
+                    <n-form-item label="Local BGE 状态">
                       <n-space align="center">
                         <n-tag :type="semanticTagType" :bordered="false">
                           {{ semanticStateLabel }}
@@ -2799,10 +2832,10 @@ defineExpose({ saveConfig })
                   <div class="sou-panel-header">
                     <div>
                       <div class="sou-panel-title">
-                        语义索引进度
+                        Local BGE 语义索引进度
                       </div>
                       <div class="form-feedback">
-                        {{ localIndexTaskActive ? '正在构建，状态每秒刷新' : (localIndexStatus.semantic_last_error || '已持久化向量分块') }}
+                        {{ localIndexTaskActive ? '正在构建，状态每秒刷新' : (localIndexStatus.semantic_last_error || localSemanticProgressDescription) }}
                       </div>
                     </div>
                     <strong class="sou-panel-value tabular-nums">{{ formatProgressPercent(localIndexProgressPercent) }}</strong>
@@ -2827,12 +2860,6 @@ defineExpose({ saveConfig })
                   <div class="form-feedback">
                     推理设备：{{ formatProviderLabel(localIndexStatus.semantic_execution_provider || 'cpu') }} · 请求 {{ formatProviderLabel(localIndexStatus.semantic_requested_provider || config.sou_embedding_provider) }} · batch {{ localIndexStatus.semantic_batch_size || 64 }} · intra_threads {{ localIndexStatus.semantic_intra_threads || '默认' }}
                   </div>
-                  <n-alert v-if="localIndexStatus.semantic_provider_fallback_reason" type="warning" :bordered="false">
-                    {{ localIndexStatus.semantic_provider_fallback_reason }}
-                  </n-alert>
-                  <n-alert v-if="localIndexStatus.semantic_cuda_runtime_error" type="warning" :bordered="false">
-                    CUDA 依赖预检失败：{{ localIndexStatus.semantic_cuda_runtime_error }}
-                  </n-alert>
                   <div class="sou-history-line">
                     预计剩余：{{ localIndexEtaLabel }}
                   </div>
@@ -2853,7 +2880,7 @@ defineExpose({ saveConfig })
                     </div>
                     <n-space align="center" :wrap="true">
                       <n-tag :type="embeddingModelStatus?.runtime_ready ? 'success' : 'warning'" :bordered="false">
-                        ORT 资产{{ embeddingModelStatus?.runtime_ready ? '齐备' : '未齐备' }}
+                        ORT 运行时资产{{ embeddingModelStatus?.runtime_ready ? '齐备' : '未齐备' }}
                       </n-tag>
                       <n-tag :type="embeddingTagType" :bordered="false">
                         {{ embeddingPhaseLabel }}
@@ -2862,7 +2889,7 @@ defineExpose({ saveConfig })
                         {{ embeddingExecutionProviderLabel }}
                       </n-tag>
                       <n-tag :type="embeddingIntegrityTagType" :bordered="false">
-                        {{ embeddingIntegrityLabel }}
+                        完整性：{{ embeddingIntegrityLabel }}
                       </n-tag>
                     </n-space>
                   </div>
@@ -2876,7 +2903,7 @@ defineExpose({ saveConfig })
                     <span class="whitespace-nowrap tabular-nums">{{ formatProgressPercent(embeddingModelStatus?.progress_percent) }}</span>
                   </n-progress>
                   <div class="sou-metrics">
-                    <span class="tabular-nums">进度 {{ formatProgressPercent(embeddingModelStatus?.progress_percent) }}</span>
+                    <span class="tabular-nums">资产进度 {{ formatProgressPercent(embeddingModelStatus?.progress_percent) }}</span>
                     <span>总计 {{ formatBytes(embeddingModelStatus?.downloaded_bytes || 0) }} / {{ formatBytes(embeddingModelStatus?.total_bytes || 0) }}</span>
                     <span>BGE {{ formatBytes(embeddingModelStatus?.model_downloaded_bytes || 0) }} / {{ formatBytes(embeddingModelStatus?.model_total_bytes || 0) }}</span>
                     <span>ORT {{ formatBytes(embeddingModelStatus?.runtime_downloaded_bytes || 0) }} / {{ formatBytes(embeddingModelStatus?.runtime_total_bytes || 0) }}</span>
@@ -2896,8 +2923,17 @@ defineExpose({ saveConfig })
                     推理设备：{{ embeddingExecutionProviderLabel }} · 请求 {{ embeddingRequestedProviderLabel }} · batch {{ embeddingModelStatus?.batch_size || 64 }} · intra_threads {{ embeddingModelStatus?.intra_threads || '默认' }}
                   </div>
                   <div class="form-feedback">
-                    CUDA 运行时：{{ embeddingModelStatus?.cuda_runtime_available ? (embeddingModelStatus?.cuda_runtime_dir || '预检通过') : (embeddingModelStatus?.cuda_runtime_dir ? `${embeddingModelStatus.cuda_runtime_dir}（预检失败）` : '未发现') }}
+                    CUDA 运行时：{{ embeddingCudaRuntimeSummary }}
                   </div>
+                  <div v-if="embeddingModelStatus?.cuda_runtime_missing_files?.length" class="form-feedback">
+                    CUDA 缺少文件：{{ embeddingModelStatus.cuda_runtime_missing_files.join('、') }}
+                  </div>
+                  <div v-if="embeddingModelStatus?.cuda_runtime_checked_dirs?.length && !embeddingModelStatus.cuda_runtime_available" class="form-feedback">
+                    已检查目录：{{ embeddingModelStatus.cuda_runtime_checked_dirs.join('；') }}
+                  </div>
+                  <n-alert v-if="embeddingModelStatus?.provider_restart_required" type="warning" :bordered="false">
+                    provider 配置已变更；请重启 Sanshu 后重新加载模型。
+                  </n-alert>
                   <n-alert v-if="embeddingModelStatus?.provider_fallback_reason" type="warning" :bordered="false">
                     {{ embeddingModelStatus.provider_fallback_reason }}
                   </n-alert>

@@ -184,6 +184,9 @@ pub struct LocalIndexStatus {
     pub semantic_cuda_runtime_available: bool,
     pub semantic_cuda_runtime_dir: Option<String>,
     pub semantic_cuda_runtime_error: Option<String>,
+    pub semantic_cuda_runtime_checked_dirs: Vec<String>,
+    pub semantic_cuda_runtime_missing_files: Vec<String>,
+    pub semantic_provider_restart_required: bool,
     pub semantic_batch_size: usize,
     pub semantic_intra_threads: Option<usize>,
 }
@@ -346,6 +349,13 @@ impl ProjectIndex {
                 .as_deref()
                 .map(normalize_path),
             semantic_cuda_runtime_error: embedding_snapshot.cuda_runtime_error,
+            semantic_cuda_runtime_checked_dirs: embedding_snapshot
+                .cuda_runtime_checked_dirs
+                .iter()
+                .map(|value| normalize_path(value))
+                .collect(),
+            semantic_cuda_runtime_missing_files: embedding_snapshot.cuda_runtime_missing_files,
+            semantic_provider_restart_required: embedding_snapshot.provider_restart_required,
             semantic_batch_size: embedding_snapshot.batch_size,
             semantic_intra_threads: embedding_snapshot.intra_threads,
         }
@@ -1073,6 +1083,13 @@ fn aggregate_workspace_status(
             .as_deref()
             .map(normalize_path),
         semantic_cuda_runtime_error: embedding_snapshot.cuda_runtime_error,
+        semantic_cuda_runtime_checked_dirs: embedding_snapshot
+            .cuda_runtime_checked_dirs
+            .iter()
+            .map(|value| normalize_path(value))
+            .collect(),
+        semantic_cuda_runtime_missing_files: embedding_snapshot.cuda_runtime_missing_files,
+        semantic_provider_restart_required: embedding_snapshot.provider_restart_required,
         semantic_batch_size: embedding_snapshot.batch_size,
         semantic_intra_threads: embedding_snapshot.intra_threads,
     })

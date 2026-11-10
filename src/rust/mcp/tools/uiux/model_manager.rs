@@ -115,6 +115,12 @@ pub struct UiuxModelStatus {
     #[serde(default)]
     pub cuda_runtime_error: Option<String>,
     #[serde(default)]
+    pub cuda_runtime_checked_dirs: Vec<String>,
+    #[serde(default)]
+    pub cuda_runtime_missing_files: Vec<String>,
+    #[serde(default)]
+    pub provider_restart_required: bool,
+    #[serde(default)]
     pub runtime_path: Option<String>,
     #[serde(default)]
     pub batch_size: usize,
@@ -1155,6 +1161,13 @@ fn status_for(directory: &Path, phase: &str, message: &str) -> UiuxModelStatus {
             .cuda_runtime_dir
             .map(|value| value.to_string_lossy().to_string()),
         cuda_runtime_error: embedding_snapshot.cuda_runtime_error,
+        cuda_runtime_checked_dirs: embedding_snapshot
+            .cuda_runtime_checked_dirs
+            .iter()
+            .map(|value| value.to_string_lossy().to_string())
+            .collect(),
+        cuda_runtime_missing_files: embedding_snapshot.cuda_runtime_missing_files,
+        provider_restart_required: embedding_snapshot.provider_restart_required,
         runtime_path: embedding_snapshot
             .runtime_path
             .map(|value| value.to_string_lossy().to_string()),

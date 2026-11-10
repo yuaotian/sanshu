@@ -97,6 +97,9 @@ export interface LocalIndexStatus {
   semantic_cuda_runtime_available?: boolean
   semantic_cuda_runtime_dir?: string
   semantic_cuda_runtime_error?: string
+  semantic_cuda_runtime_checked_dirs?: string[]
+  semantic_cuda_runtime_missing_files?: string[]
+  semantic_provider_restart_required?: boolean
   semantic_batch_size?: number
   semantic_intra_threads?: number
 }

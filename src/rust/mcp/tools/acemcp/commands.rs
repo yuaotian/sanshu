@@ -1775,6 +1775,9 @@ pub struct LocalEmbeddingModelStatus {
     pub cuda_runtime_available: bool,
     pub cuda_runtime_dir: Option<String>,
     pub cuda_runtime_error: Option<String>,
+    pub cuda_runtime_checked_dirs: Vec<String>,
+    pub cuda_runtime_missing_files: Vec<String>,
+    pub provider_restart_required: bool,
     pub runtime_path: Option<String>,
     pub batch_size: usize,
     pub intra_threads: Option<usize>,
@@ -1864,6 +1867,13 @@ pub fn get_local_embedding_model_status(
             .cuda_runtime_dir
             .map(|value| value.to_string_lossy().to_string()),
         cuda_runtime_error: snapshot.cuda_runtime_error,
+        cuda_runtime_checked_dirs: snapshot
+            .cuda_runtime_checked_dirs
+            .iter()
+            .map(|value| value.to_string_lossy().to_string())
+            .collect(),
+        cuda_runtime_missing_files: snapshot.cuda_runtime_missing_files,
+        provider_restart_required: snapshot.provider_restart_required,
         runtime_path: snapshot
             .runtime_path
             .map(|value| value.to_string_lossy().to_string()),

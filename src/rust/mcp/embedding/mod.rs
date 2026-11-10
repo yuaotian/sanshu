@@ -96,6 +96,10 @@ pub struct CudaRuntimeStatus {
     pub directory: Option<PathBuf>,
     /// provider DLL 或其依赖加载失败的具体原因。
     pub error: Option<String>,
+    /// 本次预检检查过的 CUDA 运行时目录，便于界面解释“未发现”的范围。
+    pub checked_directories: Vec<PathBuf>,
+    /// 候选目录中缺失的固定 DLL 名称；provider 已找到但加载失败时为空。
+    pub missing_files: Vec<String>,
 }
 
 impl CudaRuntimeStatus {
@@ -151,6 +155,9 @@ pub struct RuntimeSnapshot {
     pub cuda_runtime_available: bool,
     pub cuda_runtime_dir: Option<PathBuf>,
     pub cuda_runtime_error: Option<String>,
+    pub cuda_runtime_checked_dirs: Vec<PathBuf>,
+    pub cuda_runtime_missing_files: Vec<String>,
+    pub provider_restart_required: bool,
     pub runtime_path: Option<PathBuf>,
     pub batch_size: usize,
     pub intra_threads: Option<usize>,
@@ -302,11 +309,11 @@ fn cuda_runtime_assets_have_expected_sizes(directory: &Path) -> bool {
         })
 }
 
-/// 只检查候选目录中的固定文件，真正的依赖加载由 `cuda_runtime_status` 负责。
-fn cuda_runtime_candidate_dir() -> Option<PathBuf> {
+/// 返回环境变量与应用运行时目录中的 CUDA 候选路径，真正的文件与依赖加载由状态函数负责。
+fn cuda_runtime_candidates() -> Vec<PathBuf> {
     #[cfg(not(feature = "cuda"))]
     {
-        return None;
+        return Vec::new();
     }
 
     #[cfg(feature = "cuda")]
@@ -328,6 +335,18 @@ fn cuda_runtime_candidate_dir() -> Option<PathBuf> {
             candidates.push(directory.join("lib"));
         }
         candidates
+    }
+}
+
+fn cuda_runtime_candidate_dir() -> Option<PathBuf> {
+    #[cfg(not(feature = "cuda"))]
+    {
+        None
+    }
+
+    #[cfg(feature = "cuda")]
+    {
+        cuda_runtime_candidates()
             .into_iter()
             .find(|directory| cuda_runtime_assets_have_expected_sizes(directory))
     }
@@ -341,11 +360,18 @@ pub fn cuda_runtime_dir() -> Option<PathBuf> {
 /// 预加载 CUDA provider，让 Windows loader 同时校验 provider 及其依赖 DLL。
 /// 结果短暂缓存，避免 UI 状态轮询每秒重复触发 LoadLibrary。
 pub fn cuda_runtime_status() -> CudaRuntimeStatus {
+    let checked_directories = cuda_runtime_candidates();
     let directory = cuda_runtime_candidate_dir();
     let Some(directory) = directory else {
         return CudaRuntimeStatus {
             directory: None,
             error: None,
+            checked_directories,
+            missing_files: vec![
+                ORT_DLL_FILE_NAME.to_string(),
+                #[cfg(feature = "cuda")]
+                CUDA_PROVIDER_DLL_FILE_NAME.to_string(),
+            ],
         };
     };
 
@@ -361,10 +387,14 @@ pub fn cuda_runtime_status() -> CudaRuntimeStatus {
             Ok(()) => CudaRuntimeStatus {
                 directory: Some(directory),
                 error: None,
+                checked_directories,
+                missing_files: Vec::new(),
             },
             Err(error) => CudaRuntimeStatus {
                 directory: Some(directory),
                 error: Some(error),
+                checked_directories,
+                missing_files: Vec::new(),
             },
         };
         *cache = Some(CudaPreflightCache {
@@ -377,6 +407,8 @@ pub fn cuda_runtime_status() -> CudaRuntimeStatus {
     CudaRuntimeStatus {
         directory: Some(directory.clone()),
         error: Some("CUDA 运行时预检缓存锁不可用".to_string()),
+        checked_directories,
+        missing_files: Vec::new(),
     }
 }
 
@@ -456,6 +488,9 @@ fn snapshot_with_availability(
                 cuda_runtime_available,
                 cuda_runtime_dir: availability.cuda.directory.clone(),
                 cuda_runtime_error: availability.cuda.error.clone(),
+                cuda_runtime_checked_dirs: availability.cuda.checked_directories.clone(),
+                cuda_runtime_missing_files: availability.cuda.missing_files.clone(),
+                provider_restart_required: provider_changed,
                 runtime_path: runtime.runtime_path.clone(),
                 batch_size: runtime.batch_size,
                 intra_threads: runtime.intra_threads,
@@ -476,6 +511,9 @@ fn snapshot_with_availability(
             cuda_runtime_available,
             cuda_runtime_dir: availability.cuda.directory.clone(),
             cuda_runtime_error: availability.cuda.error.clone(),
+            cuda_runtime_checked_dirs: availability.cuda.checked_directories.clone(),
+            cuda_runtime_missing_files: availability.cuda.missing_files.clone(),
+            provider_restart_required: false,
             runtime_path: None,
             batch_size: CPU_DEFAULT_BATCH_SIZE,
             intra_threads: None,
@@ -495,6 +533,9 @@ fn snapshot_with_availability(
             cuda_runtime_available,
             cuda_runtime_dir: availability.cuda.directory.clone(),
             cuda_runtime_error: availability.cuda.error.clone(),
+            cuda_runtime_checked_dirs: availability.cuda.checked_directories.clone(),
+            cuda_runtime_missing_files: availability.cuda.missing_files.clone(),
+            provider_restart_required: false,
             runtime_path: None,
             batch_size: CPU_DEFAULT_BATCH_SIZE,
             intra_threads: None,
