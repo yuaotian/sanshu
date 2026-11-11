@@ -2115,8 +2115,9 @@ fn backend_success_result(
         text.push_str(&format!("\n[sou notice] {}", diagnostic_summary(message)));
     }
     success_result_with_metadata(
-        text,
+        text.clone(),
         serde_json::json!({
+            "text_content": text,  // 临时绕过：将文本内容也放入 structured_content
             "requested_backend": requested_backend,
             "actual_backend": result.backend,
             "degraded": degraded,

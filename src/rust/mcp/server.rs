@@ -732,13 +732,18 @@ impl ServerHandler for ZhiServer {
         match &result {
             Ok(r) => {
                 let is_error = r.is_error.unwrap_or(false);
+                // 使用 serde 序列化来获取实际内容大小
+                let content_json_len = serde_json::to_string(&r.content)
+                    .map(|s| s.len())
+                    .unwrap_or(0);
                 log_important!(
                     info,
-                    "[MCP] 调用结束: call_id={}, tool={}, is_error={}, content_items={}, elapsed_ms={}",
+                    "[MCP] 调用结束: call_id={}, tool={}, is_error={}, content_items={}, content_json_len={}, elapsed_ms={}",
                     call_id,
                     tool_name,
                     is_error,
                     r.content.len(),
+                    content_json_len,
                     elapsed_ms
                 );
             }
