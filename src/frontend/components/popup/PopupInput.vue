@@ -44,6 +44,11 @@ const selectedOptions = ref<string[]>([])
 const uploadedImages = ref<string[]>([])
 const textareaRef = ref<any | null>(null)
 
+// 自定义选项相关状态
+const customOptionInput = ref('')
+const showCustomInput = ref(false)
+const hoveringOption = ref<string | null>(null)
+
 // 自定义prompt相关状态
 const customPrompts = ref<CustomPrompt[]>([])
 const customPromptEnabled = ref(true)
@@ -278,6 +283,65 @@ function handleOptionToggle(option: string) {
   else {
     selectedOptions.value.push(option)
   }
+  emitUpdate()
+}
+
+// 复制单个选项
+async function copyOption(option: string) {
+  try {
+    await navigator.clipboard.writeText(option)
+    message.success('已复制')
+  }
+  catch (error) {
+    console.error('复制失败:', error)
+    message.error('复制失败')
+  }
+}
+
+// 复制选中的选项（换行分隔）
+async function copySelectedOptions() {
+  if (selectedOptions.value.length === 0) {
+    message.warning('请先选择选项')
+    return
+  }
+  try {
+    const text = selectedOptions.value.join('\n')
+    await navigator.clipboard.writeText(text)
+    message.success(`已复制 ${selectedOptions.value.length} 个选项`)
+  }
+  catch (error) {
+    console.error('复制失败:', error)
+    message.error('复制失败')
+  }
+}
+
+// 全选选项
+function selectAllOptions() {
+  if (!props.request?.predefined_options)
+    return
+  selectedOptions.value = [...props.request.predefined_options]
+  emitUpdate()
+}
+
+// 添加自定义选项
+function addCustomOption() {
+  const trimmed = customOptionInput.value.trim()
+  if (!trimmed) {
+    message.warning('请输入自定义选项内容')
+    return
+  }
+
+  // 检查是否已存在
+  if (props.request?.predefined_options?.includes(trimmed) || selectedOptions.value.includes(trimmed)) {
+    message.warning('该选项已存在')
+    return
+  }
+
+  // 添加到选中列表
+  selectedOptions.value.push(trimmed)
+  customOptionInput.value = ''
+  showCustomInput.value = false
+  message.success('自定义选项已添加')
   emitUpdate()
 }
 
@@ -760,32 +824,135 @@ defineExpose({
   <div class="space-y-3">
     <!-- 预定义选项 -->
     <div v-if="!loading && hasOptions" class="space-y-3" data-guide="predefined-options">
-      <h4 class="text-sm font-medium text-on-surface">
-        请选择选项
-      </h4>
+      <!-- 顶部工具栏 -->
+      <div class="flex items-center justify-between gap-3 pb-2 border-b border-gray-600">
+        <div class="flex items-center gap-2 text-sm text-on-surface-secondary">
+          <div class="i-carbon-checkbox-checked w-4 h-4" />
+          <span v-if="selectedOptions.length > 0" class="font-medium text-on-surface">
+            已选 {{ selectedOptions.length }}/{{ request!.predefined_options!.length }} 项
+          </span>
+          <span v-else>请选择选项</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <n-button
+            size="small"
+            secondary
+            :disabled="submitting"
+            @click="selectAllOptions"
+          >
+            <template #icon>
+              <div class="i-carbon-checkbox-checked w-4 h-4" />
+            </template>
+            全选
+          </n-button>
+          <n-button
+            size="small"
+            secondary
+            :disabled="submitting || selectedOptions.length === 0"
+            @click="copySelectedOptions"
+          >
+            <template #icon>
+              <div class="i-carbon-copy w-4 h-4" />
+            </template>
+            复制选中
+          </n-button>
+          <n-button
+            size="small"
+            secondary
+            :disabled="submitting"
+            @click="showCustomInput = !showCustomInput"
+          >
+            <template #icon>
+              <div class="i-carbon-add w-4 h-4" />
+            </template>
+            自定义
+          </n-button>
+        </div>
+      </div>
+
+      <!-- 选项列表 -->
       <n-space vertical size="small">
-        <!-- 中文注释：补齐选中态（primary 边框 + 浅色底），hover 改为提升背景而非降低不透明度，避免反直觉的对比度下降 -->
+        <!-- 中文注释：优化选中态视觉（✓图标 + primary 边框 + 浅色背景），hover 显示复制按钮 -->
         <div
           v-for="(option, index) in request!.predefined_options"
           :key="`option-${index}`"
-          class="rounded-lg p-3 border cursor-pointer transition-colors duration-150"
+          class="group relative rounded-lg p-3 border cursor-pointer transition-all duration-150"
           :class="selectedOptions.includes(option)
-            ? 'border-primary-500 bg-primary-500/10'
-            : 'border-gray-600 bg-container-secondary hover:border-gray-500 hover:bg-container-tertiary'"
+            ? 'border-primary-500 bg-primary-500/10 shadow-sm'
+            : 'border-gray-600 bg-container-secondary hover:border-gray-500 hover:bg-container-tertiary hover:shadow-sm'"
+          @mouseenter="hoveringOption = option"
+          @mouseleave="hoveringOption = null"
           @click="handleOptionToggle(option)"
         >
-          <n-checkbox
-            :value="option"
-            :checked="selectedOptions.includes(option)"
-            :disabled="submitting"
-            size="medium"
-            @update:checked="(checked: boolean) => handleOptionChange(option, checked)"
-            @click.stop
-          >
-            {{ option }}
-          </n-checkbox>
+          <div class="flex items-center justify-between gap-2">
+            <n-checkbox
+              :value="option"
+              :checked="selectedOptions.includes(option)"
+              :disabled="submitting"
+              size="medium"
+              @update:checked="(checked: boolean) => handleOptionChange(option, checked)"
+              @click.stop
+            >
+              <span class="select-text">{{ option }}</span>
+            </n-checkbox>
+
+            <!-- hover 时显示的复制按钮 -->
+            <n-button
+              v-show="hoveringOption === option"
+              size="tiny"
+              text
+              class="opacity-0 group-hover:opacity-100 transition-opacity"
+              :disabled="submitting"
+              @click.stop="copyOption(option)"
+            >
+              <template #icon>
+                <div class="i-carbon-copy w-3.5 h-3.5" />
+              </template>
+            </n-button>
+          </div>
         </div>
       </n-space>
+
+      <!-- 自定义选项输入区域（展开式） -->
+      <div
+        v-if="showCustomInput"
+        class="p-3 border border-primary-500 bg-primary-500/5 rounded-lg space-y-2 animate-fade-in"
+      >
+        <div class="flex items-center gap-2 text-sm text-on-surface-secondary mb-2">
+          <div class="i-carbon-add-alt w-4 h-4" />
+          <span>添加自定义选项</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <n-input
+            v-model:value="customOptionInput"
+            size="small"
+            placeholder="输入自定义选项内容..."
+            :disabled="submitting"
+            @keyup.enter="addCustomOption"
+          />
+          <n-button
+            size="small"
+            type="primary"
+            :disabled="submitting || !customOptionInput.trim()"
+            @click="addCustomOption"
+          >
+            <template #icon>
+              <div class="i-carbon-checkmark w-4 h-4" />
+            </template>
+            添加
+          </n-button>
+          <n-button
+            size="small"
+            quaternary
+            :disabled="submitting"
+            @click="showCustomInput = false; customOptionInput = ''"
+          >
+            <template #icon>
+              <div class="i-carbon-close w-4 h-4" />
+            </template>
+          </n-button>
+        </div>
+      </div>
     </div>
 
     <!-- 图片预览区域 -->
@@ -1066,5 +1233,21 @@ defineExpose({
 .sortable-drag {
   opacity: 0.8;
   transform: rotate(5deg);
+}
+
+/* 自定义选项输入区域淡入动画 */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.2s ease-out;
 }
 </style>
